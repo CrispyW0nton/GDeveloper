@@ -226,24 +226,39 @@ export class ClaudeProvider implements ILLMProvider {
     return Math.ceil(text.length / 4);
   }
 
-  async validateKey(): Promise<boolean> {
+  async validateKey(): Promise<{ valid: boolean; error?: string }> {
     try {
-      const response = await fetch(`${this.baseUrl}/v1/messages`, {
-        method: 'POST',
+      const response = await fetch(`${this.baseUrl}/v1/models`, {
+        method: 'GET',
         headers: {
-          'Content-Type': 'application/json',
           'x-api-key': this.apiKey,
           'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: this.model,
-          max_tokens: 10,
-          messages: [{ role: 'user', content: 'Hi' }]
-        })
+        }
       });
-      return response.ok;
-    } catch {
-      return false;
+
+      if (response.ok) {
+        return { valid: true };
+      }
+
+      const bodyText = await response.text().catch(() => '');
+
+      switch (response.status) {
+        case 401:
+          return { valid: false, error: 'Invalid API key. Check that your key starts with sk-ant- and has not been revoked.' };
+        case 403:
+          return { valid: false, error: 'API key lacks required permissions. Ensure the key has access to the Messages API.' };
+        case 402:
+          // Key is valid but account has billing issues
+          return { valid: true, error: 'Warning: Your account may have insufficient credits. The key is valid but API calls may fail until billing is resolved.' };
+        case 429:
+          // Rate-limited but the key itself is valid
+          return { valid: true, error: 'Warning: Rate limited. The key is valid but you are being rate-limited. Wait a moment before making requests.' };
+        default:
+          return { valid: false, error: `Anthropic API returned ${response.status}: ${bodyText.slice(0, 200)}` };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { valid: false, error: `Connection error: ${msg}. Check your network and that api.anthropic.com is reachable.` };
     }
   }
 }

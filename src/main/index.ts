@@ -109,10 +109,21 @@ function registerIPCHandlers(): void {
     try {
       if (provider === 'claude') {
         const claude = new ClaudeProvider(key);
-        const valid = await claude.validateKey();
-        return { valid, error: valid ? null : 'Invalid API key' };
+        const result = await claude.validateKey();
+        if (result.valid) {
+          // Store the key and register the provider on successful validation
+          settings.setApiKey(provider, key);
+          providerRegistry.register(claude);
+          db.logActivity('system', 'api_key_validated', `API key validated for ${provider}`, '', { provider });
+        }
+        return result;
       }
-      return { valid: key.length > 10, error: null };
+      // Generic provider: basic length check
+      const valid = key.length > 10;
+      if (valid) {
+        settings.setApiKey(provider, key);
+      }
+      return { valid, error: valid ? undefined : 'API key is too short' };
     } catch (err) {
       return { valid: false, error: err instanceof Error ? err.message : 'Validation failed' };
     }
