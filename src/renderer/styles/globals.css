@@ -1,0 +1,366 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --matrix-green: #00ff41;
+  --matrix-green-dim: #00cc33;
+  --matrix-green-dark: #009926;
+  --matrix-green-darker: #006b1a;
+  --matrix-bg: #0a0a0a;
+  --matrix-bg-light: #0d120d;
+  --matrix-bg-card: #0a150a;
+  --matrix-bg-hover: #0f1f0f;
+  --matrix-border: #003300;
+  --matrix-border-bright: #00ff41;
+  --matrix-text: #00ff41;
+  --matrix-text-dim: #00cc33;
+  --matrix-text-muted: #33cc33;
+  --matrix-accent: #00ff41;
+  --matrix-danger: #ff0040;
+  --matrix-warning: #ccff00;
+  --matrix-info: #00ccff;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--matrix-bg);
+  color: var(--matrix-text);
+  font-family: 'Share Tech Mono', 'Fira Code', Consolas, monospace;
+}
+
+/* ─── Video Background ─── */
+.video-background {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: 0;
+  opacity: 0.12;
+  pointer-events: none;
+  filter: hue-rotate(0deg) saturate(1.5);
+}
+
+/* ─── CRT Scanline Overlay ─── */
+.crt-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 2px,
+    rgba(0, 255, 65, 0.015) 2px,
+    rgba(0, 255, 65, 0.015) 4px
+  );
+}
+
+/* ─── App Container ─── */
+.app-container {
+  position: relative;
+  z-index: 2;
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ─── Glass Panel Effect ─── */
+.glass-panel {
+  background: rgba(10, 21, 10, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 255, 65, 0.15);
+  border-radius: 8px;
+}
+
+.glass-panel-solid {
+  background: rgba(10, 21, 10, 0.95);
+  border: 1px solid rgba(0, 255, 65, 0.2);
+  border-radius: 8px;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 51, 0, 0.2);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 255, 65, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 255, 65, 0.5);
+}
+
+/* ─── Selection ─── */
+::selection {
+  background: rgba(0, 255, 65, 0.3);
+  color: #fff;
+}
+
+/* ─── Matrix Button Styles ─── */
+.matrix-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid rgba(0, 255, 65, 0.3);
+  border-radius: 6px;
+  background: rgba(0, 255, 65, 0.05);
+  color: var(--matrix-green);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.matrix-btn:hover {
+  background: rgba(0, 255, 65, 0.15);
+  border-color: var(--matrix-green);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.2);
+}
+.matrix-btn:active {
+  transform: scale(0.98);
+}
+.matrix-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.matrix-btn-primary {
+  background: rgba(0, 255, 65, 0.15);
+  border-color: var(--matrix-green);
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.15);
+}
+.matrix-btn-primary:hover {
+  background: rgba(0, 255, 65, 0.25);
+  box-shadow: 0 0 15px rgba(0, 255, 65, 0.3);
+}
+
+.matrix-btn-danger {
+  border-color: rgba(255, 0, 64, 0.4);
+  color: var(--matrix-danger);
+  background: rgba(255, 0, 64, 0.05);
+}
+.matrix-btn-danger:hover {
+  background: rgba(255, 0, 64, 0.15);
+  border-color: var(--matrix-danger);
+  box-shadow: 0 0 10px rgba(255, 0, 64, 0.2);
+}
+
+/* ─── Matrix Input ─── */
+.matrix-input {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  background: rgba(0, 51, 0, 0.15);
+  border: 1px solid rgba(0, 255, 65, 0.2);
+  border-radius: 6px;
+  color: var(--matrix-green);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  outline: none;
+  transition: all 0.2s;
+}
+.matrix-input:focus {
+  border-color: var(--matrix-green);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.15);
+}
+.matrix-input::placeholder {
+  color: rgba(0, 204, 51, 0.3);
+}
+
+/* ─── Matrix Select ─── */
+.matrix-select {
+  appearance: none;
+  width: 100%;
+  padding: 0.5rem 2rem 0.5rem 0.75rem;
+  background: rgba(0, 51, 0, 0.15) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2300ff41' d='M6 8L1 3h10z'/%3E%3C/svg%3E") right 0.75rem center no-repeat;
+  border: 1px solid rgba(0, 255, 65, 0.2);
+  border-radius: 6px;
+  color: var(--matrix-green);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  outline: none;
+  cursor: pointer;
+}
+.matrix-select:focus {
+  border-color: var(--matrix-green);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.15);
+}
+
+/* ─── Status Badges ─── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.badge-executing { background: rgba(0, 255, 65, 0.15); color: #00ff41; border: 1px solid rgba(0, 255, 65, 0.3); }
+.badge-verifying { background: rgba(0, 204, 255, 0.15); color: #00ccff; border: 1px solid rgba(0, 204, 255, 0.3); }
+.badge-done { background: rgba(0, 255, 65, 0.2); color: #00ff41; border: 1px solid rgba(0, 255, 65, 0.4); }
+.badge-blocked { background: rgba(255, 0, 64, 0.15); color: #ff0040; border: 1px solid rgba(255, 0, 64, 0.3); }
+.badge-planned { background: rgba(204, 255, 0, 0.1); color: #ccff00; border: 1px solid rgba(204, 255, 0, 0.2); }
+.badge-connected { background: rgba(0, 255, 65, 0.15); color: #00ff41; border: 1px solid rgba(0, 255, 65, 0.3); }
+.badge-disconnected { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); }
+.badge-error { background: rgba(255, 0, 64, 0.15); color: #ff0040; border: 1px solid rgba(255, 0, 64, 0.3); }
+
+/* ─── Terminal Cursor ─── */
+.terminal-cursor::after {
+  content: '|';
+  animation: blink 1s step-end infinite;
+  color: var(--matrix-green);
+  font-weight: bold;
+}
+
+/* ─── Glow Text ─── */
+.glow-text {
+  text-shadow: 0 0 5px var(--matrix-green), 0 0 10px var(--matrix-green);
+}
+.glow-text-dim {
+  text-shadow: 0 0 3px rgba(0, 255, 65, 0.5);
+}
+
+/* ─── Matrix Rain Column ─── */
+.rain-column {
+  position: absolute;
+  top: -100%;
+  font-size: 10px;
+  color: rgba(0, 255, 65, 0.15);
+  line-height: 1.2;
+  writing-mode: vertical-rl;
+  animation: rainDrop var(--rain-speed, 4s) linear infinite;
+  animation-delay: var(--rain-delay, 0s);
+}
+
+/* ─── Progress Bar ─── */
+.matrix-progress {
+  height: 4px;
+  background: rgba(0, 51, 0, 0.3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.matrix-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--matrix-green-dark), var(--matrix-green));
+  border-radius: 2px;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+}
+
+/* ─── Code Block ─── */
+.code-block {
+  background: rgba(0, 20, 0, 0.6);
+  border: 1px solid rgba(0, 255, 65, 0.1);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-size: 0.75rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── Tab Active Indicator ─── */
+.tab-active {
+  border-left: 2px solid var(--matrix-green);
+  background: rgba(0, 255, 65, 0.08);
+}
+
+/* ─── Diff Styles ─── */
+.diff-add { background: rgba(0, 255, 65, 0.08); color: #00ff41; }
+.diff-add::before { content: '+'; margin-right: 0.5rem; opacity: 0.5; }
+.diff-del { background: rgba(255, 0, 64, 0.08); color: #ff6688; }
+.diff-del::before { content: '-'; margin-right: 0.5rem; opacity: 0.5; }
+.diff-context { color: rgba(0, 204, 51, 0.5); }
+
+/* ─── Animations ─── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes matrixGlow {
+  0% { text-shadow: 0 0 5px #00ff41, 0 0 10px #00ff41; }
+  100% { text-shadow: 0 0 10px #00ff41, 0 0 20px #00ff41, 0 0 40px #00cc33; }
+}
+@keyframes borderGlow {
+  0%, 100% { border-color: rgba(0,255,65,0.3); }
+  50% { border-color: rgba(0,255,65,0.8); }
+}
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+@keyframes rainDrop {
+  0% { transform: translateY(-100%); opacity: 1; }
+  70% { opacity: 0.5; }
+  100% { transform: translateY(100vh); opacity: 0; }
+}
+@keyframes glitch {
+  0%, 100% { transform: translate(0); }
+  20% { transform: translate(-2px, 2px); }
+  40% { transform: translate(2px, -2px); }
+  60% { transform: translate(-1px, -1px); }
+  80% { transform: translate(1px, 1px); }
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Utility ─── */
+.animate-fadeIn { animation: fadeIn 0.3s ease-out; }
+.animate-matrixGlow { animation: matrixGlow 2s ease-in-out infinite alternate; }
+.animate-borderGlow { animation: borderGlow 3s ease-in-out infinite; }
+.animate-pulseDot { animation: pulseDot 1.5s ease-in-out infinite; }
+.animate-spin { animation: spin 1s linear infinite; }
+
+/* ─── Tooltip ─── */
+.tooltip {
+  position: relative;
+}
+.tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.5rem;
+  background: rgba(0, 20, 0, 0.95);
+  border: 1px solid rgba(0, 255, 65, 0.3);
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  color: var(--matrix-green);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.tooltip:hover::after {
+  opacity: 1;
+}
