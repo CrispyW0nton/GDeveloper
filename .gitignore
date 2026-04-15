@@ -1,4 +1,32 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist-electron/
 dist-renderer/
 dist-package/
+.next/
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Reference docs (local only)
+reference/
+reference_docs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Large binary assets (download separately)
+resources/matrix-bg.mp4

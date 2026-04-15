@@ -1,0 +1,96 @@
+{
+  "name": "gdeveloper",
+  "version": "1.0.0",
+  "description": "GDeveloper - Native desktop AI coding platform with GitHub integration, MCP server support, and multi-prompt orchestration",
+  "author": "GDeveloper Team <dev@gdeveloper.app>",
+  "homepage": "https://github.com/CrispyW0nton/GDeveloper",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CrispyW0nton/GDeveloper.git"
+  },
+  "main": "dist-electron/main/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.renderer.config.ts",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "package": "npx --yes cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --x64",
+    "package:nsis": "npx --yes cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --x64 --config.win.target=nsis",
+    "package:portable": "npx --yes cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --x64 --config.win.target=portable",
+    "package:dir": "npx --yes cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --x64 --config.win.target=dir",
+    "package:all": "npx --yes cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --mac --linux",
+    "fix-codesign": "node scripts/fix-wincodesign.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "postinstall": "electron-builder install-app-deps || echo 'install-app-deps skipped (non-critical)'"
+  },
+  "build": {
+    "appId": "com.gdeveloper.platform",
+    "productName": "GDeveloper",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist-package"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "resources/icon.png",
+      "signAndEditExecutable": false,
+      "sign": null,
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "forceCodeSigning": false,
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GDeveloper"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "dist-renderer/**/*",
+      "resources/**/*"
+    ],
+    "extraResources": ["resources/**"]
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@octokit/app": "^15.1.0",
+    "@octokit/auth-app": "^7.1.0",
+    "@octokit/rest": "^21.0.0",
+    "better-sqlite3": "^11.0.0",
+    "diff": "^7.0.0",
+    "electron-store": "^8.2.0",
+    "uuid": "^10.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/diff": "^5.2.0",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.0",
+    "electron-vite": "^2.3.0",
+    "cross-env": "^7.0.0",
+    "eslint": "^8.57.0",
+    "lucide-react": "^0.400.0",
+    "postcss": "^8.4.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.3.0"
+  }
+}
