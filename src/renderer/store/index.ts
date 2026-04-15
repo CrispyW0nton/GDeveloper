@@ -1,25 +1,23 @@
 /**
  * Application State Store
- * Lightweight state management for the GDeveloper UI
+ * Loads persisted state from Electron main process on startup
+ * Uses IPC to sync state changes
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+
+// Get electronAPI (available in Electron, undefined in web preview)
+const api = (window as any).electronAPI;
 
 // ─── App State Interface ───
 export interface AppState {
-  // Auth & Config
   apiKeyConfigured: boolean;
   apiKeyProvider: string;
-
-  // GitHub
   githubConnected: boolean;
+  githubUsername: string;
   selectedRepo: SelectedRepo | null;
   repositories: RepoInfo[];
-
-  // Session
   currentSession: SessionInfo | null;
-
-  // UI
   activeTab: TabId;
   sidebarCollapsed: boolean;
 }
@@ -57,29 +55,88 @@ export const INITIAL_STATE: AppState = {
   apiKeyConfigured: false,
   apiKeyProvider: '',
   githubConnected: false,
+  githubUsername: '',
   selectedRepo: null,
   repositories: [],
   currentSession: null,
-  activeTab: 'github',
+  activeTab: 'settings', // Start on settings if no API key
   sidebarCollapsed: false
 };
 
 // ─── State Hook ───
 export function useAppState() {
   const [state, setState] = useState<AppState>(INITIAL_STATE);
+  const [loaded, setLoaded] = useState(false);
+
+  // Load persisted state from main process on mount
+  useEffect(() => {
+    if (!api || loaded) return;
+
+    const loadState = async () => {
+      try {
+        const settings = await api.getSettings();
+
+        // Check if any API key is configured
+        const hasKey = settings.apiKeys && Object.keys(settings.apiKeys).some(
+          (k: string) => settings.apiKeys[k] && settings.apiKeys[k] !== ''
+        );
+        const provider = hasKey ? Object.keys(settings.apiKeys).find(
+          (k: string) => settings.apiKeys[k] && settings.apiKeys[k] !== ''
+        ) || '' : '';
+
+        setState(prev => ({
+          ...prev,
+          apiKeyConfigured: hasKey,
+          apiKeyProvider: provider,
+          githubConnected: settings.github?.connected || false,
+          activeTab: hasKey ? (settings.github?.connected ? 'github' : 'github') : 'settings'
+        }));
+
+        // If GitHub is connected, try loading repos
+        if (settings.github?.connected) {
+          const result = await api.listRepos();
+          if (result.repos && result.repos.length > 0) {
+            setState(prev => ({
+              ...prev,
+              repositories: result.repos,
+              githubConnected: true
+            }));
+          }
+        }
+      } catch (err) {
+        console.error('[Store] Failed to load persisted state:', err);
+      }
+      setLoaded(true);
+    };
+
+    loadState();
+  }, [loaded]);
 
   const setApiKey = useCallback((provider: string) => {
     setState(prev => ({
       ...prev,
       apiKeyConfigured: true,
-      apiKeyProvider: provider
+      apiKeyProvider: provider,
+      activeTab: prev.githubConnected ? 'github' : 'github'
     }));
   }, []);
 
-  const connectGitHub = useCallback(() => {
+  const connectGitHub = useCallback((username?: string) => {
     setState(prev => ({
       ...prev,
-      githubConnected: true
+      githubConnected: true,
+      githubUsername: username || ''
+    }));
+  }, []);
+
+  const disconnectGitHub = useCallback(() => {
+    setState(prev => ({
+      ...prev,
+      githubConnected: false,
+      githubUsername: '',
+      repositories: [],
+      selectedRepo: null,
+      currentSession: null
     }));
   }, []);
 
@@ -101,7 +158,6 @@ export function useAppState() {
 
   const setTab = useCallback((tab: TabId) => {
     setState(prev => {
-      // Gate certain tabs behind repo selection
       if (!prev.selectedRepo && !['github', 'mcp', 'settings'].includes(tab)) {
         return { ...prev, activeTab: 'github' };
       }
@@ -121,6 +177,7 @@ export function useAppState() {
     state,
     setApiKey,
     connectGitHub,
+    disconnectGitHub,
     selectRepo,
     setTab,
     setRepos,

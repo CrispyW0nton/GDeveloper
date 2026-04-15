@@ -1,9 +1,12 @@
 /**
  * Secure Settings & API Key Layer
- * In Electron: uses OS keychain via electron-store with encryption
- * In Web Preview: uses in-memory store (demo mode)
+ * Uses Electron safeStorage for encrypting API keys
+ * Uses electron-store for persistent non-sensitive settings
+ * Keys survive app restarts and are never exposed to the renderer
  */
 
+import { app, safeStorage } from 'electron';
+import ElectronStore from 'electron-store';
 import { AppSettings } from '../domain/entities';
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -22,60 +25,157 @@ const DEFAULT_SETTINGS: AppSettings = {
   }
 };
 
+interface StoreSchema {
+  settings: Omit<AppSettings, 'apiKeys'>;
+  encryptedKeys: Record<string, string>;  // provider -> base64 encrypted buffer
+  githubToken: string;  // encrypted
+}
+
 class SecureSettingsManager {
-  private settings: AppSettings;
-  private encryptionKey: string;
+  private store: ElectronStore<StoreSchema>;
+  private apiKeyCache: Map<string, string> = new Map(); // runtime cache (decrypted)
+  private githubTokenCache: string | null = null;
 
   constructor() {
-    this.settings = { ...DEFAULT_SETTINGS };
-    this.encryptionKey = 'gdeveloper-secure-key'; // In Electron, derived from machine ID
+    this.store = new ElectronStore<StoreSchema>({
+      name: 'gdeveloper-settings',
+      defaults: {
+        settings: {
+          github: DEFAULT_SETTINGS.github,
+          preferences: DEFAULT_SETTINGS.preferences
+        } as any,
+        encryptedKeys: {},
+        githubToken: ''
+      }
+    });
+
+    // Load and decrypt cached keys on startup
+    this.loadEncryptedKeys();
   }
 
+  private loadEncryptedKeys(): void {
+    const encrypted = this.store.get('encryptedKeys', {});
+    for (const [provider, encStr] of Object.entries(encrypted)) {
+      if (encStr) {
+        try {
+          const buf = Buffer.from(encStr, 'base64');
+          if (safeStorage.isEncryptionAvailable()) {
+            const decrypted = safeStorage.decryptString(buf);
+            this.apiKeyCache.set(provider, decrypted);
+          }
+        } catch (err) {
+          console.error(`[SecureSettings] Failed to decrypt key for ${provider}:`, err);
+          // Key is corrupted, remove it
+          const keys = this.store.get('encryptedKeys', {});
+          delete keys[provider];
+          this.store.set('encryptedKeys', keys);
+        }
+      }
+    }
+
+    // Load GitHub token
+    const ghEncrypted = this.store.get('githubToken', '');
+    if (ghEncrypted) {
+      try {
+        const buf = Buffer.from(ghEncrypted, 'base64');
+        if (safeStorage.isEncryptionAvailable()) {
+          this.githubTokenCache = safeStorage.decryptString(buf);
+        }
+      } catch {
+        this.store.set('githubToken', '');
+      }
+    }
+  }
+
+  // ─── Settings ──────────────────────────────────────
+
   getSettings(): AppSettings {
-    return { ...this.settings };
+    const stored = this.store.get('settings', {} as any);
+    // Build apiKeys with masked indicators (never return raw keys to renderer)
+    const apiKeyStatus: Record<string, string> = {};
+    for (const provider of this.apiKeyCache.keys()) {
+      apiKeyStatus[provider] = '••••••••'; // masked
+    }
+    return {
+      apiKeys: apiKeyStatus,
+      github: {
+        ...DEFAULT_SETTINGS.github,
+        ...stored.github,
+        connected: !!this.githubTokenCache
+      },
+      preferences: {
+        ...DEFAULT_SETTINGS.preferences,
+        ...stored.preferences
+      }
+    };
   }
 
   updateSettings(partial: Partial<AppSettings>): AppSettings {
-    this.settings = {
-      ...this.settings,
-      ...partial,
-      apiKeys: { ...this.settings.apiKeys, ...partial.apiKeys },
-      github: { ...this.settings.github, ...partial.github },
-      preferences: { ...this.settings.preferences, ...partial.preferences }
+    const current = this.store.get('settings', {} as any);
+    const updated = {
+      ...current,
+      github: { ...current.github, ...partial.github },
+      preferences: { ...current.preferences, ...partial.preferences }
     };
+    this.store.set('settings', updated);
     return this.getSettings();
   }
 
-  // API Key Management (encrypted storage)
+  // ─── API Key Management (encrypted with OS keychain) ──
+
   setApiKey(provider: string, key: string): void {
-    const masked = this.encrypt(key);
-    (this.settings.apiKeys as any)[provider] = key; // Store raw in memory for use
+    if (safeStorage.isEncryptionAvailable()) {
+      const encrypted = safeStorage.encryptString(key);
+      const encStr = encrypted.toString('base64');
+      const keys = this.store.get('encryptedKeys', {});
+      keys[provider] = encStr;
+      this.store.set('encryptedKeys', keys);
+    }
+    this.apiKeyCache.set(provider, key);
   }
 
   getApiKey(provider: string): string | undefined {
-    return (this.settings.apiKeys as any)[provider];
+    return this.apiKeyCache.get(provider);
   }
 
   removeApiKey(provider: string): void {
-    delete (this.settings.apiKeys as any)[provider];
+    this.apiKeyCache.delete(provider);
+    const keys = this.store.get('encryptedKeys', {});
+    delete keys[provider];
+    this.store.set('encryptedKeys', keys);
   }
 
   hasApiKey(provider: string): boolean {
-    return !!(this.settings.apiKeys as any)[provider];
+    return this.apiKeyCache.has(provider);
   }
 
-  // GitHub token
+  getConfiguredProviders(): string[] {
+    return Array.from(this.apiKeyCache.keys());
+  }
+
+  // ─── GitHub Token ──────────────────────────────────
+
   setGitHubToken(token: string): void {
-    this.settings.github.connected = true;
+    if (safeStorage.isEncryptionAvailable()) {
+      const encrypted = safeStorage.encryptString(token);
+      this.store.set('githubToken', encrypted.toString('base64'));
+    }
+    this.githubTokenCache = token;
+    const stored = this.store.get('settings', {} as any);
+    stored.github = { ...stored.github, connected: true };
+    this.store.set('settings', stored);
   }
 
-  // Simple encryption (in production, use OS keychain)
-  private encrypt(value: string): string {
-    return Buffer.from(value).toString('base64');
+  getGitHubToken(): string | null {
+    return this.githubTokenCache;
   }
 
-  private decrypt(value: string): string {
-    return Buffer.from(value, 'base64').toString('utf-8');
+  clearGitHubToken(): void {
+    this.githubTokenCache = null;
+    this.store.set('githubToken', '');
+    const stored = this.store.get('settings', {} as any);
+    stored.github = { ...stored.github, connected: false };
+    this.store.set('settings', stored);
   }
 }
 

@@ -1,50 +1,86 @@
 /**
  * Electron Preload Script
- * Exposes safe IPC bridges to the renderer process
- * In web preview mode, this is not used (direct imports instead)
+ * Exposes safe IPC bridges to the renderer process via contextBridge.
+ * Includes streaming support for chat responses.
+ * The renderer can only call these whitelisted methods.
  */
 
-// In Electron mode, this would use contextBridge:
-// import { contextBridge, ipcRenderer } from 'electron';
-// contextBridge.exposeInMainWorld('electronAPI', { ... });
+import { contextBridge, ipcRenderer } from 'electron';
 
-// For web preview, we export a mock API
-export const electronAPI = {
-  // Settings
-  getSettings: async () => ({}),
-  updateSettings: async (settings: any) => settings,
-  setApiKey: async (provider: string, key: string) => true,
-  getApiKey: async (provider: string) => '',
-  validateApiKey: async (provider: string, key: string) => ({ valid: true }),
+const electronAPI = {
+  // ─── Settings ──────────────────────────────────────
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  updateSettings: (settings: any) => ipcRenderer.invoke('settings:update', settings),
+  setApiKey: (provider: string, key: string) => ipcRenderer.invoke('api-key:set', provider, key),
+  getApiKey: (provider: string) => ipcRenderer.invoke('api-key:get', provider),
+  removeApiKey: (provider: string) => ipcRenderer.invoke('api-key:remove', provider),
+  validateApiKey: (provider: string, key: string) => ipcRenderer.invoke('api-key:validate', provider, key),
 
-  // GitHub
-  connectGitHub: async (token: string) => true,
-  listRepos: async () => [],
-  selectRepo: async (repoId: string) => ({}),
+  // ─── GitHub ────────────────────────────────────────
+  connectGitHub: (token: string) => ipcRenderer.invoke('github:connect', token),
+  disconnectGitHub: () => ipcRenderer.invoke('github:disconnect'),
+  listRepos: () => ipcRenderer.invoke('github:list-repos'),
+  selectRepo: (repoFullName: string) => ipcRenderer.invoke('github:select-repo', repoFullName),
+  getFile: (repo: string, path: string, branch: string) => ipcRenderer.invoke('github:get-file', repo, path, branch),
+  createBranch: (repo: string, name: string, baseSha: string) => ipcRenderer.invoke('github:create-branch', repo, name, baseSha),
+  createCommit: (repo: string, branch: string, message: string, files: any[]) => ipcRenderer.invoke('github:create-commit', repo, branch, message, files),
+  createPR: (repo: string, title: string, body: string, head: string, base: string) => ipcRenderer.invoke('github:create-pr', repo, title, body, head, base),
 
-  // Chat
-  sendMessage: async (sessionId: string, message: string) => ({}),
-  getChatHistory: async (sessionId: string) => [],
+  // ─── Chat / Orchestration ─────────────────────────
+  sendMessage: (sessionId: string, message: string) => ipcRenderer.invoke('chat:send', sessionId, message),
+  getChatHistory: (sessionId: string) => ipcRenderer.invoke('chat:history', sessionId),
+  clearChat: (sessionId: string) => ipcRenderer.invoke('chat:clear', sessionId),
 
-  // MCP
-  listMCPServers: async () => [],
-  addMCPServer: async (config: any) => true,
-  connectMCPServer: async (id: string) => true,
-  disconnectMCPServer: async (id: string) => true,
-  testMCPConnection: async (id: string) => true,
+  // Chat streaming: listen for stream chunks from main process
+  onStreamChunk: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('chat:stream-chunk', handler);
+    return () => ipcRenderer.removeListener('chat:stream-chunk', handler);
+  },
 
-  // Tools
-  listTools: async () => [],
-  executeTool: async (name: string, input: any) => ({}),
+  // ─── Tasks ─────────────────────────────────────────
+  listTasks: (sessionId?: string) => ipcRenderer.invoke('task:list', sessionId),
+  getTask: (taskId: string) => ipcRenderer.invoke('task:get', taskId),
+  updateTask: (taskId: string, status: string, reason?: string) => ipcRenderer.invoke('task:update', taskId, status, reason),
 
-  // Platform info
-  platform: 'web' as const,
-  isElectron: false
+  // ─── MCP Servers ───────────────────────────────────
+  listMCPServers: () => ipcRenderer.invoke('mcp:list-servers'),
+  addMCPServer: (config: any) => ipcRenderer.invoke('mcp:add-server', config),
+  removeMCPServer: (id: string) => ipcRenderer.invoke('mcp:remove-server', id),
+  updateMCPServer: (id: string, config: any) => ipcRenderer.invoke('mcp:update-server', id, config),
+  connectMCPServer: (id: string) => ipcRenderer.invoke('mcp:connect', id),
+  disconnectMCPServer: (id: string) => ipcRenderer.invoke('mcp:disconnect', id),
+  testMCPConnection: (id: string) => ipcRenderer.invoke('mcp:test', id),
+  getMCPTools: (serverId?: string) => ipcRenderer.invoke('mcp:get-tools', serverId),
+  toggleMCPTool: (serverId: string, toolName: string, enabled: boolean) => ipcRenderer.invoke('mcp:toggle-tool', serverId, toolName, enabled),
+
+  // ─── Tools ─────────────────────────────────────────
+  listTools: () => ipcRenderer.invoke('tool:list'),
+  executeTool: (name: string, input: any) => ipcRenderer.invoke('tool:execute', name, input),
+  approveTool: (executionId: string) => ipcRenderer.invoke('tool:approve', executionId),
+
+  // ─── Activity ──────────────────────────────────────
+  listActivity: (sessionId?: string) => ipcRenderer.invoke('activity:list', sessionId),
+
+  // ─── Diff ──────────────────────────────────────────
+  getDiffs: (sessionId?: string) => ipcRenderer.invoke('diff:get', sessionId),
+
+  // ─── Verification ──────────────────────────────────
+  listVerifications: () => ipcRenderer.invoke('verification:list'),
+  runVerification: (taskId: string) => ipcRenderer.invoke('verification:run', taskId),
+
+  // ─── Roadmap ───────────────────────────────────────
+  uploadRoadmap: (content: string) => ipcRenderer.invoke('roadmap:upload', content),
+  parseRoadmap: (content: string) => ipcRenderer.invoke('roadmap:parse', content),
+  listRoadmaps: () => ipcRenderer.invoke('roadmap:list'),
+
+  // ─── Platform Info ─────────────────────────────────
+  platform: process.platform as string,
+  isElectron: true,
 };
 
-// Type declaration for renderer
-declare global {
-  interface Window {
-    electronAPI: typeof electronAPI;
-  }
-}
+// Expose to renderer via window.electronAPI
+contextBridge.exposeInMainWorld('electronAPI', electronAPI);
+
+// Type export for TypeScript consumers
+export type ElectronAPI = typeof electronAPI;

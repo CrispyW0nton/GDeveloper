@@ -1,116 +1,56 @@
 /**
  * MCP (Model Context Protocol) Server Manager
- * Supports stdio, http, sse transports
+ * Real stdio process spawning for MCP servers
  * Manages server lifecycle, tool discovery, enable/disable
- * Uses @modelcontextprotocol/sdk TypeScript SDK patterns
+ * Persists server configs in SQLite
  */
 
+import { spawn, ChildProcess } from 'child_process';
 import { MCPServerConfig, MCPToolInfo } from '../domain/entities';
 import { MCPTransportType, MCPServerStatus } from '../domain/enums';
 import { IMCPClientManager } from '../domain/interfaces';
-import { getToolRegistry } from '../tools';
+import { getDatabase } from '../db';
 
-// Demo MCP Servers
-const DEMO_MCP_SERVERS: MCPServerConfig[] = [
-  {
-    id: 'mcp-filesystem',
-    name: 'Filesystem Server',
-    transport: MCPTransportType.STDIO,
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-filesystem', '/workspace'],
-    enabled: true,
-    autoStart: true,
-    status: MCPServerStatus.DISCONNECTED,
-    tools: [
-      {
-        name: 'fs_read',
-        description: 'Read file contents from the filesystem',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-        enabled: true,
-        serverName: 'Filesystem Server'
-      },
-      {
-        name: 'fs_write',
-        description: 'Write content to a file',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
-        enabled: true,
-        serverName: 'Filesystem Server'
-      },
-      {
-        name: 'fs_list',
-        description: 'List directory contents',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-        enabled: true,
-        serverName: 'Filesystem Server'
-      }
-    ]
-  },
-  {
-    id: 'mcp-github',
-    name: 'GitHub MCP Server',
-    transport: MCPTransportType.STDIO,
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    env: { GITHUB_PERSONAL_ACCESS_TOKEN: '' },
-    enabled: false,
-    autoStart: false,
-    status: MCPServerStatus.DISCONNECTED,
-    tools: [
-      {
-        name: 'github_search_repos',
-        description: 'Search GitHub repositories',
-        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-        enabled: true,
-        serverName: 'GitHub MCP Server'
-      },
-      {
-        name: 'github_get_issue',
-        description: 'Get issue details',
-        inputSchema: { type: 'object', properties: { owner: { type: 'string' }, repo: { type: 'string' }, number: { type: 'number' } }, required: ['owner', 'repo', 'number'] },
-        enabled: true,
-        serverName: 'GitHub MCP Server'
-      }
-    ]
-  },
-  {
-    id: 'mcp-unreal-ghost',
-    name: 'Unreal MCP Ghost',
-    transport: MCPTransportType.STDIO,
-    command: 'python',
-    args: ['-m', 'unreal_mcp_ghost'],
-    enabled: false,
-    autoStart: false,
-    status: MCPServerStatus.DISCONNECTED,
-    tools: [
-      {
-        name: 'ue_get_actors',
-        description: 'Get all actors in the current Unreal Engine level',
-        inputSchema: { type: 'object', properties: {} },
-        enabled: true,
-        serverName: 'Unreal MCP Ghost'
-      },
-      {
-        name: 'ue_spawn_actor',
-        description: 'Spawn an actor in Unreal Engine',
-        inputSchema: { type: 'object', properties: { class_name: { type: 'string' }, location: { type: 'object' } }, required: ['class_name'] },
-        enabled: true,
-        serverName: 'Unreal MCP Ghost'
-      }
-    ]
-  }
-];
+interface MCPProcess {
+  process: ChildProcess;
+  serverId: string;
+}
 
 export class MCPClientManager implements IMCPClientManager {
   private servers: Map<string, MCPServerConfig> = new Map();
+  private processes: Map<string, MCPProcess> = new Map();
   private listeners: Array<(event: MCPEvent) => void> = [];
 
   constructor() {
-    // Load demo servers
-    DEMO_MCP_SERVERS.forEach(s => this.servers.set(s.id, { ...s }));
+    this.loadFromDB();
+  }
+
+  private loadFromDB(): void {
+    try {
+      const db = getDatabase();
+      const servers = db.getMCPServers();
+      for (const server of servers) {
+        this.servers.set(server.id, {
+          ...server,
+          status: MCPServerStatus.DISCONNECTED,
+          autoStart: false
+        });
+      }
+    } catch (err) {
+      console.error('[MCP] Failed to load servers from DB:', err);
+    }
   }
 
   async addServer(config: MCPServerConfig): Promise<void> {
-    this.servers.set(config.id, { ...config, status: MCPServerStatus.DISCONNECTED });
+    const server = { ...config, status: MCPServerStatus.DISCONNECTED };
+    this.servers.set(config.id, server);
+    // Persist to DB
+    try {
+      const db = getDatabase();
+      db.saveMCPServer(config);
+    } catch (err) {
+      console.error('[MCP] Failed to save server:', err);
+    }
     this.emit({ type: 'server_added', serverId: config.id, name: config.name });
   }
 
@@ -120,10 +60,13 @@ export class MCPClientManager implements IMCPClientManager {
       if (server.status === MCPServerStatus.CONNECTED) {
         await this.disconnectServer(id);
       }
-      // Unregister tools from global registry
-      const toolRegistry = getToolRegistry();
-      server.tools.forEach(t => toolRegistry.unregister(t.name));
       this.servers.delete(id);
+      try {
+        const db = getDatabase();
+        db.removeMCPServer(id);
+      } catch (err) {
+        console.error('[MCP] Failed to remove server from DB:', err);
+      }
       this.emit({ type: 'server_removed', serverId: id });
     }
   }
@@ -136,37 +79,128 @@ export class MCPClientManager implements IMCPClientManager {
     this.emit({ type: 'server_connecting', serverId: id });
 
     try {
-      // In Electron: use @modelcontextprotocol/client with appropriate transport
-      // stdio: spawn child process with server.command + server.args
-      // http/sse: connect to server.url
-      await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate connection
-
-      server.status = MCPServerStatus.CONNECTED;
-      server.lastConnected = new Date().toISOString();
-
-      // Register MCP tools in the global tool registry
-      const toolRegistry = getToolRegistry();
-      server.tools.filter(t => t.enabled).forEach(tool => {
-        toolRegistry.register({
-          name: tool.name,
-          description: `[MCP:${server.name}] ${tool.description}`,
-          category: 'mcp' as any,
-          permissionTier: 'write' as any,
-          inputSchema: tool.inputSchema,
-          source: 'mcp',
-          mcpServerName: server.name,
-          execute: async (input) => ({
-            success: true,
-            output: `[MCP:${server.name}/${tool.name}] Executed with input: ${JSON.stringify(input)}`
-          })
+      if (server.transport === MCPTransportType.STDIO && server.command) {
+        // Spawn the MCP server process
+        const env = { ...process.env, ...(server.env || {}) };
+        const child = spawn(server.command, server.args || [], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env,
+          shell: true
         });
-      });
 
-      this.emit({ type: 'server_connected', serverId: id, tools: server.tools });
+        // Track the process
+        this.processes.set(id, { process: child, serverId: id });
+
+        // Handle process events
+        child.on('error', (err) => {
+          console.error(`[MCP:${server.name}] Process error:`, err);
+          server.status = MCPServerStatus.ERROR;
+          this.emit({ type: 'server_error', serverId: id, error: err.message });
+        });
+
+        child.on('exit', (code) => {
+          console.log(`[MCP:${server.name}] Process exited with code ${code}`);
+          this.processes.delete(id);
+          if (server.status !== MCPServerStatus.DISCONNECTED) {
+            server.status = MCPServerStatus.DISCONNECTED;
+            this.emit({ type: 'server_disconnected', serverId: id });
+          }
+        });
+
+        // Collect initial output for tool discovery
+        let stdoutBuffer = '';
+        child.stdout?.on('data', (data: Buffer) => {
+          stdoutBuffer += data.toString();
+          // Try to parse JSON-RPC messages for tool discovery
+          this.tryParseToolDiscovery(id, stdoutBuffer);
+        });
+
+        child.stderr?.on('data', (data: Buffer) => {
+          console.log(`[MCP:${server.name}] stderr:`, data.toString().trim());
+        });
+
+        // Send initialize request (MCP protocol)
+        const initRequest = JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'GDeveloper', version: '1.0.0' }
+          }
+        });
+        child.stdin?.write(initRequest + '\n');
+
+        // Wait briefly for initialization
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Send tools/list request
+        const toolsRequest = JSON.stringify({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/list',
+          params: {}
+        });
+        child.stdin?.write(toolsRequest + '\n');
+
+        // Wait for tool discovery
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        server.status = MCPServerStatus.CONNECTED;
+        server.lastConnected = new Date().toISOString();
+        this.emit({ type: 'server_connected', serverId: id, tools: server.tools });
+      } else {
+        // HTTP/SSE transport - attempt basic connectivity check
+        if (server.url) {
+          try {
+            const response = await fetch(server.url, { method: 'GET', signal: AbortSignal.timeout(5000) });
+            if (response.ok) {
+              server.status = MCPServerStatus.CONNECTED;
+              server.lastConnected = new Date().toISOString();
+              this.emit({ type: 'server_connected', serverId: id, tools: server.tools });
+            } else {
+              throw new Error(`HTTP ${response.status}`);
+            }
+          } catch (err) {
+            server.status = MCPServerStatus.ERROR;
+            this.emit({ type: 'server_error', serverId: id, error: String(err) });
+            throw err;
+          }
+        }
+      }
     } catch (error) {
-      server.status = MCPServerStatus.ERROR;
-      this.emit({ type: 'server_error', serverId: id, error: String(error) });
+      if ((server.status as string) !== MCPServerStatus.ERROR) {
+        server.status = MCPServerStatus.ERROR;
+        this.emit({ type: 'server_error', serverId: id, error: String(error) });
+      }
       throw error;
+    }
+  }
+
+  private tryParseToolDiscovery(serverId: string, buffer: string): void {
+    const server = this.servers.get(serverId);
+    if (!server) return;
+
+    // Try to parse JSON-RPC responses from the buffer
+    const lines = buffer.split('\n');
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line.trim());
+        if (msg.result?.tools && Array.isArray(msg.result.tools)) {
+          server.tools = msg.result.tools.map((t: any) => ({
+            name: t.name,
+            description: t.description || '',
+            inputSchema: t.inputSchema || { type: 'object', properties: {} },
+            enabled: true,
+            serverName: server.name
+          }));
+          console.log(`[MCP:${server.name}] Discovered ${server.tools.length} tools`);
+          this.emit({ type: 'tools_discovered', serverId, tools: server.tools });
+        }
+      } catch {
+        // Not a complete JSON line, skip
+      }
     }
   }
 
@@ -174,9 +208,18 @@ export class MCPClientManager implements IMCPClientManager {
     const server = this.servers.get(id);
     if (!server) return;
 
-    // Unregister MCP tools
-    const toolRegistry = getToolRegistry();
-    server.tools.forEach(t => toolRegistry.unregister(t.name));
+    // Kill the process if running
+    const proc = this.processes.get(id);
+    if (proc) {
+      try {
+        proc.process.kill('SIGTERM');
+        // Force kill after 3 seconds
+        setTimeout(() => {
+          try { proc.process.kill('SIGKILL'); } catch {}
+        }, 3000);
+      } catch {}
+      this.processes.delete(id);
+    }
 
     server.status = MCPServerStatus.DISCONNECTED;
     this.emit({ type: 'server_disconnected', serverId: id });
@@ -200,9 +243,26 @@ export class MCPClientManager implements IMCPClientManager {
     if (!server) return false;
 
     try {
-      // Simulate connection test
-      await new Promise(resolve => setTimeout(resolve, 800));
-      return true;
+      if (server.transport === MCPTransportType.STDIO && server.command) {
+        // Test by spawning briefly
+        return new Promise((resolve) => {
+          const child = spawn(server.command!, ['--version'], {
+            shell: true,
+            timeout: 5000
+          });
+          child.on('exit', (code) => resolve(code === 0));
+          child.on('error', () => resolve(false));
+          setTimeout(() => {
+            try { child.kill(); } catch {}
+            resolve(false);
+          }, 5000);
+        });
+      }
+      if (server.url) {
+        const res = await fetch(server.url, { signal: AbortSignal.timeout(5000) });
+        return res.ok;
+      }
+      return false;
     } catch {
       return false;
     }
@@ -212,6 +272,10 @@ export class MCPClientManager implements IMCPClientManager {
     const server = this.servers.get(id);
     if (server) {
       Object.assign(server, updates);
+      try {
+        const db = getDatabase();
+        db.saveMCPServer(server);
+      } catch {}
     }
   }
 
@@ -221,26 +285,14 @@ export class MCPClientManager implements IMCPClientManager {
       const tool = server.tools.find(t => t.name === toolName);
       if (tool) {
         tool.enabled = enabled;
-        // Update in tool registry
-        const toolRegistry = getToolRegistry();
-        if (enabled && server.status === MCPServerStatus.CONNECTED) {
-          toolRegistry.register({
-            name: tool.name,
-            description: `[MCP:${server.name}] ${tool.description}`,
-            category: 'mcp' as any,
-            permissionTier: 'write' as any,
-            inputSchema: tool.inputSchema,
-            source: 'mcp',
-            mcpServerName: server.name,
-            execute: async (input) => ({
-              success: true,
-              output: `[MCP:${server.name}/${tool.name}] Executed`
-            })
-          });
-        } else {
-          toolRegistry.unregister(tool.name);
-        }
       }
+    }
+  }
+
+  // Cleanup all processes on app quit
+  cleanup(): void {
+    for (const [id] of this.processes) {
+      this.disconnectServer(id).catch(() => {});
     }
   }
 

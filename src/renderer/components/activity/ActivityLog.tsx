@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { SelectedRepo } from '../../store';
+
+const api = (window as any).electronAPI;
 
 interface ActivityLogProps {
   sessionId: string;
@@ -8,132 +10,64 @@ interface ActivityLogProps {
 
 interface ActivityItem {
   id: string;
-  type: 'branch_created' | 'commit' | 'pr_created' | 'pr_merged' | 'task_completed' | 'verification' | 'mcp_connected';
+  session_id: string;
+  type: string;
   title: string;
   description: string;
-  branch?: string;
-  sha?: string;
-  prNumber?: number;
-  status: 'success' | 'pending' | 'error';
+  metadata: Record<string, any>;
+  status: string;
   timestamp: string;
 }
 
-const DEMO_ACTIVITY: ActivityItem[] = [
-  {
-    id: 'act-1',
-    type: 'branch_created',
-    title: 'Created branch ai/auth-setup',
-    description: 'New feature branch for authentication module implementation',
-    branch: 'ai/auth-setup',
-    status: 'success',
-    timestamp: '2026-04-15T09:00:00Z'
-  },
-  {
-    id: 'act-2',
-    type: 'commit',
-    title: 'feat(auth): implement JWT authentication',
-    description: 'Added JWT token generation, bcrypt password hashing, and user repository integration',
-    branch: 'ai/auth-setup',
-    sha: 'a1b2c3d',
-    status: 'success',
-    timestamp: '2026-04-15T09:15:00Z'
-  },
-  {
-    id: 'act-3',
-    type: 'verification',
-    title: 'Verification passed for auth module',
-    description: 'Unit Tests: 12/12 passed | ESLint: 0 errors | TypeScript: clean | Build: 4.2s',
-    branch: 'ai/auth-setup',
-    status: 'success',
-    timestamp: '2026-04-15T09:18:00Z'
-  },
-  {
-    id: 'act-4',
-    type: 'commit',
-    title: 'feat(auth): add user registration endpoint',
-    description: 'Implemented user registration with email validation and password hashing',
-    branch: 'ai/auth-setup',
-    sha: 'e4f5g6h',
-    status: 'success',
-    timestamp: '2026-04-15T09:25:00Z'
-  },
-  {
-    id: 'act-5',
-    type: 'pr_created',
-    title: 'PR #42: Authentication Module',
-    description: 'Pull request opened: JWT auth, user registration, middleware integration',
-    branch: 'ai/auth-setup',
-    prNumber: 42,
-    status: 'success',
-    timestamp: '2026-04-15T09:30:00Z'
-  },
-  {
-    id: 'act-6',
-    type: 'task_completed',
-    title: 'Task completed: Set up authentication module',
-    description: 'All acceptance criteria met. 3 files modified, 12 turns, 45k tokens used.',
-    branch: 'ai/auth-setup',
-    status: 'success',
-    timestamp: '2026-04-15T09:32:00Z'
-  },
-  {
-    id: 'act-7',
-    type: 'mcp_connected',
-    title: 'MCP Server connected: Filesystem Server',
-    description: '4 tools discovered and registered: fs_read, fs_write, fs_list, fs_search',
-    status: 'success',
-    timestamp: '2026-04-15T08:45:00Z'
-  },
-  {
-    id: 'act-8',
-    type: 'branch_created',
-    title: 'Created branch ai/user-api',
-    description: 'New feature branch for user API endpoints',
-    branch: 'ai/user-api',
-    status: 'pending',
-    timestamp: '2026-04-15T09:35:00Z'
-  }
-];
-
-const TYPE_CONFIG: Record<string, { icon: React.ReactNode; color: string }> = {
-  branch_created: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>,
-    color: 'text-matrix-info'
-  },
-  commit: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/></svg>,
-    color: 'text-matrix-green'
-  },
-  pr_created: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 012 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg>,
-    color: 'text-matrix-green'
-  },
-  pr_merged: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 009 9"/></svg>,
-    color: 'text-matrix-accent'
-  },
-  task_completed: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
-    color: 'text-matrix-green'
-  },
-  verification: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
-    color: 'text-matrix-info'
-  },
-  mcp_connected: {
-    icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="6" rx="1"/><circle cx="6" cy="6" r="1" fill="currentColor"/></svg>,
-    color: 'text-matrix-warning'
-  }
+const TYPE_ICONS: Record<string, { color: string; label: string }> = {
+  api_key_set: { color: 'text-matrix-warning', label: 'API Key' },
+  github_connect: { color: 'text-matrix-info', label: 'GitHub' },
+  github_disconnect: { color: 'text-matrix-danger', label: 'GitHub' },
+  repo_selected: { color: 'text-matrix-green', label: 'Repo' },
+  chat_send: { color: 'text-matrix-green', label: 'Chat' },
+  chat_response: { color: 'text-matrix-text-dim', label: 'AI' },
+  chat_error: { color: 'text-matrix-danger', label: 'Error' },
+  chat_cleared: { color: 'text-matrix-text-muted', label: 'Chat' },
+  task_updated: { color: 'text-matrix-warning', label: 'Task' },
+  branch_created: { color: 'text-matrix-info', label: 'Branch' },
+  commit: { color: 'text-matrix-green', label: 'Commit' },
+  pr_created: { color: 'text-matrix-green', label: 'PR' },
+  mcp_server_added: { color: 'text-matrix-warning', label: 'MCP' },
+  mcp_connected: { color: 'text-matrix-green', label: 'MCP' },
+  tool_execute: { color: 'text-matrix-info', label: 'Tool' },
+  verification_run: { color: 'text-matrix-info', label: 'Verify' },
 };
 
 export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
-  const [activities] = useState<ActivityItem[]>(DEMO_ACTIVITY);
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState('all');
+
+  const loadActivity = async () => {
+    if (!api) { setLoading(false); return; }
+    try {
+      const result = await api.listActivity(sessionId);
+      setActivities(result || []);
+    } catch (err) {
+      console.error('Failed to load activity:', err);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadActivity();
+    const interval = setInterval(loadActivity, 5000);
+    return () => clearInterval(interval);
+  }, [sessionId]);
+
+  const filtered = filter === 'all'
+    ? activities
+    : activities.filter(a => a.type.includes(filter));
 
   // Summary counts
-  const branches = activities.filter(a => a.type === 'branch_created').length;
-  const commits = activities.filter(a => a.type === 'commit').length;
-  const prs = activities.filter(a => a.type === 'pr_created' || a.type === 'pr_merged').length;
-  const tasks = activities.filter(a => a.type === 'task_completed').length;
+  const chatCount = activities.filter(a => a.type === 'chat_send').length;
+  const taskCount = activities.filter(a => a.type === 'task_updated').length;
+  const errorCount = activities.filter(a => a.status === 'error').length;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -144,69 +78,99 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             Activity Log
           </h1>
-          <p className="text-xs text-matrix-text-muted/50 mt-1">{repo.fullName} - Branch activity, commits, and pull requests</p>
+          <p className="text-xs text-matrix-text-muted/50 mt-1">{repo.fullName} - Real-time event stream</p>
         </div>
 
         {/* Summary Cards */}
         <div className="grid grid-cols-4 gap-3">
           <div className="glass-panel p-3 text-center">
-            <div className="text-xl text-matrix-green font-bold">{branches}</div>
-            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Branches</div>
+            <div className="text-xl text-matrix-green font-bold">{activities.length}</div>
+            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Total Events</div>
           </div>
           <div className="glass-panel p-3 text-center">
-            <div className="text-xl text-matrix-green font-bold">{commits}</div>
-            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Commits</div>
+            <div className="text-xl text-matrix-green font-bold">{chatCount}</div>
+            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Messages</div>
           </div>
           <div className="glass-panel p-3 text-center">
-            <div className="text-xl text-matrix-green font-bold">{prs}</div>
-            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Pull Requests</div>
+            <div className="text-xl text-matrix-green font-bold">{taskCount}</div>
+            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Task Updates</div>
           </div>
           <div className="glass-panel p-3 text-center">
-            <div className="text-xl text-matrix-green font-bold">{tasks}</div>
-            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Tasks Done</div>
+            <div className={`text-xl font-bold ${errorCount > 0 ? 'text-matrix-danger' : 'text-matrix-green'}`}>{errorCount}</div>
+            <div className="text-[10px] text-matrix-text-muted/40 uppercase">Errors</div>
           </div>
+        </div>
+
+        {/* Filter */}
+        <div className="flex gap-2">
+          {['all', 'chat', 'task', 'github', 'mcp', 'tool'].map(f => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`text-[10px] px-3 py-1 rounded border transition-all ${
+                filter === f
+                  ? 'border-matrix-green bg-matrix-green/10 text-matrix-green'
+                  : 'border-matrix-border text-matrix-text-muted/40 hover:text-matrix-green'
+              }`}
+            >
+              {f.charAt(0).toUpperCase() + f.slice(1)}
+            </button>
+          ))}
         </div>
 
         {/* Timeline */}
-        <div className="relative">
-          {/* Timeline line */}
-          <div className="absolute left-4 top-0 bottom-0 w-px bg-matrix-border" />
-
-          <div className="space-y-4">
-            {activities.map(activity => {
-              const config = TYPE_CONFIG[activity.type] || TYPE_CONFIG.commit;
-              return (
-                <div key={activity.id} className="flex gap-4 animate-fadeIn">
-                  {/* Icon */}
-                  <div className={`relative z-10 w-8 h-8 rounded-full border flex items-center justify-center bg-matrix-bg ${
-                    activity.status === 'success' ? 'border-matrix-green/30' : activity.status === 'error' ? 'border-matrix-danger/30' : 'border-matrix-border'
-                  }`}>
-                    <span className={config.color}>{config.icon}</span>
-                  </div>
-
-                  {/* Content */}
-                  <div className="flex-1 glass-panel p-3">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-matrix-green font-bold">{activity.title}</span>
-                      <span className="text-[9px] text-matrix-text-muted/30">
-                        {new Date(activity.timestamp).toLocaleTimeString()}
-                      </span>
+        {loading ? (
+          <div className="glass-panel p-8 text-center">
+            <span className="w-5 h-5 border-2 border-matrix-green/30 border-t-matrix-green rounded-full animate-spin inline-block" />
+            <p className="text-xs text-matrix-text-muted/40 mt-2">Loading activity...</p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="glass-panel p-8 text-center">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="mx-auto text-matrix-text-muted/20 mb-2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+            <p className="text-xs text-matrix-text-muted/30">
+              {filter === 'all' ? 'No activity recorded yet. Events will appear as you use the app.' : `No ${filter} events found.`}
+            </p>
+          </div>
+        ) : (
+          <div className="relative">
+            <div className="absolute left-4 top-0 bottom-0 w-px bg-matrix-border" />
+            <div className="space-y-3">
+              {filtered.map(activity => {
+                const typeInfo = TYPE_ICONS[activity.type] || { color: 'text-matrix-text-muted', label: activity.type };
+                return (
+                  <div key={activity.id} className="flex gap-4 animate-fadeIn">
+                    <div className={`relative z-10 w-8 h-8 rounded-full border flex items-center justify-center bg-matrix-bg ${
+                      activity.status === 'success' ? 'border-matrix-green/30' :
+                      activity.status === 'error' ? 'border-matrix-danger/30' : 'border-matrix-border'
+                    }`}>
+                      <span className={`text-[8px] font-bold ${typeInfo.color}`}>{typeInfo.label.charAt(0)}</span>
                     </div>
-                    <p className="text-[11px] text-matrix-text-muted/50">{activity.description}</p>
-                    <div className="flex items-center gap-3 mt-1.5 text-[10px] text-matrix-text-muted/30">
-                      {activity.branch && <span>branch: <code className="text-matrix-green/60">{activity.branch}</code></span>}
-                      {activity.sha && <span>sha: <code className="text-matrix-green/60">{activity.sha}</code></span>}
-                      {activity.prNumber && <span>PR: <code className="text-matrix-green/60">#{activity.prNumber}</code></span>}
-                      {activity.status === 'success' && activity.type === 'pr_created' && (
-                        <span className="badge badge-done text-[8px]">Checks Pass</span>
+
+                    <div className="flex-1 glass-panel p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-matrix-green font-bold">{activity.title}</span>
+                          <span className={`badge text-[8px] ${
+                            activity.status === 'success' ? 'badge-done' :
+                            activity.status === 'error' ? 'badge-blocked' : 'badge-planned'
+                          }`}>{typeInfo.label}</span>
+                        </div>
+                        <span className="text-[9px] text-matrix-text-muted/30">
+                          {new Date(activity.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      {activity.description && (
+                        <p className="text-[11px] text-matrix-text-muted/50 truncate">{activity.description}</p>
                       )}
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

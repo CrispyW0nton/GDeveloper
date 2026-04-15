@@ -1,136 +1,258 @@
 /**
  * GitHub Integration Layer
- * Handles GitHub App auth, repo listing, file ops, branching, commits, PRs
+ * Real GitHub API integration using Octokit REST
+ * Supports PAT (Personal Access Token) authentication
+ * Lists real repos, branches, files; creates branches, commits, PRs
  */
 
+import { Octokit } from '@octokit/rest';
 import { IGitHubGateway } from '../domain/interfaces';
 import { Repository } from '../domain/entities';
 
-// ─── Demo Repositories ───
-const DEMO_REPOS: Repository[] = [
-  {
-    id: 'repo-1',
-    fullName: 'gdeveloper/web-app',
-    defaultBranch: 'main',
-    isPrivate: false,
-    description: 'Full-stack TypeScript web application',
-    language: 'TypeScript',
-    installationId: 1
-  },
-  {
-    id: 'repo-2',
-    fullName: 'gdeveloper/api-server',
-    defaultBranch: 'main',
-    isPrivate: true,
-    description: 'REST API backend with Express',
-    language: 'TypeScript',
-    installationId: 1
-  },
-  {
-    id: 'repo-3',
-    fullName: 'gdeveloper/mobile-app',
-    defaultBranch: 'develop',
-    isPrivate: false,
-    description: 'React Native mobile application',
-    language: 'TypeScript',
-    installationId: 1
-  },
-  {
-    id: 'repo-4',
-    fullName: 'gdeveloper/infra',
-    defaultBranch: 'main',
-    isPrivate: true,
-    description: 'Infrastructure as Code with Terraform',
-    language: 'HCL',
-    installationId: 1
-  },
-  {
-    id: 'repo-5',
-    fullName: 'gdeveloper/design-system',
-    defaultBranch: 'main',
-    isPrivate: false,
-    description: 'Shared component library and design tokens',
-    language: 'TypeScript',
-    installationId: 1
-  }
-];
-
-// Demo file tree
-const DEMO_FILES: Record<string, string> = {
-  'src/index.ts': `import express from 'express';\nconst app = express();\napp.get('/', (req, res) => res.json({ status: 'ok' }));\napp.listen(3000);`,
-  'src/auth/login.ts': `export async function login(email: string, password: string) {\n  // TODO: implement JWT authentication\n  return { token: 'demo-token', user: { email } };\n}`,
-  'src/auth/register.ts': `export async function register(email: string, password: string) {\n  // TODO: implement user registration\n  return { success: true, user: { email } };\n}`,
-  'package.json': `{\n  "name": "web-app",\n  "version": "1.0.0",\n  "scripts": { "dev": "tsx src/index.ts", "build": "tsc", "test": "vitest" }\n}`,
-  'tsconfig.json': `{\n  "compilerOptions": { "target": "ES2022", "module": "ESNext", "strict": true }\n}`,
-  'README.md': '# Web App\\n\\nFull-stack TypeScript web application.'
-};
-
 export class GitHubAdapter implements IGitHubGateway {
+  private octokit: Octokit | null = null;
   private token: string | null = null;
   private connected = false;
+  private authenticatedUser: string | null = null;
 
   async authenticate(token: string): Promise<void> {
-    this.token = token;
-    this.connected = true;
-    // In production: validate token with GitHub API
+    this.octokit = new Octokit({ auth: token });
+
+    // Validate token by fetching authenticated user
+    try {
+      const { data: user } = await this.octokit.users.getAuthenticated();
+      this.authenticatedUser = user.login;
+      this.token = token;
+      this.connected = true;
+      console.log(`[GitHub] Authenticated as ${user.login}`);
+    } catch (error) {
+      this.octokit = null;
+      this.connected = false;
+      throw new Error(`GitHub authentication failed: ${error instanceof Error ? error.message : 'Invalid token'}`);
+    }
   }
 
   isConnected(): boolean {
     return this.connected;
   }
 
-  async listInstallationRepos(_installationId: number): Promise<Repository[]> {
-    // In production: use Octokit to list repos
-    return DEMO_REPOS;
+  getUsername(): string | null {
+    return this.authenticatedUser;
+  }
+
+  async disconnect(): Promise<void> {
+    this.octokit = null;
+    this.token = null;
+    this.connected = false;
+    this.authenticatedUser = null;
   }
 
   async getAllRepos(): Promise<Repository[]> {
-    return DEMO_REPOS;
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    try {
+      const repos: Repository[] = [];
+      // Fetch user's repos (paginated, up to 100)
+      const { data } = await this.octokit.repos.listForAuthenticatedUser({
+        sort: 'updated',
+        direction: 'desc',
+        per_page: 100,
+        type: 'all'
+      });
+
+      for (const repo of data) {
+        repos.push({
+          id: repo.id.toString(),
+          fullName: repo.full_name,
+          defaultBranch: repo.default_branch || 'main',
+          isPrivate: repo.private,
+          description: repo.description || undefined,
+          language: repo.language || undefined,
+          cloneUrl: repo.clone_url || undefined
+        });
+      }
+
+      return repos;
+    } catch (error) {
+      console.error('[GitHub] Failed to list repos:', error);
+      throw error;
+    }
   }
 
-  async getFileContent(repo: string, path: string, _branch: string): Promise<string> {
-    return DEMO_FILES[path] || `// File: ${path}\n// Content from ${repo}`;
+  async listInstallationRepos(_installationId: number): Promise<Repository[]> {
+    return this.getAllRepos();
   }
 
-  async createBranch(repo: string, branch: string, _baseSha: string): Promise<void> {
-    console.log(`[GitHub] Created branch ${branch} on ${repo}`);
+  async getFileContent(repoFullName: string, path: string, branch: string): Promise<string> {
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+    try {
+      const { data } = await this.octokit.repos.getContent({
+        owner,
+        repo,
+        path,
+        ref: branch
+      });
+
+      if ('content' in data && data.content) {
+        return Buffer.from(data.content, 'base64').toString('utf-8');
+      }
+      throw new Error(`Not a file: ${path}`);
+    } catch (error) {
+      if ((error as any).status === 404) {
+        throw new Error(`File not found: ${path}`);
+      }
+      throw error;
+    }
+  }
+
+  async getFileTree(repoFullName: string, branch: string): Promise<string[]> {
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+    try {
+      const { data } = await this.octokit.git.getTree({
+        owner,
+        repo,
+        tree_sha: branch,
+        recursive: 'true'
+      });
+
+      return data.tree
+        .filter(item => item.type === 'blob' && item.path)
+        .map(item => item.path!);
+    } catch (error) {
+      console.error('[GitHub] Failed to get file tree:', error);
+      return [];
+    }
+  }
+
+  async listBranches(repoFullName: string): Promise<string[]> {
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+    try {
+      const { data } = await this.octokit.repos.listBranches({
+        owner,
+        repo,
+        per_page: 100
+      });
+      return data.map(b => b.name);
+    } catch (error) {
+      console.error('[GitHub] Failed to list branches:', error);
+      return [];
+    }
+  }
+
+  async getLatestSha(repoFullName: string, branch: string): Promise<string> {
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+    const { data } = await this.octokit.repos.getBranch({
+      owner,
+      repo,
+      branch
+    });
+    return data.commit.sha;
+  }
+
+  async createBranch(repoFullName: string, branch: string, baseSha: string): Promise<void> {
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+    await this.octokit.git.createRef({
+      owner,
+      repo,
+      ref: `refs/heads/${branch}`,
+      sha: baseSha
+    });
+    console.log(`[GitHub] Created branch ${branch} on ${repoFullName}`);
   }
 
   async createCommit(
-    repo: string,
+    repoFullName: string,
     branch: string,
     message: string,
     files: Array<{ path: string; content: string }>
   ): Promise<string> {
-    const sha = `sha-${Date.now().toString(36)}`;
-    console.log(`[GitHub] Commit ${sha} on ${repo}/${branch}: ${message} (${files.length} files)`);
-    return sha;
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+
+    // Get latest commit SHA on this branch
+    const { data: ref } = await this.octokit.git.getRef({
+      owner, repo, ref: `heads/${branch}`
+    });
+    const latestCommitSha = ref.object.sha;
+
+    // Get the tree SHA of the latest commit
+    const { data: commit } = await this.octokit.git.getCommit({
+      owner, repo, commit_sha: latestCommitSha
+    });
+    const baseTreeSha = commit.tree.sha;
+
+    // Create blobs for each file
+    const tree: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string }> = [];
+    for (const file of files) {
+      const { data: blob } = await this.octokit.git.createBlob({
+        owner, repo,
+        content: Buffer.from(file.content).toString('base64'),
+        encoding: 'base64'
+      });
+      tree.push({
+        path: file.path,
+        mode: '100644',
+        type: 'blob',
+        sha: blob.sha
+      });
+    }
+
+    // Create new tree
+    const { data: newTree } = await this.octokit.git.createTree({
+      owner, repo,
+      base_tree: baseTreeSha,
+      tree
+    });
+
+    // Create commit
+    const { data: newCommit } = await this.octokit.git.createCommit({
+      owner, repo,
+      message,
+      tree: newTree.sha,
+      parents: [latestCommitSha]
+    });
+
+    // Update branch reference
+    await this.octokit.git.updateRef({
+      owner, repo,
+      ref: `heads/${branch}`,
+      sha: newCommit.sha
+    });
+
+    console.log(`[GitHub] Commit ${newCommit.sha.slice(0, 7)} on ${repoFullName}/${branch}: ${message}`);
+    return newCommit.sha;
   }
 
   async createPullRequest(
-    repo: string,
+    repoFullName: string,
     title: string,
     body: string,
     head: string,
     base: string
   ): Promise<{ number: number; url: string }> {
-    const prNum = Math.floor(Math.random() * 100) + 1;
+    if (!this.octokit) throw new Error('Not authenticated');
+
+    const [owner, repo] = repoFullName.split('/');
+    const { data: pr } = await this.octokit.pulls.create({
+      owner, repo, title, body, head, base
+    });
+
+    console.log(`[GitHub] PR #${pr.number} created: ${pr.html_url}`);
     return {
-      number: prNum,
-      url: `https://github.com/${repo}/pull/${prNum}`
+      number: pr.number,
+      url: pr.html_url
     };
-  }
-
-  async listBranches(_repo: string): Promise<string[]> {
-    return ['main', 'develop', 'ai/auth-setup', 'ai/user-api'];
-  }
-
-  async getLatestSha(_repo: string, _branch: string): Promise<string> {
-    return `sha-${Date.now().toString(36)}`;
-  }
-
-  async getFileTree(_repo: string, _branch: string): Promise<string[]> {
-    return Object.keys(DEMO_FILES);
   }
 }
 
