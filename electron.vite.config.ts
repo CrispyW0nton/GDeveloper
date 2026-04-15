@@ -4,7 +4,22 @@ import { resolve } from 'path';
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [
+      externalizeDepsPlugin({
+        // These packages are ESM-only ("type": "module") and cannot be require()'d
+        // by Electron's CJS main process. We exclude them from externalization so
+        // Vite/Rollup bundles them into the CJS output instead.
+        exclude: [
+          '@octokit/rest',
+          '@octokit/app',
+          '@octokit/auth-app',
+          '@octokit/core',
+          '@octokit/plugin-rest-endpoint-methods',
+          '@octokit/plugin-paginate-rest',
+          'zod',
+        ],
+      }),
+    ],
     build: {
       outDir: 'dist-electron/main',
       rollupOptions: {
