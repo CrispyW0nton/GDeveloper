@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+
+const api = (window as any).electronAPI;
 
 interface SettingsPanelProps {
   onApiKeySet: (provider: string) => void;
@@ -10,6 +12,7 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [existingKey, setExistingKey] = useState('');
 
   // Preferences
   const [maxTurns, setMaxTurns] = useState(50);
@@ -18,21 +21,50 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
   const [autoApproveRead, setAutoApproveRead] = useState(true);
   const [autoApproveWrite, setAutoApproveWrite] = useState(true);
 
+  // Load existing key status on mount
+  useEffect(() => {
+    if (api) {
+      api.getApiKey(provider).then((key: string) => {
+        setExistingKey(key || '');
+      });
+    }
+  }, [provider]);
+
   const handleSaveKey = async () => {
     if (!apiKey.trim()) return;
     setValidating(true);
     setError('');
     try {
-      // Simulate validation
-      await new Promise(resolve => setTimeout(resolve, 1200));
+      if (api) {
+        // Validate key with the main process
+        const result = await api.validateApiKey(provider, apiKey);
+        if (!result.valid) {
+          setError(result.error || 'Invalid API key. Check your key and try again.');
+          setValidating(false);
+          return;
+        }
+        // Save the key securely
+        await api.setApiKey(provider, apiKey);
+      }
       onApiKeySet(provider);
       setSaved(true);
+      setExistingKey('••••••••');
+      setApiKey(''); // Clear the input after save
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
-      setError('Failed to validate API key');
+      setError(err instanceof Error ? err.message : 'Failed to save API key');
     } finally {
       setValidating(false);
     }
+  };
+
+  const handleRemoveKey = async () => {
+    if (api) {
+      await api.removeApiKey(provider);
+    }
+    setExistingKey('');
+    setApiKey('');
+    setSaved(false);
   };
 
   return (
@@ -54,6 +86,14 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
             AI Provider API Key
           </h2>
 
+          {existingKey && (
+            <div className="flex items-center gap-2 text-xs text-matrix-green bg-matrix-green/5 border border-matrix-green/20 rounded px-3 py-2">
+              <span className="w-2 h-2 rounded-full bg-matrix-green animate-pulseDot" />
+              <span>API key configured: {existingKey}</span>
+              <button onClick={handleRemoveKey} className="ml-auto text-matrix-danger/70 hover:text-matrix-danger text-[10px]">Remove</button>
+            </div>
+          )}
+
           <div className="space-y-3">
             <div>
               <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Provider</label>
@@ -69,7 +109,9 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
             </div>
 
             <div>
-              <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">API Key</label>
+              <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">
+                {existingKey ? 'Replace API Key' : 'API Key'}
+              </label>
               <input
                 type="password"
                 value={apiKey}
@@ -87,7 +129,7 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
 
             {saved && (
               <div className="text-xs text-matrix-green bg-matrix-green/5 border border-matrix-green/20 rounded px-3 py-2">
-                API key saved and validated successfully
+                API key saved and validated successfully. Key is encrypted via OS keychain.
               </div>
             )}
 
@@ -99,7 +141,7 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
               {validating ? (
                 <>
                   <span className="w-3 h-3 border border-matrix-green/50 border-t-matrix-green rounded-full animate-spin" />
-                  Validating...
+                  Validating with Anthropic API...
                 </>
               ) : (
                 'Save & Validate Key'
@@ -108,7 +150,7 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
           </div>
 
           <p className="text-[10px] text-matrix-text-muted/30 mt-2">
-            Key is encrypted and stored securely via OS keychain.{' '}
+            Key is encrypted via Electron safeStorage (OS keychain) and persists across restarts.{' '}
             <a href="https://console.anthropic.com/" target="_blank" rel="noreferrer" className="text-matrix-info/50 hover:text-matrix-info underline">
               Get an API key
             </a>
@@ -121,7 +163,6 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
             Orchestration Preferences
           </h2>
-
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Max Turns/Task</label>
@@ -144,7 +185,6 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             Permission Tiers
           </h2>
-
           <div className="space-y-3">
             <label className="flex items-center gap-3 text-xs">
               <input type="checkbox" checked={autoApproveRead} onChange={e => setAutoApproveRead(e.target.checked)} className="accent-matrix-green" />
@@ -170,11 +210,19 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
           <ul className="text-[10px] text-matrix-text-muted/50 space-y-1.5">
             <li className="flex items-center gap-2">
               <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
-              API keys encrypted via OS keychain (electron-store)
+              API keys encrypted via Electron safeStorage (OS keychain)
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
-              Scoped repo isolation per session
+              Keys never leave the main process - renderer only sees masked values
+            </li>
+            <li className="flex items-center gap-2">
+              <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
+              Settings persisted in electron-store (survives restarts)
+            </li>
+            <li className="flex items-center gap-2">
+              <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
+              SQLite database for tasks, chat history, and activity logs
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
@@ -183,14 +231,6 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
             <li className="flex items-center gap-2">
               <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
               Tool approval gating for high-risk operations
-            </li>
-            <li className="flex items-center gap-2">
-              <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
-              Full audit logging of all tool calls
-            </li>
-            <li className="flex items-center gap-2">
-              <span className="w-1 h-1 rounded-full bg-matrix-green/50" />
-              Command timeout & cancellation support
             </li>
           </ul>
         </div>

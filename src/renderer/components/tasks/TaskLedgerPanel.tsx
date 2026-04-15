@@ -1,122 +1,76 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+
+const api = (window as any).electronAPI;
 
 interface TaskLedgerPanelProps {
   sessionId: string;
 }
 
-interface DemoTask {
+interface TaskRecord {
   id: string;
+  session_id: string;
   title: string;
-  status: 'DONE' | 'EXECUTING' | 'VERIFYING' | 'PLANNED' | 'BLOCKED' | 'SCOPED' | 'COMMIT_READY' | 'PR_READY';
-  turnCount: number;
-  maxTurns: number;
-  tokenUsed: number;
-  tokenBudget: number;
-  retryCount: number;
-  branch: string;
-  fileScope: string[];
-  filesTouched: string[];
-  acceptanceCriteria: Array<{ desc: string; met: boolean }>;
-  priority: 'low' | 'medium' | 'high' | 'critical';
-  complexity: 'low' | 'medium' | 'high';
+  description: string;
+  status: string;
+  file_scope: string[];
+  acceptance_criteria: string[];
+  verification_evidence: string[];
+  created_at: string;
+  updated_at: string;
+  transitions?: Array<{
+    id: string;
+    from_status: string;
+    to_status: string;
+    reason: string;
+    timestamp: string;
+  }>;
 }
 
-const DEMO_TASKS: DemoTask[] = [
-  {
-    id: 'task-1',
-    title: 'Set up authentication module',
-    status: 'DONE',
-    turnCount: 12,
-    maxTurns: 50,
-    tokenUsed: 45000,
-    tokenBudget: 500000,
-    retryCount: 0,
-    branch: 'ai/auth-setup',
-    fileScope: ['src/auth/login.ts', 'src/auth/register.ts'],
-    filesTouched: ['src/auth/login.ts', 'src/auth/register.ts', 'src/auth/middleware.ts'],
-    acceptanceCriteria: [
-      { desc: 'JWT token generation works', met: true },
-      { desc: 'Password hashing implemented', met: true },
-      { desc: 'Unit tests pass', met: true }
-    ],
-    priority: 'high',
-    complexity: 'medium'
-  },
-  {
-    id: 'task-2',
-    title: 'Implement user API endpoints',
-    status: 'EXECUTING',
-    turnCount: 5,
-    maxTurns: 50,
-    tokenUsed: 18000,
-    tokenBudget: 500000,
-    retryCount: 0,
-    branch: 'ai/user-api',
-    fileScope: ['src/api/users.ts', 'src/api/middleware.ts'],
-    filesTouched: ['src/api/users.ts'],
-    acceptanceCriteria: [
-      { desc: 'CRUD operations functional', met: false },
-      { desc: 'Input validation added', met: false },
-      { desc: 'Error handling complete', met: false }
-    ],
-    priority: 'high',
-    complexity: 'medium'
-  },
-  {
-    id: 'task-3',
-    title: 'Database schema migration',
-    status: 'PLANNED',
-    turnCount: 0,
-    maxTurns: 50,
-    tokenUsed: 3000,
-    tokenBudget: 500000,
-    retryCount: 0,
-    branch: 'ai/db-schema',
-    fileScope: ['src/db/schema.ts', 'src/db/migrations/*.ts'],
-    filesTouched: [],
-    acceptanceCriteria: [
-      { desc: 'Migration runs without errors', met: false },
-      { desc: 'Schema matches spec', met: false }
-    ],
-    priority: 'medium',
-    complexity: 'high'
-  },
-  {
-    id: 'task-4',
-    title: 'Integrate MCP server tools',
-    status: 'BLOCKED',
-    turnCount: 3,
-    maxTurns: 50,
-    tokenUsed: 8000,
-    tokenBudget: 500000,
-    retryCount: 2,
-    branch: 'ai/mcp-integration',
-    fileScope: ['src/mcp/client.ts', 'src/tools/registry.ts'],
-    filesTouched: ['src/mcp/client.ts'],
-    acceptanceCriteria: [
-      { desc: 'MCP tools registered in tool registry', met: false },
-      { desc: 'Stdio transport working', met: false }
-    ],
-    priority: 'medium',
-    complexity: 'high'
-  }
-];
-
 const STATUS_CONFIG: Record<string, { bg: string; text: string; label: string }> = {
-  DONE: { bg: 'badge-done', text: 'text-matrix-green', label: 'Done' },
+  TASK_CREATED: { bg: 'badge-disconnected', text: 'text-gray-400', label: 'Created' },
+  SCOPED: { bg: 'badge-planned', text: 'text-matrix-warning', label: 'Scoped' },
+  PLANNED: { bg: 'badge-planned', text: 'text-matrix-warning', label: 'Planned' },
   EXECUTING: { bg: 'badge-executing', text: 'text-matrix-green', label: 'Executing' },
   VERIFYING: { bg: 'badge-verifying', text: 'text-matrix-info', label: 'Verifying' },
-  PLANNED: { bg: 'badge-planned', text: 'text-matrix-warning', label: 'Planned' },
-  BLOCKED: { bg: 'badge-blocked', text: 'text-matrix-danger', label: 'Blocked' },
-  SCOPED: { bg: 'badge-planned', text: 'text-matrix-warning', label: 'Scoped' },
   COMMIT_READY: { bg: 'badge-done', text: 'text-matrix-green', label: 'Commit Ready' },
   PR_READY: { bg: 'badge-done', text: 'text-matrix-green', label: 'PR Ready' },
-  TASK_CREATED: { bg: 'badge-disconnected', text: 'text-gray-400', label: 'Created' }
+  DONE: { bg: 'badge-done', text: 'text-matrix-green', label: 'Done' },
+  BLOCKED: { bg: 'badge-blocked', text: 'text-matrix-danger', label: 'Blocked' }
 };
 
 export default function TaskLedgerPanel({ sessionId }: TaskLedgerPanelProps) {
-  const [tasks] = useState<DemoTask[]>(DEMO_TASKS);
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadTasks = async () => {
+    if (!api) { setLoading(false); return; }
+    try {
+      const result = await api.listTasks(sessionId);
+      setTasks(result || []);
+    } catch (err) {
+      console.error('Failed to load tasks:', err);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadTasks();
+    // Poll for updates every 5 seconds
+    const interval = setInterval(loadTasks, 5000);
+    return () => clearInterval(interval);
+  }, [sessionId]);
+
+  // Load task details when selected
+  useEffect(() => {
+    if (selectedTask && api) {
+      api.getTask(selectedTask).then((task: any) => {
+        if (task) {
+          setTasks(prev => prev.map(t => t.id === selectedTask ? { ...t, ...task } : t));
+        }
+      });
+    }
+  }, [selectedTask]);
 
   const selected = tasks.find(t => t.id === selectedTask);
 
@@ -129,11 +83,27 @@ export default function TaskLedgerPanel({ sessionId }: TaskLedgerPanelProps) {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
             Task Ledger
           </h2>
-          <p className="text-[9px] text-matrix-text-muted/30 mt-0.5">{"State Machine: CREATED → SCOPED → PLANNED → EXECUTING → VERIFYING → DONE"}</p>
+          <p className="text-[9px] text-matrix-text-muted/30 mt-0.5">
+            {tasks.length > 0 ? `${tasks.length} task(s) recorded` : 'Tasks from chat sessions appear here'}
+          </p>
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {tasks.map(task => {
+          {loading ? (
+            <div className="p-4 text-center">
+              <span className="w-4 h-4 border-2 border-matrix-green/30 border-t-matrix-green rounded-full animate-spin inline-block" />
+              <p className="text-[10px] text-matrix-text-muted/40 mt-2">Loading tasks...</p>
+            </div>
+          ) : tasks.length === 0 ? (
+            <div className="p-6 text-center">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="mx-auto text-matrix-text-muted/20 mb-2">
+                <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+              </svg>
+              <p className="text-[10px] text-matrix-text-muted/30">
+                No tasks yet. Send a message in Chat to create tasks automatically.
+              </p>
+            </div>
+          ) : tasks.map(task => {
             const sc = STATUS_CONFIG[task.status] || STATUS_CONFIG.TASK_CREATED;
             return (
               <button
@@ -148,13 +118,8 @@ export default function TaskLedgerPanel({ sessionId }: TaskLedgerPanelProps) {
                   <span className={`badge ${sc.bg} text-[8px] ml-2`}>{sc.label}</span>
                 </div>
                 <div className="flex items-center gap-3 text-[10px] text-matrix-text-muted/40">
-                  <span>Turn {task.turnCount}/{task.maxTurns}</span>
-                  <span>{Math.round(task.tokenUsed / task.tokenBudget * 100)}% tokens</span>
-                </div>
-                <div className="mt-1.5">
-                  <div className="matrix-progress">
-                    <div className="matrix-progress-bar" style={{ width: `${task.turnCount / task.maxTurns * 100}%` }} />
-                  </div>
+                  <span>{new Date(task.created_at).toLocaleDateString()}</span>
+                  <span>{new Date(task.created_at).toLocaleTimeString()}</span>
                 </div>
               </button>
             );
@@ -166,76 +131,70 @@ export default function TaskLedgerPanel({ sessionId }: TaskLedgerPanelProps) {
       <div className="flex-1 overflow-y-auto">
         {selected ? (
           <div className="p-6 space-y-5">
-            {/* Task Header */}
             <div>
               <div className="flex items-center gap-3 mb-2">
                 <h3 className="text-lg font-bold text-matrix-green">{selected.title}</h3>
-                <span className={`badge ${STATUS_CONFIG[selected.status].bg}`}>{STATUS_CONFIG[selected.status].label}</span>
+                <span className={`badge ${(STATUS_CONFIG[selected.status] || STATUS_CONFIG.TASK_CREATED).bg}`}>
+                  {(STATUS_CONFIG[selected.status] || STATUS_CONFIG.TASK_CREATED).label}
+                </span>
               </div>
+              <div className="text-xs text-matrix-text-muted/50 mb-3">{selected.description}</div>
               <div className="flex items-center gap-4 text-[10px] text-matrix-text-muted/40">
-                <span>Branch: <code className="text-matrix-green">{selected.branch}</code></span>
-                <span>Priority: <span className="text-matrix-warning">{selected.priority}</span></span>
-                <span>Complexity: <span className="text-matrix-info">{selected.complexity}</span></span>
+                <span>Created: {new Date(selected.created_at).toLocaleString()}</span>
+                <span>Updated: {new Date(selected.updated_at).toLocaleString()}</span>
               </div>
             </div>
 
-            {/* Progress Cards */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="glass-panel p-3">
-                <div className="text-[10px] text-matrix-text-muted/40 uppercase tracking-wider mb-1">Turns</div>
-                <div className="text-lg text-matrix-green font-bold">{selected.turnCount}<span className="text-xs text-matrix-text-muted/30">/{selected.maxTurns}</span></div>
-                <div className="matrix-progress mt-1">
-                  <div className="matrix-progress-bar" style={{ width: `${selected.turnCount / selected.maxTurns * 100}%` }} />
+            {/* State Transitions */}
+            {selected.transitions && selected.transitions.length > 0 && (
+              <div className="glass-panel p-4">
+                <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-3">State Transitions</h4>
+                <div className="space-y-2">
+                  {selected.transitions.map((t, i) => (
+                    <div key={i} className="flex items-center gap-3 text-[10px]">
+                      <span className="text-matrix-text-muted/30 w-20">{new Date(t.timestamp).toLocaleTimeString()}</span>
+                      {t.from_status && (
+                        <>
+                          <span className={`badge ${(STATUS_CONFIG[t.from_status] || STATUS_CONFIG.TASK_CREATED).bg} text-[8px]`}>
+                            {t.from_status}
+                          </span>
+                          <span className="text-matrix-text-muted/30">-&gt;</span>
+                        </>
+                      )}
+                      <span className={`badge ${(STATUS_CONFIG[t.to_status] || STATUS_CONFIG.TASK_CREATED).bg} text-[8px]`}>
+                        {t.to_status}
+                      </span>
+                      {t.reason && <span className="text-matrix-text-muted/40">{t.reason}</span>}
+                    </div>
+                  ))}
                 </div>
               </div>
-              <div className="glass-panel p-3">
-                <div className="text-[10px] text-matrix-text-muted/40 uppercase tracking-wider mb-1">Tokens</div>
-                <div className="text-lg text-matrix-green font-bold">{(selected.tokenUsed / 1000).toFixed(0)}k<span className="text-xs text-matrix-text-muted/30">/{(selected.tokenBudget / 1000).toFixed(0)}k</span></div>
-                <div className="matrix-progress mt-1">
-                  <div className="matrix-progress-bar" style={{ width: `${selected.tokenUsed / selected.tokenBudget * 100}%` }} />
-                </div>
-              </div>
-              <div className="glass-panel p-3">
-                <div className="text-[10px] text-matrix-text-muted/40 uppercase tracking-wider mb-1">Retries</div>
-                <div className="text-lg text-matrix-green font-bold">{selected.retryCount}<span className="text-xs text-matrix-text-muted/30">/3</span></div>
-                <div className="text-[10px] text-matrix-text-muted/30 mt-1">{selected.branch}</div>
-              </div>
-            </div>
-
-            {/* Acceptance Criteria */}
-            <div className="glass-panel p-4">
-              <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-3">Acceptance Criteria</h4>
-              <div className="space-y-2">
-                {selected.acceptanceCriteria.map((ac, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs">
-                    <span className={`w-4 h-4 rounded border flex items-center justify-center ${
-                      ac.met ? 'border-matrix-green bg-matrix-green/10' : 'border-matrix-border'
-                    }`}>
-                      {ac.met && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>}
-                    </span>
-                    <span className={ac.met ? 'text-matrix-green' : 'text-matrix-text-muted/50'}>{ac.desc}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            )}
 
             {/* File Scope */}
-            <div className="glass-panel p-4">
-              <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">File Scope</h4>
-              <div className="flex flex-wrap gap-1.5">
-                {selected.fileScope.map((f, i) => (
-                  <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-matrix-bg-hover border border-matrix-border text-matrix-text-dim">{f}</span>
-                ))}
-              </div>
-            </div>
-
-            {/* Files Touched */}
-            {selected.filesTouched.length > 0 && (
+            {selected.file_scope && selected.file_scope.length > 0 && (
               <div className="glass-panel p-4">
-                <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">Files Touched</h4>
+                <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">File Scope</h4>
                 <div className="flex flex-wrap gap-1.5">
-                  {selected.filesTouched.map((f, i) => (
-                    <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-matrix-green/5 border border-matrix-green/20 text-matrix-green">{f}</span>
+                  {selected.file_scope.map((f, i) => (
+                    <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-matrix-bg-hover border border-matrix-border text-matrix-text-dim">{f}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Acceptance Criteria */}
+            {selected.acceptance_criteria && selected.acceptance_criteria.length > 0 && (
+              <div className="glass-panel p-4">
+                <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-3">Acceptance Criteria</h4>
+                <div className="space-y-2">
+                  {selected.acceptance_criteria.map((ac, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs text-matrix-text-muted/50">
+                      <span className="w-4 h-4 rounded border border-matrix-border flex items-center justify-center">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-matrix-text-muted/30"><polyline points="20 6 9 17 4 12"/></svg>
+                      </span>
+                      {ac}
+                    </div>
                   ))}
                 </div>
               </div>
@@ -246,6 +205,7 @@ export default function TaskLedgerPanel({ sessionId }: TaskLedgerPanelProps) {
             <div className="text-center">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="mx-auto text-matrix-text-muted/20 mb-3"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
               <p className="text-xs text-matrix-text-muted/30">Select a task to view details</p>
+              <p className="text-[10px] text-matrix-text-muted/20 mt-1">Tasks are created automatically from chat sessions</p>
             </div>
           </div>
         )}

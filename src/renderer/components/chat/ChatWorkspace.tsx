@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { SessionInfo, SelectedRepo } from '../../store';
 
+const api = (window as any).electronAPI;
+
 interface ChatWorkspaceProps {
   session: SessionInfo;
   repo: SelectedRepo;
@@ -13,6 +15,7 @@ interface Message {
   content: string;
   toolCalls?: Array<{ name: string; description: string; status: 'success' | 'error' }>;
   timestamp: string;
+  streaming?: boolean;
 }
 
 export default function ChatWorkspace({ session, repo, providerKey }: ChatWorkspaceProps) {
@@ -20,18 +23,60 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
     {
       id: 'sys-1',
       role: 'system',
-      content: `Connected to **${repo.fullName}** on branch \`${repo.defaultBranch}\`.\nGDeveloper orchestration engine active. Multi-prompt system initialized.\n\nAvailable tools: read_file, write_file, edit_file, list_directory, search_code, git_status, git_diff, git_create_branch, git_commit, run_tests, run_lint, run_build, bash_execute + MCP tools.\n\nReady to assist. What would you like to work on?`,
+      content: `Connected to **${repo.fullName}** on branch \`${repo.defaultBranch}\`.\nGDeveloper orchestration engine active. AI provider: ${providerKey || 'Configure in Settings'}.\n\nReady to assist. What would you like to work on?`,
       timestamp: new Date().toISOString()
     }
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [orchestrationPhase, setOrchestrationPhase] = useState('idle');
+  const [streamingContent, setStreamingContent] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, streamingContent]);
+
+  // Load chat history from DB on mount
+  useEffect(() => {
+    if (api && session.id) {
+      api.getChatHistory(session.id).then((history: any[]) => {
+        if (history && history.length > 0) {
+          const dbMessages: Message[] = history.map(m => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            toolCalls: m.tool_calls,
+            timestamp: m.timestamp
+          }));
+          setMessages(prev => {
+            // Keep system message, add DB messages
+            const sys = prev.filter(m => m.role === 'system');
+            return [...sys, ...dbMessages];
+          });
+        }
+      });
+    }
+  }, [session.id]);
+
+  // Listen for streaming chunks
+  useEffect(() => {
+    if (!api?.onStreamChunk) return;
+
+    const unsubscribe = api.onStreamChunk((data: any) => {
+      if (data.sessionId !== session.id) return;
+
+      if (data.type === 'text') {
+        setStreamingContent(data.fullContent || '');
+      } else if (data.type === 'done') {
+        // Stream complete - the final message will come from handleSend
+        setStreamingContent('');
+      } else if (data.type === 'error') {
+        setStreamingContent('');
+      }
+    });
+
+    return () => { if (unsubscribe) unsubscribe(); };
+  }, [session.id]);
 
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
@@ -45,33 +90,47 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setIsLoading(true);
+    setStreamingContent('');
 
-    // Simulate orchestration phases
-    const phases = ['planning', 'scoping', 'executing', 'verifying'];
-    for (const phase of phases) {
-      setOrchestrationPhase(phase);
-      await new Promise(resolve => setTimeout(resolve, 600 + Math.random() * 400));
+    try {
+      if (api) {
+        const result = await api.sendMessage(session.id, input);
+
+        // Add the assistant message (streaming content is already visible)
+        const assistantMsg: Message = {
+          id: result.id || `msg-${Date.now() + 1}`,
+          role: 'assistant',
+          content: result.content,
+          toolCalls: result.toolCalls?.map((tc: any) => ({
+            name: tc.name,
+            description: `Called ${tc.name}`,
+            status: 'success' as const
+          })),
+          timestamp: new Date().toISOString()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+      } else {
+        // Web preview fallback
+        const assistantMsg: Message = {
+          id: `msg-${Date.now() + 1}`,
+          role: 'assistant',
+          content: 'Running in web preview mode. Connect the Electron app to use real AI responses.',
+          timestamp: new Date().toISOString()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+      }
+    } catch (err) {
+      const errMsg: Message = {
+        id: `msg-${Date.now() + 1}`,
+        role: 'assistant',
+        content: `Error: ${err instanceof Error ? err.message : 'Failed to send message'}`,
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errMsg]);
     }
 
-    // Demo AI response
-    const assistantMsg: Message = {
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: `I'll analyze your request and work on it step by step.\n\n**Task Analysis:**\n- Repository: ${repo.fullName}\n- Branch: ${session.workingBranch}\n- Request: ${userMsg.content.substring(0, 100)}\n\n**Plan:**\n1. Read relevant files to understand current structure\n2. Identify required changes\n3. Implement modifications\n4. Run verification (tests, lint, typecheck)\n5. Prepare commit\n\n**Execution:**\nI've analyzed the codebase and identified the key files. Let me proceed with the implementation.\n\n\`\`\`typescript\n// Changes applied to src/auth/login.ts\nexport async function login(email: string, password: string) {\n  const hashedPassword = await bcrypt.hash(password, 10);\n  const token = jwt.sign({ email }, process.env.JWT_SECRET!, { expiresIn: '24h' });\n  return { token, user: { email } };\n}\n\`\`\`\n\n**Verification Results:**\n- Tests: 12 passed, 0 failed\n- ESLint: 0 errors, 1 warning\n- TypeScript: No errors\n- Build: Succeeded in 3.1s\n\nAll acceptance criteria met. Changes are ready for commit.`,
-      toolCalls: [
-        { name: 'read_file', description: 'Read src/auth/login.ts', status: 'success' },
-        { name: 'list_directory', description: 'List src/auth/', status: 'success' },
-        { name: 'search_code', description: 'Search for import patterns', status: 'success' },
-        { name: 'write_file', description: 'Update src/auth/login.ts', status: 'success' },
-        { name: 'run_tests', description: 'Run test suite', status: 'success' },
-        { name: 'run_lint', description: 'Run ESLint', status: 'success' }
-      ],
-      timestamp: new Date().toISOString()
-    };
-
-    setMessages(prev => [...prev, assistantMsg]);
     setIsLoading(false);
-    setOrchestrationPhase('idle');
+    setStreamingContent('');
   };
 
   return (
@@ -87,14 +146,8 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
           <span className="text-[10px] text-matrix-text-dim">branch: {session.workingBranch}</span>
         </div>
         <div className="flex items-center gap-3">
-          {orchestrationPhase !== 'idle' && (
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 border border-matrix-green border-t-transparent rounded-full animate-spin" />
-              <span className="text-[10px] text-matrix-green uppercase tracking-wider">{orchestrationPhase}</span>
-            </div>
-          )}
-          <span className={`badge ${orchestrationPhase !== 'idle' ? 'badge-executing' : 'badge-connected'}`}>
-            {orchestrationPhase !== 'idle' ? 'Orchestrating' : 'Ready'}
+          <span className={`badge ${isLoading ? 'badge-executing' : 'badge-connected'}`}>
+            {isLoading ? 'Streaming...' : 'Ready'}
           </span>
         </div>
       </div>
@@ -110,7 +163,6 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
                   ? 'glass-panel p-3 border-matrix-info/20 bg-matrix-info/5'
                   : 'glass-panel p-4'
             }`}>
-              {/* Role label */}
               <div className="flex items-center gap-2 mb-1.5">
                 <span className={`text-[10px] uppercase tracking-wider font-bold ${
                   msg.role === 'user' ? 'text-matrix-green' : msg.role === 'system' ? 'text-matrix-info' : 'text-matrix-text-dim'
@@ -122,12 +174,10 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
                 </span>
               </div>
 
-              {/* Content */}
               <div className="text-xs text-matrix-text-dim whitespace-pre-wrap leading-relaxed">
                 {renderContent(msg.content)}
               </div>
 
-              {/* Tool calls */}
               {msg.toolCalls && msg.toolCalls.length > 0 && (
                 <div className="mt-3 pt-2 border-t border-matrix-border/30">
                   <p className="text-[9px] text-matrix-text-muted/40 mb-1.5 uppercase tracking-wider">Tool Calls</p>
@@ -148,25 +198,24 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
           </div>
         ))}
 
+        {/* Streaming indicator */}
         {isLoading && (
           <div className="animate-fadeIn">
             <div className="glass-panel p-4 max-w-[85%]">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[10px] uppercase tracking-wider font-bold text-matrix-text-dim">GDeveloper</span>
                 <span className="w-3 h-3 border-2 border-matrix-green/30 border-t-matrix-green rounded-full animate-spin" />
-                <span className="text-xs text-matrix-green">
-                  AI Agent is working
-                  <span className="ml-1 text-matrix-text-muted/40">({orchestrationPhase})</span>
-                </span>
               </div>
-              <div className="mt-2 flex gap-1">
-                {['planning', 'scoping', 'executing', 'verifying'].map(phase => (
-                  <div key={phase} className={`h-1 flex-1 rounded-full ${
-                    orchestrationPhase === phase ? 'bg-matrix-green animate-pulseDot' :
-                    ['planning', 'scoping', 'executing', 'verifying'].indexOf(phase) <
-                    ['planning', 'scoping', 'executing', 'verifying'].indexOf(orchestrationPhase) ? 'bg-matrix-green/50' : 'bg-matrix-border'
-                  }`} />
-                ))}
-              </div>
+              {streamingContent ? (
+                <div className="text-xs text-matrix-text-dim whitespace-pre-wrap leading-relaxed">
+                  {renderContent(streamingContent)}
+                  <span className="inline-block w-1.5 h-4 bg-matrix-green/70 ml-0.5 animate-blink" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-matrix-green">Thinking...</span>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -198,7 +247,9 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
         </div>
         <div className="flex items-center justify-between mt-1.5">
           <span className="text-[9px] text-matrix-text-muted/20">Shift+Enter for new line</span>
-          <span className="text-[9px] text-matrix-text-muted/20">Multi-prompt orchestration active</span>
+          <span className="text-[9px] text-matrix-text-muted/20">
+            {providerKey ? `Provider: ${providerKey}` : 'No provider configured'}
+          </span>
         </div>
       </div>
     </div>
@@ -206,7 +257,6 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
 }
 
 function renderContent(content: string): React.ReactNode {
-  // Simple markdown-like rendering
   const parts = content.split(/(```[\s\S]*?```|\*\*.*?\*\*|`[^`]+`)/g);
   return parts.map((part, i) => {
     if (part.startsWith('```') && part.endsWith('```')) {

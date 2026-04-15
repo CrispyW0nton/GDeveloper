@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
-// MCP types for UI
+const api = (window as any).electronAPI;
+
 interface MCPServer {
   id: string;
   name: string;
@@ -19,92 +20,101 @@ interface MCPTool {
   enabled: boolean;
 }
 
-// Demo data
-const INITIAL_SERVERS: MCPServer[] = [
-  {
-    id: 'mcp-filesystem',
-    name: 'Filesystem Server',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-filesystem', '/workspace'],
-    enabled: true,
-    status: 'disconnected',
-    tools: [
-      { name: 'fs_read', description: 'Read file contents', enabled: true },
-      { name: 'fs_write', description: 'Write content to file', enabled: true },
-      { name: 'fs_list', description: 'List directory contents', enabled: true },
-      { name: 'fs_search', description: 'Search files by pattern', enabled: true }
-    ]
-  },
-  {
-    id: 'mcp-github',
-    name: 'GitHub MCP Server',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    enabled: false,
-    status: 'disconnected',
-    tools: [
-      { name: 'github_search_repos', description: 'Search GitHub repositories', enabled: true },
-      { name: 'github_get_issue', description: 'Get issue details', enabled: true },
-      { name: 'github_list_prs', description: 'List pull requests', enabled: true }
-    ]
-  },
-  {
-    id: 'mcp-unreal',
-    name: 'Unreal MCP Ghost',
-    transport: 'stdio',
-    command: 'python',
-    args: ['-m', 'unreal_mcp_ghost'],
-    enabled: false,
-    status: 'disconnected',
-    tools: [
-      { name: 'ue_get_actors', description: 'Get all actors in current level', enabled: true },
-      { name: 'ue_spawn_actor', description: 'Spawn an actor in UE', enabled: true },
-      { name: 'ue_set_property', description: 'Set actor property', enabled: true },
-      { name: 'ue_run_blueprint', description: 'Execute a blueprint function', enabled: true }
-    ]
-  }
-];
-
 export default function MCPServersPanel() {
-  const [servers, setServers] = useState<MCPServer[]>(INITIAL_SERVERS);
+  const [servers, setServers] = useState<MCPServer[]>([]);
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newServer, setNewServer] = useState({ name: '', transport: 'stdio' as const, command: '', args: '', url: '' });
   const [testing, setTesting] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const loadServers = async () => {
+    if (!api) { setLoading(false); return; }
+    try {
+      const result = await api.listMCPServers();
+      setServers(result || []);
+    } catch (err) {
+      console.error('Failed to load MCP servers:', err);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadServers();
+  }, []);
 
   const selected = servers.find(s => s.id === selectedServer);
 
   const handleConnect = async (id: string) => {
+    setConnectError('');
     setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'connecting' as const } : s));
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'connected' as const } : s));
+    try {
+      if (api) {
+        const result = await api.connectMCPServer(id);
+        if (result.success) {
+          setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'connected' as const, tools: result.tools || s.tools } : s));
+        } else {
+          setConnectError(result.error || 'Connection failed');
+          setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'error' as const } : s));
+        }
+      }
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : 'Connection failed');
+      setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'error' as const } : s));
+    }
   };
 
-  const handleDisconnect = (id: string) => {
+  const handleDisconnect = async (id: string) => {
+    if (api) {
+      await api.disconnectMCPServer(id);
+    }
     setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'disconnected' as const } : s));
   };
 
   const handleTest = async (id: string) => {
     setTesting(id);
-    await new Promise(resolve => setTimeout(resolve, 800));
+    setConnectError('');
+    try {
+      if (api) {
+        const result = await api.testMCPConnection(id);
+        setConnectError(result.success ? '' : 'Connection test failed');
+      }
+    } catch {
+      setConnectError('Test failed');
+    }
     setTesting(null);
   };
 
-  const handleToggleTool = (serverId: string, toolName: string) => {
+  const handleToggleTool = async (serverId: string, toolName: string, enabled: boolean) => {
+    if (api) {
+      await api.toggleMCPTool(serverId, toolName, !enabled);
+    }
     setServers(prev => prev.map(s => {
       if (s.id !== serverId) return s;
       return { ...s, tools: s.tools.map(t => t.name === toolName ? { ...t, enabled: !t.enabled } : t) };
     }));
   };
 
-  const handleRemove = (id: string) => {
+  const handleRemove = async (id: string) => {
+    if (api) {
+      await api.removeMCPServer(id);
+    }
     setServers(prev => prev.filter(s => s.id !== id));
     if (selectedServer === id) setSelectedServer(null);
   };
 
-  const handleAddServer = () => {
+  const handleAddServer = async () => {
+    if (api) {
+      await api.addMCPServer({
+        name: newServer.name,
+        transport: newServer.transport,
+        command: newServer.transport === 'stdio' ? newServer.command : undefined,
+        args: newServer.transport === 'stdio' ? newServer.args.split(' ').filter(Boolean) : undefined,
+        url: newServer.transport !== 'stdio' ? newServer.url : undefined,
+      });
+    }
+    // Add locally too
     const server: MCPServer = {
       id: `mcp-${Date.now()}`,
       name: newServer.name,
@@ -144,7 +154,15 @@ export default function MCPServersPanel() {
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {servers.map(server => (
+          {loading ? (
+            <div className="p-4 text-center">
+              <span className="w-4 h-4 border-2 border-matrix-green/30 border-t-matrix-green rounded-full animate-spin inline-block" />
+            </div>
+          ) : servers.length === 0 ? (
+            <div className="p-4 text-center text-[10px] text-matrix-text-muted/30">
+              No MCP servers configured. Click Add to register one.
+            </div>
+          ) : servers.map(server => (
             <button
               key={server.id}
               onClick={() => setSelectedServer(server.id)}
@@ -169,7 +187,6 @@ export default function MCPServersPanel() {
       <div className="flex-1 overflow-y-auto">
         {selected ? (
           <div className="p-6 space-y-5">
-            {/* Header */}
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-bold text-matrix-green">{selected.name}</h3>
@@ -197,16 +214,21 @@ export default function MCPServersPanel() {
               </div>
             </div>
 
-            {/* Connection Info */}
+            {connectError && (
+              <div className="text-xs text-matrix-danger bg-matrix-danger/5 border border-matrix-danger/20 rounded px-3 py-2">
+                {connectError}
+              </div>
+            )}
+
             <div className="glass-panel p-4 space-y-2">
               <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">Connection Details</h4>
               {selected.transport === 'stdio' ? (
                 <>
                   <div className="flex gap-2 text-xs">
                     <span className="text-matrix-text-muted/40 w-16">Command:</span>
-                    <code className="text-matrix-green">{selected.command}</code>
+                    <code className="text-matrix-green">{selected.command || 'N/A'}</code>
                   </div>
-                  {selected.args && (
+                  {selected.args && selected.args.length > 0 && (
                     <div className="flex gap-2 text-xs">
                       <span className="text-matrix-text-muted/40 w-16">Args:</span>
                       <code className="text-matrix-green">{selected.args.join(' ')}</code>
@@ -221,10 +243,11 @@ export default function MCPServersPanel() {
               )}
             </div>
 
-            {/* Tools Browser */}
             <div className="glass-panel p-4">
               <div className="flex items-center justify-between mb-3">
-                <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider">Discovered Tools ({selected.tools.length})</h4>
+                <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider">
+                  Discovered Tools ({selected.tools.length})
+                </h4>
               </div>
               <div className="space-y-2">
                 {selected.tools.map(tool => (
@@ -237,7 +260,7 @@ export default function MCPServersPanel() {
                       <input
                         type="checkbox"
                         checked={tool.enabled}
-                        onChange={() => handleToggleTool(selected.id, tool.name)}
+                        onChange={() => handleToggleTool(selected.id, tool.name, tool.enabled)}
                         className="sr-only peer"
                       />
                       <div className="w-8 h-4 bg-matrix-border rounded-full peer-checked:bg-matrix-green/30 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-matrix-text-muted/40 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-4 peer-checked:after:bg-matrix-green" />

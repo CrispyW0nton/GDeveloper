@@ -50,6 +50,31 @@ html, body {
   filter: hue-rotate(0deg) saturate(1.5);
 }
 
+/* CSS Matrix Rain Fallback when video fails to load */
+.matrix-rain-fallback {
+  background: linear-gradient(180deg,
+    transparent 0%,
+    rgba(0, 255, 65, 0.03) 10%,
+    transparent 20%,
+    rgba(0, 255, 65, 0.02) 30%,
+    transparent 40%,
+    rgba(0, 255, 65, 0.03) 50%,
+    transparent 60%,
+    rgba(0, 255, 65, 0.02) 70%,
+    transparent 80%,
+    rgba(0, 255, 65, 0.03) 90%,
+    transparent 100%
+  );
+  background-size: 100% 200%;
+  animation: matrixRainBg 8s linear infinite;
+  opacity: 0.3;
+}
+
+@keyframes matrixRainBg {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 200%; }
+}
+
 /* ─── CRT Scanline Overlay ─── */
 .crt-overlay {
   position: fixed;

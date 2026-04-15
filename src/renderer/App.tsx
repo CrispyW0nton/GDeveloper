@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useAppState, TabId } from './store';
 import Sidebar from './components/common/Sidebar';
 import ChatWorkspace from './components/chat/ChatWorkspace';
@@ -9,8 +9,23 @@ import DiffViewer from './components/diff/DiffViewer';
 import ActivityLog from './components/activity/ActivityLog';
 import SettingsPanel from './components/settings/SettingsPanel';
 
+// Detect if running in Electron
+const isElectron = typeof window !== 'undefined' && !!(window as any).electronAPI?.isElectron;
+
 export default function App() {
-  const { state, setApiKey, connectGitHub, selectRepo, setTab, setRepos, toggleSidebar } = useAppState();
+  const { state, setApiKey, connectGitHub, disconnectGitHub, selectRepo, setTab, setRepos, toggleSidebar } = useAppState();
+  const [videoError, setVideoError] = useState(false);
+
+  // Resolve video path for both Electron (file://) and web (http://) modes
+  const videoSrc = useMemo(() => {
+    if (isElectron) {
+      // In packaged Electron app, resources are in the extraResources folder
+      // Use the process.resourcesPath if available, otherwise relative path
+      return './resources/matrix-bg.mp4';
+    }
+    // Web preview mode (Vite dev server serves from publicDir = resources/)
+    return '/matrix-bg.mp4';
+  }, []);
 
   const renderMainContent = () => {
     // If no API key, show settings first
@@ -49,7 +64,7 @@ export default function App() {
         );
       case 'diff':
         return state.selectedRepo ? (
-          <DiffViewer repo={state.selectedRepo} />
+          <DiffViewer repo={state.selectedRepo} sessionId={state.currentSession?.id} />
         ) : (
           <GatedMessage message="Select a repository to view diffs" onGoToGitHub={() => setTab('github')} />
         );
@@ -68,16 +83,21 @@ export default function App() {
 
   return (
     <>
-      {/* Matrix Video Background */}
-      <video
-        className="video-background"
-        autoPlay
-        loop
-        muted
-        playsInline
-      >
-        <source src="/matrix-bg.mp4" type="video/mp4" />
-      </video>
+      {/* Matrix Video Background - CSS fallback if video fails */}
+      {!videoError ? (
+        <video
+          className="video-background"
+          autoPlay
+          loop
+          muted
+          playsInline
+          onError={() => setVideoError(true)}
+        >
+          <source src={videoSrc} type="video/mp4" />
+        </video>
+      ) : (
+        <div className="video-background matrix-rain-fallback" />
+      )}
 
       {/* CRT Scanline Overlay */}
       <div className="crt-overlay" />

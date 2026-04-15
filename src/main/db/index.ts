@@ -1,97 +1,14 @@
 /**
  * SQLite Database Layer using better-sqlite3
- * Local persistence for tasks, chat, verification, tool calls, activity
+ * Real persistent storage for tasks, chat, activity, MCP configs
  */
 
-export interface DatabaseRow {
-  [key: string]: unknown;
-}
+import Database from 'better-sqlite3';
+import { app } from 'electron';
+import { join } from 'path';
+import { v4 as uuid } from 'uuid';
 
-// Schema creation SQL
-export const SCHEMA_SQL = `
--- Users table
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  username TEXT NOT NULL,
-  email TEXT,
-  github_token TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-
--- Repositories
-CREATE TABLE IF NOT EXISTS repositories (
-  id TEXT PRIMARY KEY,
-  full_name TEXT NOT NULL UNIQUE,
-  default_branch TEXT DEFAULT 'main',
-  is_private INTEGER DEFAULT 0,
-  description TEXT,
-  language TEXT,
-  installation_id INTEGER,
-  clone_url TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-
--- Repo Sessions
-CREATE TABLE IF NOT EXISTS repo_sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  repository_id TEXT NOT NULL,
-  repository_full_name TEXT NOT NULL,
-  working_branch TEXT DEFAULT 'main',
-  status TEXT DEFAULT 'active',
-  created_at TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (user_id) REFERENCES users(id),
-  FOREIGN KEY (repository_id) REFERENCES repositories(id)
-);
-
--- Task Ledgers
-CREATE TABLE IF NOT EXISTS task_ledgers (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  repository_full_name TEXT NOT NULL,
-  original_request TEXT NOT NULL,
-  roadmap_item_id TEXT,
-  status TEXT DEFAULT 'TASK_CREATED',
-  current_task_id TEXT,
-  tasks TEXT DEFAULT '[]',
-  completed_tasks TEXT DEFAULT '[]',
-  blocked_tasks TEXT DEFAULT '[]',
-  working_branch TEXT DEFAULT 'main',
-  relevant_files TEXT DEFAULT '[]',
-  event_log TEXT DEFAULT '[]',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (session_id) REFERENCES repo_sessions(id)
-);
-
--- Tasks
-CREATE TABLE IF NOT EXISTS tasks (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  ledger_id TEXT NOT NULL,
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  status TEXT DEFAULT 'TASK_CREATED',
-  file_scope TEXT DEFAULT '[]',
-  files_touched TEXT DEFAULT '[]',
-  acceptance_criteria TEXT DEFAULT '[]',
-  turn_count INTEGER DEFAULT 0,
-  max_turns INTEGER DEFAULT 50,
-  token_used INTEGER DEFAULT 0,
-  token_budget INTEGER DEFAULT 500000,
-  retry_count INTEGER DEFAULT 0,
-  max_retries INTEGER DEFAULT 3,
-  working_branch TEXT DEFAULT '',
-  dependencies TEXT DEFAULT '[]',
-  priority TEXT DEFAULT 'medium',
-  estimated_complexity TEXT DEFAULT 'medium',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (session_id) REFERENCES repo_sessions(id),
-  FOREIGN KEY (ledger_id) REFERENCES task_ledgers(id)
-);
-
--- Chat Messages
+const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS chat_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -99,68 +16,54 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   content TEXT NOT NULL,
   tool_calls TEXT,
   token_count INTEGER DEFAULT 0,
-  timestamp TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (session_id) REFERENCES repo_sessions(id)
+  timestamp TEXT DEFAULT (datetime('now'))
 );
 
--- Tool Call Records
-CREATE TABLE IF NOT EXISTS tool_call_records (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  category TEXT NOT NULL,
-  input TEXT DEFAULT '{}',
-  output TEXT DEFAULT '',
-  status TEXT DEFAULT 'success',
-  permission_tier TEXT DEFAULT 'read-only',
-  duration INTEGER DEFAULT 0,
-  timestamp TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (task_id) REFERENCES tasks(id)
-);
-
--- Verification Results
-CREATE TABLE IF NOT EXISTS verification_results (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL,
-  check_type TEXT NOT NULL,
-  passed INTEGER DEFAULT 0,
-  summary TEXT DEFAULT '',
-  details TEXT DEFAULT '',
-  timestamp TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (task_id) REFERENCES tasks(id)
-);
-
--- Pull Request Records
-CREATE TABLE IF NOT EXISTS pull_request_records (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL,
-  repository_full_name TEXT NOT NULL,
-  pr_number INTEGER,
-  title TEXT NOT NULL,
-  body TEXT DEFAULT '',
-  branch TEXT NOT NULL,
-  base_branch TEXT NOT NULL,
-  status TEXT DEFAULT 'open',
-  url TEXT DEFAULT '',
-  created_at TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (task_id) REFERENCES tasks(id)
-);
-
--- Roadmap Items
-CREATE TABLE IF NOT EXISTS roadmap_items (
+CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT DEFAULT '',
-  status TEXT DEFAULT 'pending',
-  acceptance_criteria TEXT DEFAULT '[]',
+  status TEXT DEFAULT 'TASK_CREATED',
   file_scope TEXT DEFAULT '[]',
-  estimated_complexity TEXT DEFAULT 'medium',
-  dependencies TEXT DEFAULT '[]',
-  FOREIGN KEY (session_id) REFERENCES repo_sessions(id)
+  acceptance_criteria TEXT DEFAULT '[]',
+  verification_evidence TEXT DEFAULT '[]',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- MCP Server Configs
+CREATE TABLE IF NOT EXISTS task_transitions (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  reason TEXT DEFAULT '',
+  timestamp TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  metadata TEXT DEFAULT '{}',
+  status TEXT DEFAULT 'success',
+  timestamp TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS diff_records (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_id TEXT,
+  file_path TEXT NOT NULL,
+  old_content TEXT DEFAULT '',
+  new_content TEXT DEFAULT '',
+  status TEXT DEFAULT 'pending',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS mcp_servers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -170,86 +73,196 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   env TEXT DEFAULT '{}',
   url TEXT,
   enabled INTEGER DEFAULT 1,
-  auto_start INTEGER DEFAULT 0,
   status TEXT DEFAULT 'disconnected',
   tools TEXT DEFAULT '[]',
   last_connected TEXT
 );
 
--- Activity Events
-CREATE TABLE IF NOT EXISTS activity_events (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  type TEXT NOT NULL,
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  branch TEXT,
-  sha TEXT,
-  pr_number INTEGER,
-  status TEXT DEFAULT 'success',
-  timestamp TEXT DEFAULT (datetime('now')),
-  FOREIGN KEY (session_id) REFERENCES repo_sessions(id)
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_task ON tool_call_records(task_id);
-CREATE INDEX IF NOT EXISTS idx_verification_task ON verification_results(task_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
 CREATE INDEX IF NOT EXISTS idx_activity_session ON activity_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_diff_session ON diff_records(session_id);
 `;
 
-/**
- * Database manager class - wraps better-sqlite3 for Electron main process.
- * In web preview mode, uses an in-memory mock.
- */
 export class DatabaseManager {
-  private db: Map<string, any[]> = new Map();
+  private db: Database.Database;
 
-  constructor() {
-    // In-memory store for web preview mode
-    const tables = [
-      'users', 'repositories', 'repo_sessions', 'task_ledgers',
-      'tasks', 'chat_messages', 'tool_call_records', 'verification_results',
-      'pull_request_records', 'roadmap_items', 'mcp_servers', 'activity_events'
-    ];
-    tables.forEach(t => this.db.set(t, []));
+  constructor(dbPath?: string) {
+    const path = dbPath || join(app.getPath('userData'), 'gdeveloper.db');
+    this.db = new Database(path);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.db.exec(SCHEMA_SQL);
   }
 
-  insert(table: string, record: Record<string, unknown>): void {
-    const rows = this.db.get(table) || [];
-    rows.push({ ...record });
-    this.db.set(table, rows);
+  // ─── Chat Messages ─────────────────────────────────
+  insertMessage(sessionId: string, role: string, content: string, toolCalls?: any[], tokenCount = 0): string {
+    const id = uuid();
+    this.db.prepare(
+      `INSERT INTO chat_messages (id, session_id, role, content, tool_calls, token_count)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(id, sessionId, role, content, toolCalls ? JSON.stringify(toolCalls) : null, tokenCount);
+    return id;
   }
 
-  findById(table: string, id: string): Record<string, unknown> | undefined {
-    return (this.db.get(table) || []).find((r: any) => r.id === id);
+  getMessages(sessionId: string): any[] {
+    return this.db.prepare(
+      `SELECT * FROM chat_messages WHERE session_id = ? ORDER BY timestamp ASC`
+    ).all(sessionId).map((row: any) => ({
+      ...row,
+      tool_calls: row.tool_calls ? JSON.parse(row.tool_calls) : null
+    }));
   }
 
-  findAll(table: string, filter?: Record<string, unknown>): Record<string, unknown>[] {
-    const rows = this.db.get(table) || [];
-    if (!filter) return rows;
-    return rows.filter((r: any) => {
-      return Object.entries(filter).every(([k, v]) => r[k] === v);
-    });
+  // ─── Tasks ─────────────────────────────────────────
+  createTask(sessionId: string, title: string, description = ''): string {
+    const id = uuid();
+    this.db.prepare(
+      `INSERT INTO tasks (id, session_id, title, description) VALUES (?, ?, ?, ?)`
+    ).run(id, sessionId, title, description);
+    // Record initial transition
+    this.addTaskTransition(id, '', 'TASK_CREATED', 'Task created');
+    return id;
   }
 
-  update(table: string, id: string, data: Record<string, unknown>): void {
-    const rows = this.db.get(table) || [];
-    const idx = rows.findIndex((r: any) => r.id === id);
-    if (idx >= 0) {
-      rows[idx] = { ...rows[idx], ...data, updated_at: new Date().toISOString() };
+  updateTaskStatus(taskId: string, newStatus: string, reason = ''): void {
+    const task = this.db.prepare(`SELECT status FROM tasks WHERE id = ?`).get(taskId) as any;
+    if (!task) return;
+    const oldStatus = task.status;
+    this.db.prepare(
+      `UPDATE tasks SET status = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(newStatus, taskId);
+    this.addTaskTransition(taskId, oldStatus, newStatus, reason);
+  }
+
+  addTaskTransition(taskId: string, fromStatus: string, toStatus: string, reason = ''): void {
+    this.db.prepare(
+      `INSERT INTO task_transitions (id, task_id, from_status, to_status, reason)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(uuid(), taskId, fromStatus, toStatus, reason);
+  }
+
+  getTasks(sessionId: string): any[] {
+    return this.db.prepare(
+      `SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC`
+    ).all(sessionId).map((row: any) => ({
+      ...row,
+      file_scope: JSON.parse(row.file_scope || '[]'),
+      acceptance_criteria: JSON.parse(row.acceptance_criteria || '[]'),
+      verification_evidence: JSON.parse(row.verification_evidence || '[]')
+    }));
+  }
+
+  getTaskTransitions(taskId: string): any[] {
+    return this.db.prepare(
+      `SELECT * FROM task_transitions WHERE task_id = ? ORDER BY timestamp ASC`
+    ).all(taskId);
+  }
+
+  getAllTasks(): any[] {
+    return this.db.prepare(
+      `SELECT * FROM tasks ORDER BY created_at DESC`
+    ).all().map((row: any) => ({
+      ...row,
+      file_scope: JSON.parse(row.file_scope || '[]'),
+      acceptance_criteria: JSON.parse(row.acceptance_criteria || '[]'),
+      verification_evidence: JSON.parse(row.verification_evidence || '[]')
+    }));
+  }
+
+  // ─── Activity Events ───────────────────────────────
+  logActivity(sessionId: string, type: string, title: string, description = '', metadata = {}, status = 'success'): string {
+    const id = uuid();
+    this.db.prepare(
+      `INSERT INTO activity_events (id, session_id, type, title, description, metadata, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, sessionId, type, title, description, JSON.stringify(metadata), status);
+    return id;
+  }
+
+  getActivity(sessionId?: string): any[] {
+    if (sessionId) {
+      return this.db.prepare(
+        `SELECT * FROM activity_events WHERE session_id = ? ORDER BY timestamp DESC LIMIT 100`
+      ).all(sessionId).map((r: any) => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
     }
+    return this.db.prepare(
+      `SELECT * FROM activity_events ORDER BY timestamp DESC LIMIT 100`
+    ).all().map((r: any) => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
   }
 
-  delete(table: string, id: string): void {
-    const rows = this.db.get(table) || [];
-    this.db.set(table, rows.filter((r: any) => r.id !== id));
+  // ─── Diff Records ──────────────────────────────────
+  addDiff(sessionId: string, taskId: string | null, filePath: string, oldContent: string, newContent: string): string {
+    const id = uuid();
+    this.db.prepare(
+      `INSERT INTO diff_records (id, session_id, task_id, file_path, old_content, new_content)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(id, sessionId, taskId, filePath, oldContent, newContent);
+    return id;
+  }
+
+  getDiffs(sessionId: string): any[] {
+    return this.db.prepare(
+      `SELECT * FROM diff_records WHERE session_id = ? ORDER BY created_at DESC`
+    ).all(sessionId);
+  }
+
+  // ─── MCP Servers ───────────────────────────────────
+  saveMCPServer(config: any): string {
+    const id = config.id || uuid();
+    const existing = this.db.prepare(`SELECT id FROM mcp_servers WHERE id = ?`).get(id);
+    if (existing) {
+      this.db.prepare(
+        `UPDATE mcp_servers SET name=?, transport=?, command=?, args=?, env=?, url=?, enabled=? WHERE id=?`
+      ).run(config.name, config.transport, config.command, JSON.stringify(config.args || []),
+            JSON.stringify(config.env || {}), config.url || null, config.enabled ? 1 : 0, id);
+    } else {
+      this.db.prepare(
+        `INSERT INTO mcp_servers (id, name, transport, command, args, env, url, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, config.name, config.transport, config.command,
+            JSON.stringify(config.args || []), JSON.stringify(config.env || {}),
+            config.url || null, config.enabled !== false ? 1 : 0);
+    }
+    return id;
+  }
+
+  getMCPServers(): any[] {
+    return this.db.prepare(`SELECT * FROM mcp_servers`).all().map((r: any) => ({
+      ...r,
+      args: JSON.parse(r.args || '[]'),
+      env: JSON.parse(r.env || '{}'),
+      tools: JSON.parse(r.tools || '[]'),
+      enabled: !!r.enabled
+    }));
+  }
+
+  removeMCPServer(id: string): void {
+    this.db.prepare(`DELETE FROM mcp_servers WHERE id = ?`).run(id);
+  }
+
+  // ─── Settings (non-sensitive) ──────────────────────
+  setSetting(key: string, value: string): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`
+    ).run(key, value);
+  }
+
+  getSetting(key: string): string | null {
+    const row = this.db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as any;
+    return row?.value || null;
+  }
+
+  close(): void {
+    this.db.close();
   }
 }
 
-// Singleton
 let dbInstance: DatabaseManager | null = null;
 
 export function getDatabase(): DatabaseManager {
