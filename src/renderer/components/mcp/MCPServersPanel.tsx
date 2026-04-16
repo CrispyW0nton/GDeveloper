@@ -26,6 +26,7 @@ export default function MCPServersPanel() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newServer, setNewServer] = useState({ name: '', transport: 'stdio' as const, command: '', args: '', url: '' });
   const [testing, setTesting] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ reachable?: boolean; mcpReady?: boolean } | null>(null);
   const [connectError, setConnectError] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -53,7 +54,8 @@ export default function MCPServersPanel() {
       if (api) {
         const result = await api.connectMCPServer(id);
         if (result.success) {
-          setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'connected' as const, tools: result.tools || s.tools } : s));
+          // Refresh from backend to get the canonical state with discovered tools
+          await loadServers();
         } else {
           setConnectError(result.error || 'Connection failed');
           setServers(prev => prev.map(s => s.id === id ? { ...s, status: 'error' as const } : s));
@@ -75,10 +77,14 @@ export default function MCPServersPanel() {
   const handleTest = async (id: string) => {
     setTesting(id);
     setConnectError('');
+    setTestResult(null);
     try {
       if (api) {
         const result = await api.testMCPConnection(id);
-        setConnectError(result.success ? '' : 'Connection test failed');
+        setTestResult({ reachable: result.reachable, mcpReady: result.mcpReady });
+        if (!result.success) {
+          setConnectError(result.error || (result.reachable ? 'Endpoint reachable but MCP handshake failed' : 'Connection test failed - server unreachable'));
+        }
       }
     } catch {
       setConnectError('Test failed');
@@ -106,27 +112,23 @@ export default function MCPServersPanel() {
 
   const handleAddServer = async () => {
     if (api) {
-      await api.addMCPServer({
+      const result = await api.addMCPServer({
         name: newServer.name,
         transport: newServer.transport,
         command: newServer.transport === 'stdio' ? newServer.command : undefined,
         args: newServer.transport === 'stdio' ? newServer.args.split(' ').filter(Boolean) : undefined,
         url: newServer.transport !== 'stdio' ? newServer.url : undefined,
       });
+      if (result.success) {
+        // Refresh the entire list from the backend (canonical source of truth)
+        await loadServers();
+        // Select the newly added server
+        if (result.server?.id) {
+          setSelectedServer(result.server.id);
+        }
+      }
     }
-    // Add locally too
-    const server: MCPServer = {
-      id: `mcp-${Date.now()}`,
-      name: newServer.name,
-      transport: newServer.transport,
-      command: newServer.transport === 'stdio' ? newServer.command : undefined,
-      args: newServer.transport === 'stdio' ? newServer.args.split(' ').filter(Boolean) : undefined,
-      url: newServer.transport !== 'stdio' ? newServer.url : undefined,
-      enabled: true,
-      status: 'disconnected',
-      tools: []
-    };
-    setServers(prev => [...prev, server]);
+    // Do NOT add a local copy - the loadServers() call above is the source of truth
     setShowAddDialog(false);
     setNewServer({ name: '', transport: 'stdio', command: '', args: '', url: '' });
   };
@@ -220,6 +222,23 @@ export default function MCPServersPanel() {
               </div>
             )}
 
+            {testResult && !connectError && (
+              <div className="text-xs bg-matrix-green/5 border border-matrix-green/20 rounded px-3 py-2 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${testResult.reachable ? 'bg-matrix-green' : 'bg-matrix-danger'}`} />
+                  <span className={testResult.reachable ? 'text-matrix-green' : 'text-matrix-danger'}>
+                    Endpoint {testResult.reachable ? 'reachable' : 'unreachable'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${testResult.mcpReady ? 'bg-matrix-green' : 'bg-matrix-warning'}`} />
+                  <span className={testResult.mcpReady ? 'text-matrix-green' : 'text-matrix-warning'}>
+                    MCP handshake {testResult.mcpReady ? 'succeeded' : 'not confirmed'}
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div className="glass-panel p-4 space-y-2">
               <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">Connection Details</h4>
               {selected.transport === 'stdio' ? (
@@ -234,12 +253,22 @@ export default function MCPServersPanel() {
                       <code className="text-matrix-green">{selected.args.join(' ')}</code>
                     </div>
                   )}
+                  <div className="mt-2 text-[10px] text-matrix-text-muted/30">
+                    stdio: GDeveloper spawns the process, communicates via stdin/stdout JSON-RPC.
+                  </div>
                 </>
               ) : (
-                <div className="flex gap-2 text-xs">
-                  <span className="text-matrix-text-muted/40 w-16">URL:</span>
-                  <code className="text-matrix-green">{selected.url || 'Not configured'}</code>
-                </div>
+                <>
+                  <div className="flex gap-2 text-xs">
+                    <span className="text-matrix-text-muted/40 w-16">URL:</span>
+                    <code className="text-matrix-green">{selected.url || 'Not configured'}</code>
+                  </div>
+                  <div className="mt-2 text-[10px] text-matrix-text-muted/30">
+                    {selected.transport === 'sse'
+                      ? 'SSE: Connects via GET /sse for events, POST /messages/ for requests.'
+                      : 'HTTP: Posts JSON-RPC directly to the URL endpoint.'}
+                  </div>
+                </>
               )}
             </div>
 
@@ -269,7 +298,7 @@ export default function MCPServersPanel() {
                 ))}
                 {selected.tools.length === 0 && (
                   <p className="text-xs text-matrix-text-muted/30 text-center py-4">
-                    {selected.status === 'connected' ? 'No tools discovered' : 'Connect to discover tools'}
+                    {selected.status === 'connected' ? 'No tools discovered - the server may not expose any tools' : 'Connect to discover tools'}
                   </p>
                 )}
               </div>
@@ -320,12 +349,22 @@ export default function MCPServersPanel() {
                     <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Arguments (space-separated)</label>
                     <input value={newServer.args} onChange={e => setNewServer(p => ({ ...p, args: e.target.value }))} className="matrix-input" placeholder="-y @modelcontextprotocol/server-filesystem /path" />
                   </div>
+                  <p className="text-[9px] text-matrix-text-muted/30">
+                    GDeveloper spawns the process and communicates via stdin/stdout JSON-RPC.
+                  </p>
                 </>
               ) : (
-                <div>
-                  <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">URL</label>
-                  <input value={newServer.url} onChange={e => setNewServer(p => ({ ...p, url: e.target.value }))} className="matrix-input" placeholder="http://localhost:3001" />
-                </div>
+                <>
+                  <div>
+                    <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">URL</label>
+                    <input value={newServer.url} onChange={e => setNewServer(p => ({ ...p, url: e.target.value }))} className="matrix-input" placeholder={newServer.transport === 'sse' ? 'http://localhost:8000/sse' : 'http://localhost:8000'} />
+                  </div>
+                  <p className="text-[9px] text-matrix-text-muted/30">
+                    {newServer.transport === 'sse'
+                      ? 'SSE endpoint (e.g., http://localhost:8000/sse). GDeveloper tries streamable-http first, then SSE fallback.'
+                      : 'HTTP endpoint. GDeveloper sends JSON-RPC POST requests directly.'}
+                  </p>
+                </>
               )}
             </div>
 

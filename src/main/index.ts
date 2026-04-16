@@ -235,12 +235,25 @@ function registerIPCHandlers(): void {
 
     // Save user message to DB
     db.insertMessage(sessionId, 'user', message);
-    db.logActivity(sessionId, 'chat_send', `Message sent`, message.substring(0, 100));
+    db.logActivity(sessionId, 'chat_send', `Message sent`, message.substring(0, 100), {
+      sessionId,
+      provider: provider?.name || 'none'
+    });
 
     if (!provider) {
       const errMsg = 'No AI provider configured. Please add an API key in Settings.';
       db.insertMessage(sessionId, 'assistant', errMsg);
+      db.logActivity(sessionId, 'chat_error', 'No provider configured', errMsg, {}, 'error');
       return { role: 'assistant', content: errMsg, error: true };
+    }
+
+    // Auto-create a task on the first message in this session
+    const existingTasks = db.getTasks(sessionId);
+    let taskId: string | null = null;
+    if (existingTasks.length === 0) {
+      const taskTitle = message.length > 80 ? message.substring(0, 80) + '...' : message;
+      taskId = db.createTask(sessionId, taskTitle, message);
+      db.logActivity(sessionId, 'task_updated', `Task created: ${taskTitle}`, message.substring(0, 200), { taskId, status: 'TASK_CREATED' });
     }
 
     try {
@@ -251,40 +264,140 @@ function registerIPCHandlers(): void {
         content: m.content
       }));
 
-      // Stream the response
+      // Collect available MCP tools for Claude
+      const mcpServers = mcp.getServers();
+      const mcpTools: any[] = [];
+      for (const s of mcpServers) {
+        if (s.status === 'connected') {
+          for (const t of s.tools) {
+            if (t.enabled) {
+              mcpTools.push({
+                name: t.name,
+                description: t.description || '',
+                inputSchema: t.inputSchema || { type: 'object', properties: {} },
+                source: 'mcp',
+                serverName: s.name,
+                serverId: s.id
+              });
+            }
+          }
+        }
+      }
+
+      // Stream the response (pass MCP tools so Claude can use them)
       const result = await streamChatToRenderer(
         mainWindow,
         provider,
         messages,
         sessionId,
-        SYSTEM_PROMPT
+        SYSTEM_PROMPT,
+        mcpTools.length > 0 ? mcpTools : undefined
       );
 
       // Save assistant response to DB
       const msgId = db.insertMessage(sessionId, 'assistant', result.content, result.toolCalls);
 
-      // Create task record if this looks like a task request
-      if (result.content.length > 50) {
-        const existingTasks = db.getTasks(sessionId);
-        if (existingTasks.length === 0 || message.toLowerCase().includes('task') || message.toLowerCase().includes('implement') || message.toLowerCase().includes('build') || message.toLowerCase().includes('create') || message.toLowerCase().includes('fix')) {
-          const taskTitle = message.length > 80 ? message.substring(0, 80) + '...' : message;
-          db.createTask(sessionId, taskTitle, message);
+      // Handle tool_use: execute MCP tools and continue the conversation
+      if (result.toolCalls && result.toolCalls.length > 0) {
+        for (const tc of result.toolCalls) {
+          db.logActivity(sessionId, 'tool_call', `Tool call: ${tc.name}`, JSON.stringify(tc.input).substring(0, 200), {
+            toolName: tc.name,
+            toolCallId: tc.id,
+            sessionId
+          });
+
+          // Find which server has this tool
+          const toolMeta = mcpTools.find(t => t.name === tc.name);
+          if (toolMeta) {
+            try {
+              const toolResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
+
+              // Format tool result content
+              const resultContent = toolResult?.content
+                ? (Array.isArray(toolResult.content)
+                    ? toolResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
+                    : JSON.stringify(toolResult.content))
+                : JSON.stringify(toolResult);
+
+              db.logActivity(sessionId, 'tool_result', `Tool result: ${tc.name}`, resultContent.substring(0, 200), {
+                toolName: tc.name,
+                toolCallId: tc.id,
+                success: true
+              });
+
+              // Send tool result to renderer
+              mainWindow?.webContents.send('chat:stream-chunk', {
+                sessionId,
+                type: 'tool_result',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                result: resultContent.substring(0, 2000)
+              });
+
+              // Store tool result as a message for conversation continuity
+              db.insertMessage(sessionId, 'user', `[Tool Result: ${tc.name}]\n${resultContent.substring(0, 4000)}`);
+            } catch (toolErr) {
+              const toolErrMsg = toolErr instanceof Error ? toolErr.message : 'Tool execution failed';
+              db.logActivity(sessionId, 'tool_error', `Tool error: ${tc.name}`, toolErrMsg, {
+                toolName: tc.name,
+                toolCallId: tc.id
+              }, 'error');
+
+              mainWindow?.webContents.send('chat:stream-chunk', {
+                sessionId,
+                type: 'tool_error',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                error: toolErrMsg
+              });
+            }
+          }
         }
       }
 
-      db.logActivity(sessionId, 'chat_response', `AI responded`, result.content.substring(0, 100));
+      // Create additional tasks for follow-up task-like messages
+      if (!taskId && result.content.length > 50) {
+        const isTaskRequest = ['task', 'implement', 'build', 'create', 'fix', 'update', 'add', 'change', 'refactor', 'debug'].some(
+          kw => message.toLowerCase().includes(kw)
+        );
+        if (isTaskRequest) {
+          const taskTitle = message.length > 80 ? message.substring(0, 80) + '...' : message;
+          const newTaskId = db.createTask(sessionId, taskTitle, message);
+          db.logActivity(sessionId, 'task_updated', `Task created: ${taskTitle}`, '', { taskId: newTaskId, status: 'TASK_CREATED' });
+        }
+      }
+
+      // Update existing task to EXECUTING status
+      if (taskId) {
+        db.updateTaskStatus(taskId, 'EXECUTING', 'AI response received');
+        db.logActivity(sessionId, 'task_updated', 'Task executing', 'AI processing response', { taskId, status: 'EXECUTING' });
+      }
+
+      db.logActivity(sessionId, 'chat_response', `AI responded (${result.content.length} chars)`, result.content.substring(0, 150), {
+        sessionId,
+        provider: provider.name,
+        contentLength: result.content.length,
+        toolCalls: result.toolCalls?.length || 0
+      });
 
       return {
         id: msgId,
         role: 'assistant',
         content: result.content,
         toolCalls: result.toolCalls,
-        streaming: true // Tells renderer the response was streamed
+        streaming: true
       };
     } catch (err) {
       const errMsg = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
       db.insertMessage(sessionId, 'assistant', errMsg);
-      db.logActivity(sessionId, 'chat_error', errMsg, '', {}, 'error');
+      db.logActivity(sessionId, 'chat_error', 'Chat error', errMsg, { sessionId, provider: provider.name }, 'error');
+
+      // Mark task as blocked on error
+      if (taskId) {
+        db.updateTaskStatus(taskId, 'BLOCKED', errMsg);
+        db.logActivity(sessionId, 'task_updated', 'Task blocked', errMsg, { taskId, status: 'BLOCKED' });
+      }
+
       return { role: 'assistant', content: errMsg, error: true };
     }
   });
@@ -302,8 +415,15 @@ function registerIPCHandlers(): void {
   // ─── Tasks ──────────────────────────────────────────────
 
   ipcMain.handle(IPC_CHANNELS.TASK_LIST, async (_event, sessionId?: string) => {
+    // Always return all tasks - sessions are ephemeral but tasks should persist
+    // across app restarts and be visible regardless of session
     if (sessionId) {
-      return db.getTasks(sessionId);
+      const sessionTasks = db.getTasks(sessionId);
+      // Also include tasks from other sessions if requested session has none
+      if (sessionTasks.length === 0) {
+        return db.getAllTasks();
+      }
+      return sessionTasks;
     }
     return db.getAllTasks();
   });
@@ -327,7 +447,21 @@ function registerIPCHandlers(): void {
   // ─── Activity ──────────────────────────────────────────
 
   ipcMain.handle(IPC_CHANNELS.ACTIVITY_LIST, async (_event, sessionId?: string) => {
-    return db.getActivity(sessionId);
+    // Return all activity events (session-specific + system-level)
+    // so the Activity Log panel always shows relevant events
+    if (sessionId) {
+      const sessionEvents = db.getActivity(sessionId);
+      const systemEvents = db.getActivity('system');
+      // Merge, dedupe by id, sort by timestamp desc
+      const merged = new Map<string, any>();
+      for (const e of [...sessionEvents, ...systemEvents]) {
+        merged.set(e.id, e);
+      }
+      return Array.from(merged.values()).sort((a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      ).slice(0, 200);
+    }
+    return db.getActivity();
   });
 
   // ─── Diff ──────────────────────────────────────────────
@@ -349,7 +483,7 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.MCP_ADD_SERVER, async (_event, config: any) => {
     try {
-      await mcp.addServer({
+      const savedServer = await mcp.addServer({
         id: config.id || uuid(),
         name: config.name,
         transport: config.transport || 'stdio',
@@ -362,8 +496,9 @@ function registerIPCHandlers(): void {
         status: 'disconnected' as any,
         tools: []
       });
-      db.logActivity('system', 'mcp_server_added', `MCP server added: ${config.name}`);
-      return { success: true };
+      db.logActivity('system', 'mcp_server_added', `MCP server added: ${config.name}`, '', { serverId: savedServer.id, transport: config.transport });
+      // Return the canonical server record so the renderer uses the correct ID
+      return { success: true, server: savedServer };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to add server' };
     }
@@ -378,13 +513,19 @@ function registerIPCHandlers(): void {
     try {
       await mcp.connectServer(id);
       const server = mcp.getServer(id);
-      db.logActivity('system', 'mcp_connected', `MCP connected: ${server?.name}`, '', {
+      const toolCount = server?.tools.length || 0;
+      db.logActivity('system', 'mcp_connected', `MCP connected: ${server?.name}`, `Discovered ${toolCount} tool(s)`, {
         serverId: id,
-        tools: server?.tools.length || 0
+        serverName: server?.name,
+        transport: server?.transport,
+        tools: toolCount,
+        toolNames: server?.tools.map(t => t.name).slice(0, 10)
       });
       return { success: true, tools: server?.tools || [] };
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Connection failed' };
+      const errMsg = err instanceof Error ? err.message : 'Connection failed';
+      db.logActivity('system', 'mcp_error', `MCP connection failed: ${mcp.getServer(id)?.name || id}`, errMsg, { serverId: id }, 'error');
+      return { success: false, error: errMsg };
     }
   });
 
@@ -395,7 +536,12 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.MCP_TEST, async (_event, id: string) => {
     const result = await mcp.testConnection(id);
-    return { success: result };
+    return {
+      success: result.reachable,
+      reachable: result.reachable,
+      mcpReady: result.mcpReady,
+      error: result.error
+    };
   });
 
   ipcMain.handle(IPC_CHANNELS.MCP_GET_TOOLS, async (_event, serverId?: string) => {
@@ -441,10 +587,43 @@ function registerIPCHandlers(): void {
     return tools;
   });
 
-  ipcMain.handle(IPC_CHANNELS.TOOL_EXECUTE, async (_event, name: string, input: any) => {
-    // For now, log the tool call
-    db.logActivity('system', 'tool_execute', `Tool executed: ${name}`, JSON.stringify(input).substring(0, 200));
-    return { success: true, output: `Tool ${name} executed` };
+  ipcMain.handle(IPC_CHANNELS.TOOL_EXECUTE, async (_event, name: string, input: any, serverId?: string) => {
+    try {
+      // Find which server has this tool
+      let targetServerId = serverId;
+      if (!targetServerId) {
+        const servers = mcp.getServers();
+        for (const s of servers) {
+          if (s.status === 'connected' && s.tools.some(t => t.name === name && t.enabled)) {
+            targetServerId = s.id;
+            break;
+          }
+        }
+      }
+
+      if (!targetServerId) {
+        return { success: false, error: `No connected MCP server provides tool: ${name}` };
+      }
+
+      db.logActivity('system', 'tool_execute', `Executing tool: ${name}`, JSON.stringify(input).substring(0, 200), {
+        toolName: name,
+        serverId: targetServerId
+      });
+
+      const result = await mcp.executeTool(targetServerId, name, input || {});
+
+      db.logActivity('system', 'tool_result', `Tool completed: ${name}`, JSON.stringify(result).substring(0, 200), {
+        toolName: name,
+        serverId: targetServerId,
+        success: true
+      });
+
+      return { success: true, output: result };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Tool execution failed';
+      db.logActivity('system', 'tool_error', `Tool failed: ${name}`, errMsg, { toolName: name }, 'error');
+      return { success: false, error: errMsg };
+    }
   });
 
   // ─── Verification ──────────────────────────────────────
@@ -465,12 +644,26 @@ app.whenReady().then(() => {
   // Initialize services before registering handlers
   const settings = getSecureSettings();
 
-  // Auto-register saved API keys as providers
+  // Auto-register saved API keys as providers (with best model detection)
   const providers = settings.getConfiguredProviders();
   for (const provider of providers) {
     const key = settings.getApiKey(provider);
     if (key && provider === 'claude') {
-      providerRegistry.register(new ClaudeProvider(key));
+      // Try to detect best model from saved key
+      const tempProvider = new ClaudeProvider(key);
+      tempProvider.validateKey().then(result => {
+        let bestModel = 'claude-sonnet-4-6';
+        if (result.valid && result.models && result.models.length > 0) {
+          const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
+          const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
+          bestModel = sonnet4 || anySonnet || result.models[0];
+          console.log(`[Startup] Auto-detected best model: ${bestModel}`);
+        }
+        providerRegistry.register(new ClaudeProvider(key, bestModel));
+      }).catch(() => {
+        // Fallback: register with default model
+        providerRegistry.register(new ClaudeProvider(key));
+      });
     }
   }
 

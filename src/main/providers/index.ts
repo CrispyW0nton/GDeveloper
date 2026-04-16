@@ -314,13 +314,14 @@ export async function streamChatToRenderer(
   provider: ILLMProvider,
   messages: Array<{ role: string; content: string }>,
   sessionId: string,
-  systemPrompt?: string
+  systemPrompt?: string,
+  tools?: ToolDefinition[]
 ): Promise<{ content: string; toolCalls?: any[] }> {
   let fullContent = '';
   const toolCalls: any[] = [];
 
   try {
-    for await (const chunk of (provider as ClaudeProvider).streamMessage(messages, undefined, systemPrompt)) {
+    for await (const chunk of (provider as ClaudeProvider).streamMessage(messages, tools, systemPrompt)) {
       if (chunk.type === 'text' && chunk.content) {
         fullContent += chunk.content;
         win?.webContents.send('chat:stream-chunk', {
