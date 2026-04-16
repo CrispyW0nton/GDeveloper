@@ -89,13 +89,14 @@ export interface IToolRegistry {
 
 // ─── MCP Client Manager ───
 export interface IMCPClientManager {
-  addServer(config: MCPServerConfig): Promise<void>;
+  addServer(config: MCPServerConfig): Promise<MCPServerConfig>;
   removeServer(id: string): Promise<void>;
   connectServer(id: string): Promise<void>;
   disconnectServer(id: string): Promise<void>;
   getServers(): MCPServerConfig[];
   getServerTools(id: string): Promise<MCPServerConfig['tools']>;
-  testConnection(id: string): Promise<boolean>;
+  testConnection(id: string): Promise<{ reachable: boolean; mcpReady: boolean; error?: string }>;
+  executeTool(serverId: string, toolName: string, args: Record<string, unknown>): Promise<any>;
 }
 
 // ─── Orchestration Engine ───

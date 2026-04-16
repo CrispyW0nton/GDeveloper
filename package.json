@@ -34,8 +34,18 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "resources/icon.png",
       "signAndEditExecutable": false,
@@ -58,10 +68,13 @@
       "dist-renderer/**/*",
       "resources/**/*"
     ],
-    "extraResources": ["resources/**"]
+    "extraResources": [
+      "resources/**"
+    ]
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/app": "^15.1.0",
     "@octokit/auth-app": "^7.1.0",
     "@octokit/rest": "^21.0.0",
