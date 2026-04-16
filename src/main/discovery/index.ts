@@ -64,11 +64,15 @@ export async function scanForRepositories(
       onProgress({ scanned, found: repos.length, currentDir: dir });
     }
 
+    // Safety: abort if we've scanned an unreasonable number of directories
+    if (scanned > 50000) return;
+
     // Check if this directory IS a git repo (.git exists)
     const dotGit = join(dir, '.git');
     let hasDotGit = false;
     try {
-      hasDotGit = existsSync(dotGit) && statSync(dotGit).isDirectory();
+      const dotGitStat = existsSync(dotGit) ? statSync(dotGit) : null;
+      hasDotGit = dotGitStat !== null && (dotGitStat.isDirectory() || dotGitStat.isFile());
     } catch { /* permission error, skip */ }
 
     if (hasDotGit) {
@@ -84,11 +88,11 @@ export async function scanForRepositories(
           remoteUrl: origin?.refs?.fetch || '',
           branch: status.current || '(detached)',
           isClean: status.isClean(),
-          dirtyCount: status.modified.length + status.not_added.length,
+          dirtyCount: (status.modified?.length || 0) + (status.not_added?.length || 0),
           alreadyManaged: managedPaths.has(resolve(dir).toLowerCase()),
         });
       } catch {
-        // Not a valid git repo despite having .git dir
+        // Not a valid git repo despite having .git dir — skip silently
       }
       // Don't recurse into git repos (they're leaf nodes)
       return;
@@ -114,7 +118,12 @@ export async function scanForRepositories(
     }
   }
 
-  await walk(absRoot, 0);
+  try {
+    await walk(absRoot, 0);
+  } catch (err) {
+    console.error('[Discovery] Walk error (non-fatal):', err);
+    // Return whatever we found so far rather than throwing
+  }
 
   db.logActivity('system', 'repo_scan_completed', `Scan complete: found ${repos.length} repos in ${scanned} dirs`, '', {
     rootPath: absRoot, found: repos.length, scanned

@@ -6,9 +6,12 @@ const api = (window as any).electronAPI;
 
 interface SettingsPanelProps {
   onApiKeySet: (provider: string) => void;
+  selectedModel?: string;
+  availableModels?: string[];
+  onModelChange?: (model: string) => void;
 }
 
-export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
+export default function SettingsPanel({ onApiKeySet, selectedModel, availableModels, onModelChange }: SettingsPanelProps) {
   const [apiKey, setApiKey] = useState('');
   const [provider, setProvider] = useState('claude');
   const [validating, setValidating] = useState(false);
@@ -176,6 +179,44 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
             </a>
           </p>
         </div>
+
+        {/* Model Selection — Sprint 16 */}
+        {availableModels && availableModels.length > 0 && (
+          <div className="glass-panel p-5 space-y-4">
+            <h2 className="text-sm font-bold text-matrix-green flex items-center gap-2">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+              AI Model
+            </h2>
+            <p className="text-[10px] text-matrix-text-muted/50">
+              Select which AI model to use for chat and tool calls. Models with tool support are recommended for agentic workflows.
+            </p>
+            <div className="space-y-2">
+              {availableModels.map(model => {
+                const isSelected = model === selectedModel;
+                return (
+                  <button
+                    key={model}
+                    onClick={() => onModelChange?.(model)}
+                    className={`w-full text-left p-3 rounded-lg border text-xs transition-all ${
+                      isSelected
+                        ? 'border-matrix-accent bg-matrix-accent/10 ring-1 ring-matrix-accent/30'
+                        : 'border-matrix-border hover:border-matrix-accent/30 hover:bg-matrix-bg-hover'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono font-bold text-matrix-green">{model}</span>
+                      {isSelected && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-matrix-green">
+                          <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Theme Selector — Sprint 15 */}
         <div className="glass-panel p-5 space-y-4">

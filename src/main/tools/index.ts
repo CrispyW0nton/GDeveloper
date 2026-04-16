@@ -3,6 +3,9 @@
  * All file tools resolve relative to active workspace root.
  * Refuse operations outside workspace boundary.
  * Log every operation to activity via DB.
+ *
+ * Sprint 16: multi_edit, bash_command, parallel_search, parallel_read,
+ * summarize_large_document, task_plan tools added.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
@@ -10,6 +13,12 @@ import { join, resolve, relative, isAbsolute, dirname, sep } from 'path';
 import { execSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
 import { getDatabase } from '../db';
+import { executeMultiEdit, type MultiEditInput } from './multiEdit';
+import { executeBashCommand, isDestructiveCommand, isBlockedCommand, type BashCommandInput } from './bashCommand';
+import { executeParallelSearch, type ParallelSearchInput } from './parallelSearch';
+import { executeParallelRead, type ParallelReadInput } from './parallelRead';
+import { executeSummarizeLargeDocument, type SummarizeInput } from './summarizeLargeDocument';
+import { executeTaskPlan, getActivePlan, type TaskPlanInput } from './taskPlan';
 
 // ─── Workspace State ───
 
@@ -23,6 +32,16 @@ export function setActiveWorkspace(path: string | null): void {
 export function getActiveWorkspace(): string | null {
   return activeWorkspacePath;
 }
+
+// Re-export Sprint 16 types for consumers
+export type { MultiEditInput, MultiEditResult, EditOp } from './multiEdit';
+export type { BashCommandInput, BashCommandResult } from './bashCommand';
+export type { ParallelSearchInput, ParallelSearchResult } from './parallelSearch';
+export type { ParallelReadInput, ParallelReadResult } from './parallelRead';
+export type { SummarizeInput, SummarizeResult } from './summarizeLargeDocument';
+export type { TaskPlanInput, TaskPlanResult, TaskPlan, TaskItem, TaskStatus } from './taskPlan';
+export { getActivePlan } from './taskPlan';
+export { isDestructiveCommand, isBlockedCommand } from './bashCommand';
 
 // ─── Path Security ───
 
@@ -180,6 +199,116 @@ export const LOCAL_TOOL_DEFINITIONS: LocalToolDef[] = [
       },
       required: ['message']
     }
+  },
+  // ─── Sprint 16: New Agent Tools ───
+  {
+    name: 'multi_edit',
+    description: 'Atomic multi-edit: apply a list of find-and-replace edits to a single file. All edits are applied sequentially; if any old_string is not found, no edits are applied (all-or-none). Returns a unified diff.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'File path relative to workspace root' },
+        edits: {
+          type: 'array',
+          description: 'List of edit operations to apply sequentially',
+          items: {
+            type: 'object',
+            properties: {
+              old_string: { type: 'string', description: 'Text to find (empty string to append)' },
+              new_string: { type: 'string', description: 'Replacement text' },
+              replace_all: { type: 'boolean', description: 'Replace all occurrences (default: false)' }
+            },
+            required: ['old_string', 'new_string']
+          }
+        }
+      },
+      required: ['file_path', 'edits']
+    }
+  },
+  {
+    name: 'bash_command',
+    description: 'Execute a shell command in the workspace. Captures stdout, stderr, and exit code. Timeout: configurable up to 120s. Destructive commands are flagged.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to execute' },
+        cwd: { type: 'string', description: 'Working directory relative to workspace (default: workspace root)' },
+        timeout: { type: 'number', description: 'Timeout in milliseconds (default: 30000, max: 120000)' },
+        description: { type: 'string', description: 'Brief description of what this command does' }
+      },
+      required: ['command']
+    }
+  },
+  {
+    name: 'parallel_search',
+    description: 'Run 2-6 web searches in parallel. Returns top results per query.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        queries: {
+          type: 'array',
+          description: 'List of 2-6 search queries',
+          items: { type: 'string' }
+        }
+      },
+      required: ['queries']
+    }
+  },
+  {
+    name: 'parallel_read',
+    description: 'Fetch and read content from multiple URLs in parallel. Optionally answer per-URL questions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        urls: {
+          type: 'array',
+          description: 'List of URLs to read (string or {url, question} objects)',
+          items: { type: 'string' }
+        }
+      },
+      required: ['urls']
+    }
+  },
+  {
+    name: 'summarize_large_document',
+    description: 'Answer a specific question from a long document/URL. Fetches the document, extracts relevant sections, and returns a structured answer with citations.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'URL of the document to analyze' },
+        question: { type: 'string', description: 'Specific question to answer from the document' }
+      },
+      required: ['url', 'question']
+    }
+  },
+  {
+    name: 'task_plan',
+    description: 'Create and manage a visible task plan. Actions: create (new plan with tasks), update (change task status), append (add tasks), get (view current plan). Statuses: pending, in_progress, done, skipped, failed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'update', 'append', 'get'], description: 'Operation to perform' },
+        plan_id: { type: 'string', description: 'Plan ID (optional, uses active plan if omitted)' },
+        tasks: {
+          type: 'array',
+          description: 'Tasks to create or append',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Task ID (auto-generated if omitted)' },
+              content: { type: 'string', description: 'Task description' },
+              status: { type: 'string', description: 'Initial status (default: pending)' },
+              priority: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Priority (default: medium)' }
+            },
+            required: ['content']
+          }
+        },
+        task_id: { type: 'string', description: 'Task ID to update (for update action)' },
+        new_status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'skipped', 'failed'], description: 'New status (for update action)' },
+        notes: { type: 'string', description: 'Optional notes for update' }
+      },
+      required: ['action']
+    }
   }
 ];
 
@@ -228,6 +357,38 @@ export async function executeLocalTool(
       case 'git_commit':
         result = await toolGitCommit(ws, args);
         break;
+      // ─── Sprint 16: New Agent Tools ───
+      case 'multi_edit': {
+        const meResult = executeMultiEdit(ws, resolveSafe, args as unknown as MultiEditInput);
+        if (!meResult.success) throw new Error(meResult.error || 'multi_edit failed');
+        result = JSON.stringify(meResult);
+        break;
+      }
+      case 'bash_command': {
+        const bcResult = executeBashCommand(ws, resolveSafe, args as unknown as BashCommandInput);
+        result = JSON.stringify(bcResult);
+        break;
+      }
+      case 'parallel_search': {
+        const psResult = await executeParallelSearch(args as unknown as ParallelSearchInput);
+        result = JSON.stringify(psResult);
+        break;
+      }
+      case 'parallel_read': {
+        const prResult = await executeParallelRead(args as unknown as ParallelReadInput);
+        result = JSON.stringify(prResult);
+        break;
+      }
+      case 'summarize_large_document': {
+        const sdResult = await executeSummarizeLargeDocument(args as unknown as SummarizeInput);
+        result = JSON.stringify(sdResult);
+        break;
+      }
+      case 'task_plan': {
+        const tpResult = executeTaskPlan(args as unknown as TaskPlanInput);
+        result = JSON.stringify(tpResult);
+        break;
+      }
       default:
         throw new Error(`Unknown local tool: ${name}`);
     }

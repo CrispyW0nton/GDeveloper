@@ -9,6 +9,7 @@ import { getActiveWorkspace, LOCAL_TOOL_DEFINITIONS } from '../tools';
 import { getDatabase } from '../db';
 import { getMCPManager } from '../mcp';
 import { providerRegistry, ClaudeProvider } from '../providers';
+import { executeResearch, compareRepos, downloadExternalRepo } from '../research';
 
 // ─── Interfaces ───
 
@@ -35,13 +36,38 @@ export interface SlashCommand {
 }
 
 // ─── Write tools that are disabled in Plan mode ───
+// Sprint 16: added multi_edit and bash_command to the blocked set
 export const WRITE_TOOL_NAMES = [
   'write_file',
   'patch_file',
   'run_command',
   'git_commit',
   'git_create_branch',
+  // Sprint 16 mutating tools
+  'multi_edit',
+  'bash_command',
 ];
+
+// Tools that are always allowed in Plan mode (read-only/planning)
+export const PLAN_MODE_ALLOWED = [
+  'read_file',
+  'list_files',
+  'search_files',
+  'git_status',
+  'git_diff',
+  'git_log',
+  'parallel_search',
+  'parallel_read',
+  'summarize_large_document',
+  'task_plan',
+];
+
+// ─── Main window reference (for streaming results to renderer) ───
+let _mainWindow: any = null;
+
+export function setCommandsMainWindow(win: any): void {
+  _mainWindow = win;
+}
 
 // ─── Execution Mode State ───
 let currentMode: 'plan' | 'build' = 'build';
@@ -381,36 +407,36 @@ register({
 
 register({
   name: 'pr',
-  description: 'Create a pull request (coming in Sprint 15).',
+  description: 'Create a pull request (coming in Sprint 16).',
   category: 'workflow',
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     return {
       success: true,
-      message: '**PR workflow** is coming in Sprint 15. This will create branch + commit + push + draft PR from chat.',
+      message: '**PR workflow** is coming in Sprint 16. This will create branch + commit + push + draft PR from chat.',
     };
   },
 });
 
 register({
   name: 'handoff',
-  description: 'Generate developer handoff package (coming in Sprint 15).',
+  description: 'Generate developer handoff package (coming in Sprint 16).',
   category: 'workflow',
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     return {
       success: true,
-      message: '**Handoff generation** is coming in Sprint 15. This will generate a zip of plans, tasks, changes, and conversation summary.',
+      message: '**Handoff generation** is coming in Sprint 16. This will generate a zip of plans, tasks, changes, and conversation summary.',
     };
   },
 });
 
 register({
   name: 'plan-generate',
-  description: 'Generate a development roadmap (coming in Sprint 15).',
+  description: 'Generate a development roadmap (coming in Sprint 16).',
   category: 'workflow',
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     return {
       success: true,
-      message: '**Roadmap generation** is coming in Sprint 15. This will analyze the repo and generate plan.md + tasks.md.',
+      message: '**Roadmap generation** is coming in Sprint 16. This will analyze the repo and generate plan.md + tasks.md.',
     };
   },
 });
@@ -431,26 +457,115 @@ register({
       };
     }
 
+    const question = args.trim();
+
+    // Stream progress to chat via mainWindow
+    const sendProgress = (stage: string, detail: string) => {
+      if (_mainWindow && !_mainWindow.isDestroyed()) {
+        _mainWindow.webContents.send('chat:stream-chunk', {
+          sessionId: ctx.sessionId,
+          type: 'text',
+          content: `\n**[Research: ${stage}]** ${detail}\n`,
+          fullContent: `**[Research: ${stage}]** ${detail}`,
+        });
+      }
+    };
+
+    // Execute research asynchronously — don't await; let it stream into chat
+    (async () => {
+      try {
+        const wsPath = ctx.workspacePath || undefined;
+        const report = await executeResearch(question, ctx.sessionId, wsPath, (stage, detail) => {
+          sendProgress(stage, detail);
+        });
+
+        // Send final report as a done message
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'research-complete',
+            report: {
+              topic: report.topic,
+              findings: report.findings,
+              recommendation: report.recommendation,
+              plan: report.plan,
+            },
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'error',
+            content: `Research failed: ${errMsg}`,
+          });
+        }
+      }
+    })();
+
     return {
       success: true,
-      message: `**Research started:** "${args.trim()}"\n\nThe AI will analyze this question using deep research workflow.\nResults will appear in chat. This may take a moment...`,
-      data: { action: 'research', question: args.trim(), workspacePath: ctx.workspacePath, sessionId: ctx.sessionId },
+      message: `**Deep Research started:** "${question}"\n\nAnalyzing with multi-step research workflow...\nProgress and results will stream into this chat.`,
+      data: { action: 'research-started', question },
     };
   },
 });
 
 register({
   name: 'research-continue',
-  description: 'Continue or refine the last research query.',
+  description: 'Continue or refine the last research query. Usage: /research-continue <follow-up>',
   category: 'workflow',
-  async execute(args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
     if (!args.trim()) {
       return { success: true, message: '**Usage:** `/research-continue <follow-up question or refinement>`' };
     }
+
+    const question = args.trim();
+
+    // Same async pattern as /research
+    (async () => {
+      try {
+        const wsPath = ctx.workspacePath || undefined;
+        const report = await executeResearch(question, ctx.sessionId, wsPath, (stage, detail) => {
+          if (_mainWindow && !_mainWindow.isDestroyed()) {
+            _mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId: ctx.sessionId,
+              type: 'text',
+              content: `\n**[Research: ${stage}]** ${detail}\n`,
+              fullContent: `**[Research: ${stage}]** ${detail}`,
+            });
+          }
+        });
+
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'research-complete',
+            report: {
+              topic: report.topic,
+              findings: report.findings,
+              recommendation: report.recommendation,
+              plan: report.plan,
+            },
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'error',
+            content: `Research failed: ${errMsg}`,
+          });
+        }
+      }
+    })();
+
     return {
       success: true,
-      message: `**Continuing research:** "${args.trim()}"`,
-      data: { action: 'research-continue', question: args.trim() },
+      message: `**Continuing research:** "${question}"\n\nDeep analysis in progress...`,
+      data: { action: 'research-started', question },
     };
   },
 });
@@ -467,10 +582,53 @@ register({
         message: '**Usage:** `/compare-repos <path-or-url-1> <path-or-url-2> [focus area]`\n\nCompares two projects side by side with architecture analysis, feature comparison, and recommendations.',
       };
     }
+
+    const repoA = parts[0];
+    const repoB = parts[1];
+    const focus = parts.slice(2).join(' ') || undefined;
+
+    // Execute comparison asynchronously
+    (async () => {
+      try {
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'text',
+            content: '\n**[Comparison]** Gathering repository context...\n',
+            fullContent: '**[Comparison]** Gathering repository context...',
+          });
+        }
+
+        const result = await compareRepos(repoA, repoB, ctx.sessionId, focus);
+
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'research-complete',
+            report: {
+              topic: `Comparison: ${repoA} vs ${repoB}`,
+              findings: result,
+              recommendation: '',
+              plan: [],
+            },
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'error',
+            content: `Comparison failed: ${errMsg}`,
+          });
+        }
+      }
+    })();
+
     return {
       success: true,
-      message: `**Comparing:** \`${parts[0]}\` vs \`${parts[1]}\`\nFocus: ${parts.slice(2).join(' ') || 'general'}`,
-      data: { action: 'compare-repos', repoA: parts[0], repoB: parts[1], focus: parts.slice(2).join(' ') },
+      message: `**Comparing:** \`${repoA}\` vs \`${repoB}\`\nFocus: ${focus || 'general'}\n\nAnalysis in progress — results will stream into this chat.`,
+      data: { action: 'comparison-started', repoA, repoB, focus },
     };
   },
 });

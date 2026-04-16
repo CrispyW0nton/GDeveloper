@@ -14,6 +14,7 @@ import MatrixRainCanvas from './components/common/MatrixRainCanvas';
 import WorkspacePanel from './components/workspace/WorkspacePanel';
 import TerminalPanel from './components/terminal/TerminalPanel';
 import BottomPanel from './components/common/BottomPanel';
+import SandboxMonitor from './components/sandbox/SandboxMonitor';
 
 export default function App() {
   return (
@@ -29,6 +30,7 @@ function AppInner() {
     setTab, setRepos, toggleSidebar, setActiveWorkspace, refreshWorkspaces,
     clearStartupError, setExecutionMode, toggleTerminalPanel,
     setTerminalPanelHeight, setTerminalPanelOpen,
+    setSelectedModel, toggleSandboxMonitor, setSandboxMonitorOpen,
   } = useAppState();
   const { showMatrixRain, showCrtOverlay } = useTheme();
 
@@ -62,7 +64,7 @@ function AppInner() {
   const renderMainContent = () => {
     // If no API key, show settings first
     if (!state.apiKeyConfigured && state.activeTab !== 'settings') {
-      return <SettingsPanel onApiKeySet={setApiKey} />;
+      return <SettingsPanel onApiKeySet={setApiKey} selectedModel={state.selectedModel} availableModels={state.availableModels} onModelChange={setSelectedModel} />;
     }
 
     switch (state.activeTab) {
@@ -90,6 +92,9 @@ function AppInner() {
               providerKey={state.apiKeyProvider}
               executionMode={state.executionMode}
               onModeChange={setExecutionMode}
+              selectedModel={state.selectedModel}
+              availableModels={state.availableModels}
+              onModelChange={setSelectedModel}
             />
           );
         }
@@ -167,7 +172,14 @@ function AppInner() {
         );
 
       case 'settings':
-        return <SettingsPanel onApiKeySet={setApiKey} />;
+        return (
+          <SettingsPanel
+            onApiKeySet={setApiKey}
+            selectedModel={state.selectedModel}
+            availableModels={state.availableModels}
+            onModelChange={setSelectedModel}
+          />
+        );
 
       default:
         return null;
@@ -219,10 +231,19 @@ function AppInner() {
             onHeightChange={setTerminalPanelHeight}
             onClose={() => setTerminalPanelOpen(false)}
           >
-            <TerminalPanel
-              activeWorkspace={state.activeWorkspace}
-              onClose={() => setTerminalPanelOpen(false)}
-            />
+            <div className="flex h-full">
+              <div className={`${state.sandboxMonitorOpen ? 'w-1/2' : 'w-full'} h-full overflow-hidden`}>
+                <TerminalPanel
+                  activeWorkspace={state.activeWorkspace}
+                  onClose={() => setTerminalPanelOpen(false)}
+                />
+              </div>
+              {state.sandboxMonitorOpen && (
+                <div className="w-1/2 h-full border-l border-matrix-border/20 overflow-hidden">
+                  <SandboxMonitor onClose={() => setSandboxMonitorOpen(false)} />
+                </div>
+              )}
+            </div>
           </BottomPanel>
         </div>
       </div>
