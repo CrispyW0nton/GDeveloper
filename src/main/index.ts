@@ -26,7 +26,7 @@ import {
 } from './tools';
 import {
   getAllCommands, getCommand, getExecutionMode, setExecutionMode,
-  WRITE_TOOL_NAMES, WorkspaceContext,
+  WRITE_TOOL_NAMES, WorkspaceContext, setCommandsMainWindow,
 } from './commands';
 import { scanForRepositories, importDiscoveredRepos, DiscoveredRepo } from './discovery';
 import { getManagedRoot, setManagedRoot, moveWorkspace, moveToManagedRoot, ensureManagedRoot } from './migration';
@@ -48,6 +48,35 @@ let mainWindow: BrowserWindow | null = null;
 
 // ─── Active workspace ID in memory ───
 let activeWorkspaceId: string | null = null;
+
+// ─── Sprint 16: Sandbox Monitor Log ───
+interface SandboxEvent {
+  id: string;
+  timestamp: string;
+  type: 'tool_call' | 'tool_result' | 'command' | 'file_edit' | 'mcp_call' | 'status' | 'error';
+  tool?: string;
+  summary: string;
+  detail?: string;
+  cwd?: string;
+  status: 'running' | 'success' | 'error';
+}
+
+const sandboxLog: SandboxEvent[] = [];
+const MAX_SANDBOX_LOG = 500;
+
+function emitSandboxEvent(event: Omit<SandboxEvent, 'id' | 'timestamp'>): void {
+  const entry: SandboxEvent = {
+    ...event,
+    id: `sb-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+    timestamp: new Date().toISOString(),
+  };
+  sandboxLog.push(entry);
+  if (sandboxLog.length > MAX_SANDBOX_LOG) sandboxLog.shift();
+  // Emit to renderer
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sandbox:event', entry);
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -278,6 +307,20 @@ function registerIPCHandlers(): void {
       return { role: 'assistant', content: errMsg, error: true };
     }
 
+    // Sprint 16: Model-tool compatibility check
+    const selectedModelId = providerRegistry.selectedModel;
+    if (!providerRegistry.checkModelToolSupport(selectedModelId)) {
+      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-sonnet-4-6) in Settings.`;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('chat:stream-chunk', {
+          sessionId,
+          type: 'text',
+          content: `\n**[Model Warning]** ${warnMsg}\n`,
+          fullContent: warnMsg,
+        });
+      }
+    }
+
     // Auto-create a task on the first message in this session
     const existingTasks = db.getTasks(sessionId);
     let taskId: string | null = null;
@@ -415,6 +458,40 @@ function registerIPCHandlers(): void {
           let toolResultContent: string;
           let isError = false;
 
+          // Sprint 16: Plan/Build mode enforcement — reject write tools in plan mode
+          if (mode === 'plan' && WRITE_TOOL_NAMES.includes(tc.name)) {
+            toolResultContent = `Error: Tool "${tc.name}" is disabled in Plan mode. Switch to Build mode with /build to use write tools.`;
+            isError = true;
+            emitSandboxEvent({ type: 'error', tool: tc.name, summary: `Blocked ${tc.name} (Plan mode)`, status: 'error' });
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: tc.id,
+              content: toolResultContent,
+              is_error: true,
+            });
+            // Send to renderer
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('chat:stream-chunk', {
+                sessionId,
+                type: 'tool_error',
+                toolName: tc.name,
+                result: toolResultContent,
+              });
+            }
+            continue;
+          }
+
+          // Sprint 15.2: Emit sandbox event for tool start with cwd and args
+          const isCommandTool = ['run_command', 'bash_command'].includes(tc.name);
+          emitSandboxEvent({
+            type: isCommandTool ? 'command' : 'tool_call',
+            tool: tc.name,
+            summary: isCommandTool ? `$ ${(tc.input?.command || '').substring(0, 100)}` : `Calling ${tc.name}`,
+            detail: JSON.stringify(tc.input || {}).substring(0, 500),
+            cwd: getActiveWorkspace() || undefined,
+            status: 'running',
+          });
+
           // Check if it's a local tool
           const isLocalTool = LOCAL_TOOL_DEFINITIONS.some(t => t.name === tc.name);
 
@@ -422,24 +499,38 @@ function registerIPCHandlers(): void {
             try {
               const localResult = await executeLocalTool(tc.name, tc.input || {});
               toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
+              // Sprint 15.2: Emit file_edit event for write/patch tools
+              const isFileEdit = ['write_file', 'patch_file', 'multi_edit'].includes(tc.name);
+              emitSandboxEvent({
+                type: isFileEdit ? 'file_edit' : 'tool_result',
+                tool: tc.name,
+                summary: `${tc.name} completed${isFileEdit ? `: ${tc.input?.path || tc.input?.file_path || ''}` : ''}`,
+                detail: toolResultContent.substring(0, 300),
+                cwd: getActiveWorkspace() || undefined,
+                status: 'success',
+              });
             } catch (err) {
               toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
               isError = true;
+              emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `${tc.name} failed`, detail: toolResultContent, status: 'error' });
             }
           } else {
             // MCP tool
             const toolMeta = mcpTools.find(t => t.name === tc.name);
             if (toolMeta) {
               try {
+                emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
                 const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
                 toolResultContent = mcpResult?.content
                   ? (Array.isArray(mcpResult.content)
                       ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
                       : JSON.stringify(mcpResult.content))
                   : JSON.stringify(mcpResult);
+                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
               } catch (err) {
                 toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
                 isError = true;
+                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} failed`, detail: toolResultContent, status: 'error' });
               }
             } else {
               toolResultContent = `Error: Unknown tool "${tc.name}"`;
@@ -1221,9 +1312,14 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.DISCOVERY_SCAN, async (_event, rootPath: string, maxDepth?: number) => {
     try {
-      const repos = await scanForRepositories(rootPath, maxDepth || 5);
-      return { success: true, repos };
+      if (!rootPath || typeof rootPath !== 'string') {
+        return { success: false, error: 'Invalid scan path', repos: [] };
+      }
+      const depth = Math.min(Math.max(1, maxDepth || 5), 8); // clamp 1-8
+      const repos = await scanForRepositories(rootPath.trim(), depth);
+      return { success: true, repos: repos || [] };
     } catch (err) {
+      console.error('[Discovery] Scan error:', err);
       return { success: false, error: err instanceof Error ? err.message : 'Scan failed', repos: [] };
     }
   });
@@ -1629,6 +1725,50 @@ function registerIPCHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.FORGE_APP_TOGGLE_FAVORITE, async (_event, id: string) => {
     return toggleAppFavorite(id);
   });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 16: Model Selection IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_LIST, async () => {
+    return providerRegistry.availableModels;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_GET_SELECTED, async () => {
+    return providerRegistry.selectedModel;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_SET_SELECTED, async (_event, model: string) => {
+    providerRegistry.selectedModel = model;
+    // Persist the selection
+    try {
+      const settings = getSecureSettings();
+      settings.updateSettings({ selectedModel: model });
+    } catch { /* ignore */ }
+    return { success: true, model };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_DISCOVER, async () => {
+    const models = await providerRegistry.discoverModels();
+    return models;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_CHECK_TOOLS, async (_event, model?: string) => {
+    return providerRegistry.checkModelToolSupport(model);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 16: Sandbox Monitor IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.SANDBOX_GET_LOG, async () => {
+    return sandboxLog;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SANDBOX_CLEAR_LOG, async () => {
+    sandboxLog.length = 0;
+    return { success: true };
+  });
 }
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
@@ -1685,6 +1825,11 @@ app.whenReady().then(() => {
 
   registerIPCHandlers();
   createWindow();
+
+  // Wire mainWindow into the commands module for streaming research results
+  if (mainWindow) {
+    setCommandsMainWindow(mainWindow);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

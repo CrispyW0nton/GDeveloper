@@ -2,11 +2,37 @@
  * LLM Provider Abstraction Layer
  * Real Claude provider with streaming via Anthropic Messages API
  * Supports Claude, OpenAI-compatible, and custom providers
+ *
+ * Sprint 16: dynamic model discovery, model selection, compatibility checks.
  */
 
 import { ILLMProvider, LLMResponse, LLMStreamChunk } from '../domain/interfaces';
 import { ToolDefinition } from '../domain/entities';
 import { BrowserWindow } from 'electron';
+
+// Sprint 16: Model metadata
+export interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  supportsTools: boolean;
+  supportsStreaming: boolean;
+  contextWindow?: number;
+  maxOutput?: number;
+}
+
+// Known Anthropic models with tool support
+const KNOWN_CLAUDE_MODELS: ModelInfo[] = [
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 4096 },
+  { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 16384 },
+  { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 32768 },
+  { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
+  { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
+  { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 4096 },
+];
+
+// Models that DO NOT support tool use
+const NO_TOOL_SUPPORT = new Set(['claude-2.0', 'claude-2.1', 'claude-instant-1.2']);
 
 // ─── Claude Provider (Real Anthropic API) ───
 export class ClaudeProvider implements ILLMProvider {
@@ -226,6 +252,62 @@ export class ClaudeProvider implements ILLMProvider {
     return Math.ceil(text.length / 4);
   }
 
+  getModelId(): string {
+    return this.model;
+  }
+
+  setModel(model: string): void {
+    this.model = model;
+    console.log(`[ClaudeProvider] Model switched to: ${model}`);
+  }
+
+  /**
+   * Sprint 16: Discover available models from the API.
+   * Falls back to known models if the API call fails.
+   */
+  async discoverModels(): Promise<ModelInfo[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/v1/models`, {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01'
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const apiModels: ModelInfo[] = (data.data || []).map((m: any) => {
+          const known = KNOWN_CLAUDE_MODELS.find(k => k.id === m.id);
+          return known || {
+            id: m.id as string,
+            name: (m.display_name || m.id) as string,
+            provider: 'claude',
+            supportsTools: !NO_TOOL_SUPPORT.has(m.id),
+            supportsStreaming: true,
+            contextWindow: m.context_window || undefined,
+            maxOutput: m.max_output || undefined,
+          };
+        });
+        return apiModels.length > 0 ? apiModels : KNOWN_CLAUDE_MODELS;
+      }
+    } catch {
+      // Fall back to known models
+    }
+    return KNOWN_CLAUDE_MODELS;
+  }
+
+  /**
+   * Check if a model supports tool calling.
+   */
+  static modelSupportsTools(modelId: string): boolean {
+    if (NO_TOOL_SUPPORT.has(modelId)) return false;
+    const known = KNOWN_CLAUDE_MODELS.find(m => m.id === modelId);
+    if (known) return known.supportsTools;
+    // Assume newer models support tools
+    return true;
+  }
+
   async validateKey(): Promise<{ valid: boolean; error?: string; models?: string[] }> {
     // Format pre-check
     if (!this.apiKey || this.apiKey.trim().length === 0) {
@@ -279,9 +361,12 @@ export class ClaudeProvider implements ILLMProvider {
   }
 }
 
-// ─── Provider Registry ───
+// ─── Provider Registry (Sprint 16: model state) ───
 class ProviderRegistry {
   private providers: Map<string, ILLMProvider> = new Map();
+  private _selectedModel: string = 'claude-sonnet-4-6';
+  private _availableModels: ModelInfo[] = KNOWN_CLAUDE_MODELS;
+  private _modelDiscovered: boolean = false;
 
   register(provider: ILLMProvider): void {
     this.providers.set(provider.name, provider);
@@ -301,6 +386,36 @@ class ProviderRegistry {
 
   remove(name: string): void {
     this.providers.delete(name);
+  }
+
+  // Sprint 16: Model selection
+  get selectedModel(): string { return this._selectedModel; }
+  set selectedModel(model: string) {
+    this._selectedModel = model;
+    // Update the provider's model
+    const provider = this.getDefault() as ClaudeProvider | undefined;
+    if (provider && typeof provider.setModel === 'function') {
+      provider.setModel(model);
+    }
+  }
+
+  get availableModels(): ModelInfo[] { return this._availableModels; }
+  set availableModels(models: ModelInfo[]) { this._availableModels = models; }
+
+  get modelDiscovered(): boolean { return this._modelDiscovered; }
+
+  async discoverModels(): Promise<ModelInfo[]> {
+    const provider = this.getDefault() as ClaudeProvider | undefined;
+    if (provider && typeof provider.discoverModels === 'function') {
+      this._availableModels = await provider.discoverModels();
+      this._modelDiscovered = true;
+    }
+    return this._availableModels;
+  }
+
+  checkModelToolSupport(modelId?: string): boolean {
+    const id = modelId || this._selectedModel;
+    return ClaudeProvider.modelSupportsTools(id);
   }
 }
 
