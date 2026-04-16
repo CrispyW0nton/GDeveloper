@@ -2,7 +2,7 @@
  * Application State Store
  * Loads persisted state from Electron main process on startup
  * Uses IPC to sync state changes
- * Sprint 9: + workspace, git status, terminal state
+ * Sprint 9 fix: workspace activation flow, startup hydration, session auto-creation, relaxed gating
  */
 
 import { useState, useCallback, useEffect } from 'react';
@@ -21,9 +21,9 @@ export interface AppState {
   currentSession: SessionInfo | null;
   activeTab: TabId;
   sidebarCollapsed: boolean;
-  // Sprint 9
   activeWorkspace: WorkspaceInfo | null;
   workspaces: WorkspaceInfo[];
+  startupError: string | null;
 }
 
 export type TabId = 'chat' | 'github' | 'mcp' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
@@ -68,6 +68,30 @@ export interface WorkspaceInfo {
   status: string;
 }
 
+// ─── Helpers ───
+
+/** Create a SessionInfo and SelectedRepo from a workspace */
+function sessionFromWorkspace(ws: WorkspaceInfo): { session: SessionInfo; repo: SelectedRepo } {
+  const fullName = ws.github_owner && ws.github_repo
+    ? `${ws.github_owner}/${ws.github_repo}`
+    : ws.name;
+  return {
+    session: {
+      id: `session-ws-${ws.id}`,
+      repositoryId: ws.id,
+      repositoryFullName: fullName,
+      workingBranch: ws.default_branch || 'main',
+      status: 'active',
+    },
+    repo: {
+      id: ws.id,
+      fullName,
+      defaultBranch: ws.default_branch || 'main',
+      isPrivate: false,
+    },
+  };
+}
+
 // ─── Initial State ───
 export const INITIAL_STATE: AppState = {
   apiKeyConfigured: false,
@@ -81,6 +105,7 @@ export const INITIAL_STATE: AppState = {
   sidebarCollapsed: false,
   activeWorkspace: null,
   workspaces: [],
+  startupError: null,
 };
 
 // ─── State Hook ───
@@ -103,37 +128,68 @@ export function useAppState() {
           (k: string) => settings.apiKeys[k] && settings.apiKeys[k] !== ''
         ) || '' : '';
 
-        // Load workspaces
+        // ─── TASK 2: Startup hydration – load workspaces & last active ───
         let workspaces: WorkspaceInfo[] = [];
         let activeWorkspace: WorkspaceInfo | null = null;
+        let currentSession: SessionInfo | null = null;
+        let selectedRepo: SelectedRepo | null = null;
+
         try {
           workspaces = await api.listWorkspaces();
           activeWorkspace = await api.getActiveWorkspace();
-        } catch { /* ignore if not available */ }
+        } catch (err) {
+          console.warn('[Store] Workspace hydration failed:', err);
+        }
+
+        // ─── TASK 3: Session auto-creation from workspace ───
+        if (activeWorkspace) {
+          const derived = sessionFromWorkspace(activeWorkspace);
+          currentSession = derived.session;
+          selectedRepo = derived.repo;
+        }
+
+        // Determine the best default tab
+        let defaultTab: TabId = 'settings';
+        if (hasKey && activeWorkspace) {
+          defaultTab = 'chat'; // straight to chat if workspace is ready
+        } else if (hasKey) {
+          defaultTab = 'workspace';
+        }
 
         setState(prev => ({
           ...prev,
           apiKeyConfigured: hasKey,
           apiKeyProvider: provider,
           githubConnected: settings.github?.connected || false,
-          activeTab: hasKey ? 'workspace' : 'settings',
+          activeTab: defaultTab,
           workspaces,
           activeWorkspace,
+          currentSession,
+          selectedRepo,
+          startupError: null,
         }));
 
         // If GitHub is connected, try loading repos
         if (settings.github?.connected) {
-          const result = await api.listRepos();
-          if (result.repos && result.repos.length > 0) {
-            setState(prev => ({
-              ...prev,
-              repositories: result.repos,
-              githubConnected: true
-            }));
+          try {
+            const result = await api.listRepos();
+            if (result.repos && result.repos.length > 0) {
+              setState(prev => ({
+                ...prev,
+                repositories: result.repos,
+                githubConnected: true
+              }));
+            }
+          } catch {
+            // GitHub repo load is non-critical
           }
         }
       } catch (err) {
         console.error('[Store] Failed to load persisted state:', err);
+        setState(prev => ({
+          ...prev,
+          startupError: err instanceof Error ? err.message : 'Failed to load state',
+        }));
       }
       setLoaded(true);
     };
@@ -146,7 +202,7 @@ export function useAppState() {
       ...prev,
       apiKeyConfigured: true,
       apiKeyProvider: provider,
-      activeTab: 'workspace'
+      activeTab: prev.activeWorkspace ? 'chat' : 'workspace',
     }));
   }, []);
 
@@ -164,8 +220,8 @@ export function useAppState() {
       githubConnected: false,
       githubUsername: '',
       repositories: [],
-      selectedRepo: null,
-      currentSession: null
+      selectedRepo: prev.activeWorkspace ? prev.selectedRepo : null,
+      currentSession: prev.activeWorkspace ? prev.currentSession : null,
     }));
   }, []);
 
@@ -185,11 +241,16 @@ export function useAppState() {
     }));
   }, []);
 
+  // ─── TASK 4: Relaxed tab gating ───
   const setTab = useCallback((tab: TabId) => {
     setState(prev => {
-      // workspace, mcp, settings, github, terminal are always accessible
-      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'settings', 'github', 'terminal'];
-      if (!prev.activeWorkspace && !prev.selectedRepo && !alwaysAccessible.includes(tab)) {
+      // Always accessible tabs (no workspace or repo needed)
+      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'settings', 'github'];
+      if (alwaysAccessible.includes(tab)) {
+        return { ...prev, activeTab: tab };
+      }
+      // All other tabs only require an active workspace
+      if (!prev.activeWorkspace) {
         return { ...prev, activeTab: 'workspace' };
       }
       return { ...prev, activeTab: tab };
@@ -204,33 +265,25 @@ export function useAppState() {
     setState(prev => ({ ...prev, sidebarCollapsed: !prev.sidebarCollapsed }));
   }, []);
 
+  // ─── TASK 1: Workspace activation sets session + repo ───
   const setActiveWorkspace = useCallback((ws: WorkspaceInfo | null) => {
     setState(prev => {
-      // Create a session for the workspace
-      let currentSession = prev.currentSession;
-      let selectedRepo = prev.selectedRepo;
-
-      if (ws) {
-        currentSession = {
-          id: `session-ws-${ws.id}-${Date.now()}`,
-          repositoryId: ws.id,
-          repositoryFullName: ws.github_owner && ws.github_repo ? `${ws.github_owner}/${ws.github_repo}` : ws.name,
-          workingBranch: ws.default_branch || 'main',
-          status: 'active'
-        };
-        selectedRepo = {
-          id: ws.id,
-          fullName: ws.github_owner && ws.github_repo ? `${ws.github_owner}/${ws.github_repo}` : ws.name,
-          defaultBranch: ws.default_branch || 'main',
-          isPrivate: false,
+      if (!ws) {
+        return {
+          ...prev,
+          activeWorkspace: null,
+          currentSession: null,
+          selectedRepo: null,
         };
       }
 
+      const derived = sessionFromWorkspace(ws);
       return {
         ...prev,
         activeWorkspace: ws,
-        currentSession,
-        selectedRepo,
+        currentSession: derived.session,
+        selectedRepo: derived.repo,
+        startupError: null,
       };
     });
   }, []);
@@ -243,6 +296,10 @@ export function useAppState() {
     } catch { /* ignore */ }
   }, []);
 
+  const clearStartupError = useCallback(() => {
+    setState(prev => ({ ...prev, startupError: null }));
+  }, []);
+
   return {
     state,
     setApiKey,
@@ -253,6 +310,7 @@ export function useAppState() {
     setRepos,
     toggleSidebar,
     setActiveWorkspace,
-    refreshWorkspaces
+    refreshWorkspaces,
+    clearStartupError,
   };
 }

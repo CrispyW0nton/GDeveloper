@@ -1,3 +1,9 @@
+/**
+ * ChatWorkspace – Sprint 10 fix
+ * Full chat UI with streaming, tool-call display, history persistence.
+ * Session auto-created by the store; history restored from SQLite.
+ */
+
 import React, { useState, useRef, useEffect } from 'react';
 import { SessionInfo, SelectedRepo } from '../../store';
 
@@ -9,11 +15,17 @@ interface ChatWorkspaceProps {
   providerKey: string;
 }
 
+interface ToolCallDisplay {
+  name: string;
+  description: string;
+  status: 'success' | 'error' | 'running';
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  toolCalls?: Array<{ name: string; description: string; status: 'success' | 'error' }>;
+  toolCalls?: ToolCallDisplay[];
   timestamp: string;
   streaming?: boolean;
 }
@@ -30,6 +42,7 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
+  const [streamingToolCalls, setStreamingToolCalls] = useState<ToolCallDisplay[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -45,7 +58,11 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
             id: m.id,
             role: m.role,
             content: m.content,
-            toolCalls: m.tool_calls,
+            toolCalls: m.tool_calls?.map((tc: any) => ({
+              name: tc.name,
+              description: `Called ${tc.name}`,
+              status: 'success' as const
+            })),
             timestamp: m.timestamp
           }));
           setMessages(prev => {
@@ -54,6 +71,8 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
             return [...sys, ...dbMessages];
           });
         }
+      }).catch((err: any) => {
+        console.warn('[Chat] Failed to load history:', err);
       });
     }
   }, [session.id]);
@@ -67,8 +86,21 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
 
       if (data.type === 'text') {
         setStreamingContent(data.fullContent || '');
+      } else if (data.type === 'tool_call' && data.toolCall) {
+        setStreamingToolCalls(prev => [
+          ...prev,
+          { name: data.toolCall.name, description: `Calling ${data.toolCall.name}...`, status: 'running' as const }
+        ]);
+      } else if (data.type === 'tool_result' || data.type === 'tool_error') {
+        // Update tool call status
+        setStreamingToolCalls(prev =>
+          prev.map(tc =>
+            tc.name === data.toolName
+              ? { ...tc, status: data.type === 'tool_error' ? 'error' as const : 'success' as const, description: `${data.toolName}: ${(data.result || '').substring(0, 100)}` }
+              : tc
+          )
+        );
       } else if (data.type === 'done') {
-        // Stream complete - the final message will come from handleSend
         setStreamingContent('');
       } else if (data.type === 'error') {
         setStreamingContent('');
@@ -91,12 +123,13 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
     setInput('');
     setIsLoading(true);
     setStreamingContent('');
+    setStreamingToolCalls([]);
 
     try {
       if (api) {
         const result = await api.sendMessage(session.id, input);
 
-        // Add the assistant message (streaming content is already visible)
+        // Add the assistant message
         const assistantMsg: Message = {
           id: result.id || `msg-${Date.now() + 1}`,
           role: 'assistant',
@@ -131,6 +164,7 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
 
     setIsLoading(false);
     setStreamingContent('');
+    setStreamingToolCalls([]);
   };
 
   return (
@@ -186,8 +220,11 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
                       <div key={i} className={`text-[10px] px-2 py-0.5 rounded border ${
                         tc.status === 'success'
                           ? 'border-matrix-green/20 text-matrix-green/70 bg-matrix-green/5'
-                          : 'border-matrix-danger/20 text-matrix-danger/70 bg-matrix-danger/5'
+                          : tc.status === 'error'
+                            ? 'border-matrix-danger/20 text-matrix-danger/70 bg-matrix-danger/5'
+                            : 'border-matrix-warning/20 text-matrix-warning/70 bg-matrix-warning/5'
                       }`}>
+                        {tc.status === 'running' && <span className="inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin mr-1" />}
                         {tc.name}
                       </div>
                     ))}
@@ -206,6 +243,25 @@ export default function ChatWorkspace({ session, repo, providerKey }: ChatWorksp
                 <span className="text-[10px] uppercase tracking-wider font-bold text-matrix-text-dim">GDeveloper</span>
                 <span className="w-3 h-3 border-2 border-matrix-green/30 border-t-matrix-green rounded-full animate-spin" />
               </div>
+
+              {/* Streaming tool calls */}
+              {streamingToolCalls.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {streamingToolCalls.map((tc, i) => (
+                    <div key={i} className={`text-[10px] px-2 py-0.5 rounded border ${
+                      tc.status === 'success'
+                        ? 'border-matrix-green/20 text-matrix-green/70 bg-matrix-green/5'
+                        : tc.status === 'error'
+                          ? 'border-matrix-danger/20 text-matrix-danger/70 bg-matrix-danger/5'
+                          : 'border-matrix-warning/20 text-matrix-warning/70 bg-matrix-warning/5 animate-pulse'
+                    }`}>
+                      {tc.status === 'running' && <span className="inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin mr-1" />}
+                      {tc.name}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {streamingContent ? (
                 <div className="text-xs text-matrix-text-dim whitespace-pre-wrap leading-relaxed">
                   {renderContent(streamingContent)}
