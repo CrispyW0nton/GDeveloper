@@ -42,7 +42,7 @@ interface BranchInfo {
   remote: string[];
 }
 
-type SubView = 'list' | 'clone' | 'git' | 'commit';
+type SubView = 'list' | 'clone' | 'git' | 'commit' | 'scan' | 'environment' | 'manage';
 
 export default function WorkspacePanel({
   activeWorkspace, workspaces, githubConnected, onWorkspaceActivated, onRefreshWorkspaces
@@ -66,6 +66,21 @@ export default function WorkspacePanel({
 
   // Commit state
   const [commitMessage, setCommitMessage] = useState('');
+
+  // Sprint 13: Discovery scan state
+  const [scanPath, setScanPath] = useState('');
+  const [scanResults, setScanResults] = useState<any[]>([]);
+  const [scanSelected, setScanSelected] = useState<Set<number>>(new Set());
+  const [scanning, setScanning] = useState(false);
+
+  // Sprint 13: Environment state
+  const [envProfile, setEnvProfile] = useState<any>(null);
+  const [uvAvailable, setUvAvailable] = useState(false);
+  const [envLoading, setEnvLoading] = useState(false);
+
+  // Sprint 13: Managed root state
+  const [managedRoot, setManagedRootState] = useState('');
+  const [moveLoading, setMoveLoading] = useState(false);
 
   // Branch state
   const [newBranchName, setNewBranchName] = useState('');
@@ -95,6 +110,14 @@ export default function WorkspacePanel({
     const interval = setInterval(refreshGitStatus, 15000);
     return () => clearInterval(interval);
   }, [refreshGitStatus, refreshBranches]);
+
+  // Sprint 13: Load environment profile and managed root
+  useEffect(() => {
+    if (!api || !activeWorkspace) return;
+    api.getEnvProfile?.().then((p: any) => setEnvProfile(p)).catch(() => {});
+    api.isUvAvailable?.().then((v: boolean) => setUvAvailable(v)).catch(() => {});
+    api.getManagedRoot?.().then((r: string) => setManagedRootState(r)).catch(() => {});
+  }, [activeWorkspace]);
 
   // Load GitHub repos for clone wizard
   useEffect(() => {
@@ -248,11 +271,14 @@ export default function WorkspacePanel({
       <div className="px-4 py-3 border-b border-matrix-border flex items-center justify-between glass-panel-solid rounded-none border-x-0 border-t-0">
         <div className="flex items-center gap-3">
           <span className="text-sm text-matrix-green font-bold">Workspaces</span>
-          <div className="flex gap-1">
+          <div className="flex gap-1 flex-wrap">
             <TabBtn active={subView === 'list'} onClick={() => setSubView('list')}>List</TabBtn>
             <TabBtn active={subView === 'clone'} onClick={() => setSubView('clone')}>Clone</TabBtn>
+            <TabBtn active={subView === 'scan'} onClick={() => setSubView('scan')}>Scan</TabBtn>
             {activeWorkspace && <TabBtn active={subView === 'git'} onClick={() => setSubView('git')}>Git</TabBtn>}
             {activeWorkspace && <TabBtn active={subView === 'commit'} onClick={() => setSubView('commit')}>Commit</TabBtn>}
+            {activeWorkspace && <TabBtn active={subView === 'environment'} onClick={() => setSubView('environment')}>Env</TabBtn>}
+            <TabBtn active={subView === 'manage'} onClick={() => setSubView('manage')}>Manage</TabBtn>
           </div>
         </div>
         {activeWorkspace && (
@@ -291,8 +317,11 @@ export default function WorkspacePanel({
       <div className="flex-1 overflow-y-auto p-4">
         {subView === 'list' && renderWorkspaceList()}
         {subView === 'clone' && renderCloneWizard()}
+        {subView === 'scan' && renderScanView()}
         {subView === 'git' && renderGitToolbar()}
         {subView === 'commit' && renderCommitPanel()}
+        {subView === 'environment' && renderEnvironmentView()}
+        {subView === 'manage' && renderManageView()}
       </div>
     </div>
   );
@@ -625,6 +654,333 @@ export default function WorkspacePanel({
       </div>
     );
   }
+
+  // ─── Sprint 13: Scan, Environment, Manage sub-views ───
+
+  function renderScanView() {
+  const doScan = async () => {
+    if (!scanPath || !api?.scanForRepos) return;
+    setScanning(true);
+    setError('');
+    setScanResults([]);
+    setScanSelected(new Set());
+    try {
+      const result = await api.scanForRepos(scanPath);
+      if (result.success) {
+        setScanResults(result.repos || []);
+        setMessage(`Found ${result.repos?.length || 0} repositories`);
+      } else {
+        setError(result.error || 'Scan failed');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Scan failed');
+    }
+    setScanning(false);
+  };
+
+  const doImport = async () => {
+    if (!api?.importDiscoveredRepos) return;
+    const selectedRepos = scanResults.filter((_: any, i: number) => scanSelected.has(i));
+    if (selectedRepos.length === 0) { setError('Select at least one repository'); return; }
+    setLoading(true);
+    try {
+      const result = await api.importDiscoveredRepos(selectedRepos);
+      if (result.success) {
+        setMessage(`Imported ${result.imported} workspace(s), skipped ${result.skipped} duplicate(s)`);
+        onRefreshWorkspaces();
+        setScanResults([]);
+        setScanSelected(new Set());
+      } else {
+        setError(result.error || 'Import failed');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Import failed');
+    }
+    setLoading(false);
+  };
+
+  const toggleSelect = (i: number) => {
+    setScanSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    if (scanSelected.size === scanResults.length) {
+      setScanSelected(new Set());
+    } else {
+      setScanSelected(new Set(scanResults.map((_: any, i: number) => i)));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-xs text-matrix-text-dim uppercase tracking-wider">Scan for Repositories</h3>
+      <div className="space-y-2">
+        <div>
+          <label className="text-[10px] text-matrix-text-muted/50 block mb-1">Root directory to scan</label>
+          <input value={scanPath} onChange={e => setScanPath(e.target.value)}
+            placeholder={process.env.HOME || 'C:\\Users\\you\\Dev'}
+            className="matrix-input text-xs" />
+        </div>
+        <button onClick={doScan} disabled={scanning || !scanPath}
+          className="matrix-btn matrix-btn-primary w-full text-xs">
+          {scanning ? 'Scanning...' : 'Scan for Git Repositories'}
+        </button>
+      </div>
+
+      {scanResults.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-matrix-text-muted/50">Found {scanResults.length} repos</span>
+            <div className="flex gap-2">
+              <button onClick={toggleAll} className="text-[9px] text-matrix-info hover:underline">
+                {scanSelected.size === scanResults.length ? 'Deselect All' : 'Select All'}
+              </button>
+              <button onClick={doImport} disabled={scanSelected.size === 0 || loading}
+                className="matrix-btn text-[10px] px-3 py-1 border-matrix-green/30 text-matrix-green">
+                Import ({scanSelected.size})
+              </button>
+            </div>
+          </div>
+          <div className="max-h-64 overflow-y-auto space-y-1">
+            {scanResults.map((repo: any, i: number) => (
+              <div key={i} onClick={() => !repo.alreadyManaged && toggleSelect(i)}
+                className={`glass-panel p-2 text-[10px] cursor-pointer transition-all ${
+                  repo.alreadyManaged ? 'opacity-40 cursor-not-allowed' :
+                  scanSelected.has(i) ? 'border-matrix-green/40 bg-matrix-green/5' : 'hover:border-matrix-green/20'
+                }`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" checked={scanSelected.has(i)} disabled={repo.alreadyManaged}
+                      onChange={() => toggleSelect(i)} className="accent-green-500" />
+                    <span className="text-matrix-green font-bold">{repo.name}</span>
+                    <span className="text-matrix-text-muted/30">{repo.branch}</span>
+                    {repo.alreadyManaged && <span className="badge badge-connected text-[8px]">managed</span>}
+                  </div>
+                  <span className={repo.isClean ? 'text-matrix-green/50' : 'text-yellow-500'}>
+                    {repo.isClean ? 'clean' : `${repo.dirtyCount} changes`}
+                  </span>
+                </div>
+                <div className="text-[9px] text-matrix-text-muted/30 truncate mt-0.5">{repo.path}</div>
+                {repo.remoteUrl && <div className="text-[9px] text-matrix-text-muted/20 truncate">{repo.remoteUrl}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderEnvironmentView() {
+  if (!activeWorkspace) {
+    return <div className="text-xs text-matrix-text-muted text-center p-4">No active workspace</div>;
+  }
+
+  const refreshEnv = async () => {
+    if (!api?.getEnvProfile) return;
+    setEnvLoading(true);
+    try {
+      const p = await api.getEnvProfile();
+      setEnvProfile(p);
+      const uv = await api.isUvAvailable();
+      setUvAvailable(uv);
+    } catch {}
+    setEnvLoading(false);
+  };
+
+  const doCreateEnv = async () => {
+    if (!api?.createPythonEnv) return;
+    setEnvLoading(true);
+    setError('');
+    try {
+      const result = await api.createPythonEnv();
+      if (result.success) {
+        setMessage('Python environment created successfully');
+        refreshEnv();
+      } else {
+        setError(result.error || 'Failed to create environment');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed');
+    }
+    setEnvLoading(false);
+  };
+
+  const doSyncDeps = async () => {
+    if (!api?.syncPythonDeps) return;
+    setEnvLoading(true);
+    setError('');
+    try {
+      const result = await api.syncPythonDeps();
+      if (result.success) {
+        setMessage('Dependencies synced');
+      } else {
+        setError(result.error || 'Sync failed');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Sync failed');
+    }
+    setEnvLoading(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs text-matrix-text-dim uppercase tracking-wider">Environment Profile</h3>
+        <button onClick={refreshEnv} disabled={envLoading} className="text-[9px] text-matrix-info hover:underline">
+          Refresh
+        </button>
+      </div>
+
+      {!envProfile ? (
+        <div className="glass-panel p-4 text-center">
+          <p className="text-xs text-matrix-text-muted mb-2">No stack detected in this workspace.</p>
+          <p className="text-[9px] text-matrix-text-muted/30">Add a package.json, pyproject.toml, or Cargo.toml to auto-detect.</p>
+        </div>
+      ) : (
+        <>
+          <div className="glass-panel p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-matrix-text-muted/50 uppercase">Stack</span>
+              <span className="text-xs text-matrix-green font-bold">{envProfile.stack}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-matrix-text-muted/50 uppercase">Package Manager</span>
+              <span className="text-xs text-matrix-text-dim">{envProfile.manager || 'none'}</span>
+            </div>
+            {envProfile.envPath && (
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-matrix-text-muted/50 uppercase">Environment</span>
+                <span className="text-[9px] text-matrix-text-dim truncate max-w-[200px]">{envProfile.envPath}</span>
+              </div>
+            )}
+            {envProfile.activationHint && (
+              <div>
+                <span className="text-[10px] text-matrix-text-muted/50 uppercase block mb-1">Activation</span>
+                <code className="text-[9px] text-matrix-green bg-black/30 px-2 py-1 rounded block">{envProfile.activationHint}</code>
+              </div>
+            )}
+            {envProfile.details?.indicators && (
+              <div className="text-[9px] text-matrix-text-muted/30">
+                Detected from: {envProfile.details.indicators}
+              </div>
+            )}
+          </div>
+
+          {/* Python-specific actions */}
+          {envProfile.stack === 'python' && (
+            <div className="glass-panel p-3 space-y-2">
+              <span className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider block">Python Actions</span>
+              {uvAvailable ? (
+                <div className="space-y-2">
+                  {!envProfile.envPath && (
+                    <button onClick={doCreateEnv} disabled={envLoading}
+                      className="matrix-btn matrix-btn-primary w-full text-[10px]">
+                      {envLoading ? 'Creating...' : 'Create Environment (uv)'}
+                    </button>
+                  )}
+                  {envProfile.envPath && (
+                    <button onClick={doSyncDeps} disabled={envLoading}
+                      className="matrix-btn w-full text-[10px]">
+                      {envLoading ? 'Syncing...' : 'Sync Dependencies'}
+                    </button>
+                  )}
+                  <div className="text-[9px] text-matrix-green/40">uv detected: {envProfile.details?.uvVersion || 'yes'}</div>
+                </div>
+              ) : (
+                <div className="text-center">
+                  <p className="text-[10px] text-matrix-warning mb-1">uv not found</p>
+                  <p className="text-[9px] text-matrix-text-muted/40">Install from https://docs.astral.sh/uv/ for Python environment management.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function renderManageView() {
+  const doSetManagedRoot = async () => {
+    if (!api?.setManagedRoot || !managedRoot) return;
+    try {
+      await api.setManagedRoot(managedRoot);
+      setMessage(`Managed root set to: ${managedRoot}`);
+    } catch (err: any) {
+      setError(err.message || 'Failed');
+    }
+  };
+
+  const doMoveToManaged = async (wsId: string) => {
+    if (!api?.moveToManagedRoot) return;
+    setMoveLoading(true);
+    setError('');
+    try {
+      const result = await api.moveToManagedRoot(wsId, false);
+      if (result.success) {
+        setMessage(result.message);
+        onRefreshWorkspaces();
+      } else {
+        setError(result.message || 'Move failed');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Move failed');
+    }
+    setMoveLoading(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-xs text-matrix-text-dim uppercase tracking-wider">Workspace Management</h3>
+
+      {/* Managed Root Setting */}
+      <div className="glass-panel p-3 space-y-2">
+        <span className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider block">Managed Workspace Root</span>
+        <input value={managedRoot} onChange={e => setManagedRootState(e.target.value)}
+          placeholder="~/Documents/GDeveloper/Workspaces"
+          className="matrix-input text-[10px]" />
+        <button onClick={doSetManagedRoot} className="matrix-btn text-[10px] w-full">
+          Set Managed Root
+        </button>
+        <p className="text-[9px] text-matrix-text-muted/30">
+          Workspaces moved to the managed root are organized in one location.
+        </p>
+      </div>
+
+      {/* Move workspaces */}
+      {workspaces.length > 0 && (
+        <div className="space-y-2">
+          <span className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider">Move to Managed Root</span>
+          {workspaces.map(ws => {
+            const isInManaged = managedRoot && ws.local_path.startsWith(managedRoot);
+            return (
+              <div key={ws.id} className="glass-panel p-2 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-matrix-green">{ws.name}</span>
+                  <div className="text-[9px] text-matrix-text-muted/30 truncate max-w-[250px]">{ws.local_path}</div>
+                </div>
+                {isInManaged ? (
+                  <span className="text-[9px] text-matrix-green/40">already managed</span>
+                ) : (
+                  <button onClick={() => doMoveToManaged(ws.id)} disabled={moveLoading}
+                    className="matrix-btn text-[9px] px-2 py-1">
+                    {moveLoading ? '...' : 'Move'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 }
 
 // ─── Small Components ───

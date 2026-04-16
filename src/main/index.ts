@@ -7,7 +7,7 @@
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
 import { IPC_CHANNELS } from './ipc';
@@ -24,6 +24,24 @@ import {
   gitPull, gitPush, gitFetch, gitStash, gitStashPop,
   gitBranches, gitCheckout, gitGetStatus, gitClone, isGitRepo,
 } from './tools';
+import {
+  getAllCommands, getCommand, getExecutionMode, setExecutionMode,
+  WRITE_TOOL_NAMES, WorkspaceContext,
+} from './commands';
+import { scanForRepositories, importDiscoveredRepos, DiscoveredRepo } from './discovery';
+import { getManagedRoot, setManagedRoot, moveWorkspace, moveToManagedRoot, ensureManagedRoot } from './migration';
+import { detectStack, getEnvironmentProfile, createPythonEnv, syncPythonDeps, isUvAvailable } from './environment';
+import { executeResearch, compareRepos, downloadExternalRepo, listExternalRepos, removeExternalRepo } from './research';
+import { scanAppCapabilities } from './mcp-forge/scan';
+import { generateCLIAdapter } from './mcp-forge/generate';
+import {
+  saveAdapterProject, listAdapterProjects, loadAdapterProject, updateAdapterProject,
+  removeAdapterProject, getAdaptersRoot,
+  saveAppRecord, listAppRecords, removeAppRecord, toggleAppFavorite,
+} from './mcp-forge/storage';
+import { testAdapter } from './mcp-forge/testHarness';
+import { registerAndConnectAdapter, unregisterAdapter } from './mcp-forge/register';
+import { researchAppForAdapter, cloneForAnalysis, listForgeAnalysisRepos, removeForgeAnalysisRepo } from './mcp-forge/research';
 import { v4 as uuid } from 'uuid';
 
 let mainWindow: BrowserWindow | null = null;
@@ -297,9 +315,14 @@ function registerIPCHandlers(): void {
         }
       }
 
-      // Build combined tools array (local + MCP)
+      // Build combined tools array (local + MCP) — Sprint 12: filter by mode
+      const mode = getExecutionMode();
+      const filteredLocalTools = mode === 'plan'
+        ? LOCAL_TOOL_DEFINITIONS.filter(t => !WRITE_TOOL_NAMES.includes(t.name))
+        : LOCAL_TOOL_DEFINITIONS;
+
       const allTools: any[] = [
-        ...LOCAL_TOOL_DEFINITIONS.map(t => ({
+        ...filteredLocalTools.map(t => ({
           name: t.name,
           description: t.description,
           inputSchema: t.input_schema,
@@ -311,6 +334,13 @@ function registerIPCHandlers(): void {
       // Build enhanced system prompt with workspace context
       const wsPath = getActiveWorkspace();
       let enhancedPrompt = SYSTEM_PROMPT;
+
+      // Sprint 12: mode-aware system prompt prefix
+      if (mode === 'plan') {
+        enhancedPrompt = 'You are in PLAN MODE. You can read, search, and analyze the codebase but you CANNOT modify files, run commands, or make commits. Focus on understanding, researching, and proposing plans. When ready to implement, tell the user to switch to Build mode with /build.\n\n' + enhancedPrompt;
+      } else {
+        enhancedPrompt = 'You are in BUILD MODE. You have full access to read, write, patch, and execute commands in the workspace. You can create branches, commit changes, and run shell commands.\n\n' + enhancedPrompt;
+      }
       if (wsPath) {
         enhancedPrompt += `\n\nCurrent workspace: ${wsPath}`;
         try {
@@ -322,8 +352,11 @@ function registerIPCHandlers(): void {
         } catch { /* git context optional */ }
       }
 
-      enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${LOCAL_TOOL_DEFINITIONS.length} local + ${mcpTools.length} MCP).`;
-      enhancedPrompt += `\nLocal tools: ${LOCAL_TOOL_DEFINITIONS.map(t => t.name).join(', ')}`;
+      enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
+      enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(t => t.name).join(', ')}`;
+      if (mode === 'plan') {
+        enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`;
+      }
 
       // ─── Agentic Loop: stream → execute tools → continue ───
       let loopCount = 0;
@@ -1130,6 +1163,278 @@ function registerIPCHandlers(): void {
     }
   });
 
+  // ─── Slash Commands & Mode (Sprint 12) ────────────
+
+  ipcMain.handle(IPC_CHANNELS.SLASH_COMMAND_EXECUTE, async (_event, name: string, args: string, sessionId: string) => {
+    try {
+      const cmd = getCommand(name);
+      if (!cmd) {
+        return { success: false, message: `Unknown command: /${name}` };
+      }
+
+      const wsPath = getActiveWorkspace();
+      const context: WorkspaceContext = {
+        workspacePath: wsPath || '',
+        sessionId: sessionId || 'system',
+      };
+
+      const result = await cmd.execute(args || '', context);
+
+      // If mode command returned a mode change, sync
+      if (result.data?.mode) {
+        setExecutionMode(result.data.mode);
+      }
+
+      db.logActivity(sessionId || 'system', 'slash_command', `/${name} ${args || ''}`.trim(), result.message.substring(0, 200), {
+        command: name,
+        args,
+        success: result.success,
+      });
+
+      return result;
+    } catch (err) {
+      return { success: false, message: `Command error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SLASH_COMMAND_LIST, async () => {
+    return getAllCommands().map(cmd => ({
+      name: cmd.name,
+      description: cmd.description,
+      category: cmd.category,
+    }));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODE_GET, async () => {
+    return getExecutionMode();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODE_SET, async (_event, mode: string) => {
+    if (mode === 'plan' || mode === 'build') {
+      setExecutionMode(mode);
+      return { success: true, mode };
+    }
+    return { success: false, error: 'Invalid mode. Use "plan" or "build".' };
+  });
+
+  // ─── Sprint 13: Discovery ────────────────────────
+
+  ipcMain.handle(IPC_CHANNELS.DISCOVERY_SCAN, async (_event, rootPath: string, maxDepth?: number) => {
+    try {
+      const repos = await scanForRepositories(rootPath, maxDepth || 5);
+      return { success: true, repos };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Scan failed', repos: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DISCOVERY_IMPORT, async (_event, repos: DiscoveredRepo[]) => {
+    try {
+      const result = await importDiscoveredRepos(repos);
+      return { success: true, ...result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Import failed', imported: 0, skipped: 0 };
+    }
+  });
+
+  // ─── Sprint 13: Migration ────────────────────────
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_GET_MANAGED_ROOT, async () => {
+    return getManagedRoot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_SET_MANAGED_ROOT, async (_event, path: string) => {
+    setManagedRoot(path);
+    ensureManagedRoot();
+    return { success: true, path: getManagedRoot() };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_MOVE_WORKSPACE, async (_event, workspaceId: string, destDir: string, deleteOriginal?: boolean) => {
+    return moveWorkspace(workspaceId, destDir, deleteOriginal || false);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_MOVE_TO_MANAGED, async (_event, workspaceId: string, deleteOriginal?: boolean) => {
+    return moveToManagedRoot(workspaceId, deleteOriginal || false);
+  });
+
+  // ─── Sprint 13: Environment Profiles ─────────────
+
+  ipcMain.handle(IPC_CHANNELS.ENV_DETECT_STACK, async (_event, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return { stack: 'unknown', manager: '', indicators: [] };
+    return detectStack(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_GET_PROFILE, async (_event, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return null;
+    return getEnvironmentProfile(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_CREATE_PYTHON, async (_event, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return { success: false, error: 'No workspace active' };
+    try {
+      const profile = await createPythonEnv(ws);
+      return { success: true, profile };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_SYNC_DEPS, async (_event, workspacePath?: string, envPath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return { success: false, error: 'No workspace active' };
+    try {
+      const profile = getEnvironmentProfile(ws);
+      const ep = envPath || profile?.envPath || '';
+      if (!ep) return { success: false, error: 'No environment found' };
+      const output = await syncPythonDeps(ws, ep);
+      return { success: true, output };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Sync failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_IS_UV_AVAILABLE, async () => {
+    return isUvAvailable();
+  });
+
+  // ─── Sprint 13: Research & External ──────────────
+
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_EXECUTE, async (_event, question: string, sessionId: string) => {
+    try {
+      const wsPath = getActiveWorkspace() || undefined;
+      const report = await executeResearch(question, sessionId, wsPath, (stage, detail) => {
+        mainWindow?.webContents.send('chat:stream-chunk', {
+          sessionId,
+          type: 'text',
+          content: `\n[Research: ${stage}] ${detail}\n`,
+          fullContent: `[Research: ${stage}] ${detail}`,
+        });
+      });
+      return { success: true, report };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Research failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_COMPARE, async (_event, repoA: string, repoB: string, sessionId: string, focus?: string) => {
+    try {
+      const result = await compareRepos(repoA, repoB, sessionId, focus);
+      return { success: true, result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Comparison failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXTERNAL_DOWNLOAD, async (_event, repoUrl: string) => {
+    try {
+      const wsPath = getActiveWorkspace() || undefined;
+      const info = await downloadExternalRepo(repoUrl, wsPath);
+      return { success: true, info };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXTERNAL_LIST, async () => {
+    const wsPath = getActiveWorkspace() || undefined;
+    return listExternalRepos(wsPath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXTERNAL_REMOVE, async (_event, localPath: string) => {
+    return removeExternalRepo(localPath);
+  });
+
+  // ─── Sprint 13: MCP Health ──────────────────────
+
+  ipcMain.handle(IPC_CHANNELS.MCP_HEALTH, async () => {
+    const servers = mcp.getServers();
+    return servers.map(s => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      transport: s.transport,
+      toolCount: s.tools.length,
+      lastConnected: s.lastConnected || null,
+      url: s.url || null,
+      command: s.command || null,
+    }));
+  });
+
+  // ─── Sprint 13: GitHub Auth Status ───────────────
+
+  ipcMain.handle(IPC_CHANNELS.GITHUB_AUTH_STATUS, async () => {
+    const gh = getGitHub();
+    const connected = gh.isConnected();
+    const username = gh.getUsername();
+    const hasToken = !!settings.getGitHubToken();
+    return {
+      connected,
+      username,
+      hasToken,
+      tokenValid: connected,
+      needsReconnect: hasToken && !connected,
+    };
+  });
+
+  // ─── Sprint 13: Task Verification ────────────────
+
+  ipcMain.handle(IPC_CHANNELS.TASK_VERIFY, async (_event, taskId: string) => {
+    const wsPath = getActiveWorkspace();
+    if (!wsPath) return { success: false, checks: [], error: 'No active workspace' };
+
+    const checks: Array<{ name: string; passed: boolean; detail: string }> = [];
+
+    // Check 1: TypeScript compilation
+    try {
+      execSync('npx tsc --noEmit 2>&1', { cwd: wsPath, timeout: 60000, encoding: 'utf-8' });
+      checks.push({ name: 'TypeScript', passed: true, detail: 'tsc --noEmit passed' });
+    } catch (err: any) {
+      const stderr = err.stderr || err.stdout || '';
+      checks.push({ name: 'TypeScript', passed: false, detail: stderr.substring(0, 500) });
+    }
+
+    // Check 2: Git status clean
+    try {
+      const git = simpleGit(wsPath);
+      const status = await git.status();
+      const clean = status.isClean();
+      checks.push({ name: 'Git Status', passed: clean, detail: clean ? 'Working tree clean' : `${status.modified.length} modified, ${status.not_added.length} untracked` });
+    } catch (err) {
+      checks.push({ name: 'Git Status', passed: false, detail: err instanceof Error ? err.message : 'Git check failed' });
+    }
+
+    // Check 3: Build (if package.json has build script)
+    try {
+      const pkgPath = join(wsPath, 'package.json');
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        if (pkg.scripts?.build) {
+          execSync('npm run build 2>&1', { cwd: wsPath, timeout: 120000, encoding: 'utf-8' });
+          checks.push({ name: 'Build', passed: true, detail: 'npm run build succeeded' });
+        }
+      }
+    } catch (err: any) {
+      checks.push({ name: 'Build', passed: false, detail: (err.stderr || err.stdout || '').substring(0, 500) });
+    }
+
+    const allPassed = checks.every(c => c.passed);
+
+    // Update task status based on verification
+    if (taskId) {
+      db.updateTaskStatus(taskId, allPassed ? 'VERIFIED' : 'VERIFICATION_FAILED',
+        checks.map(c => `${c.name}: ${c.passed ? 'PASS' : 'FAIL'}`).join(', '));
+      db.logActivity('system', 'task_verified', `Verification ${allPassed ? 'passed' : 'failed'}: ${taskId}`,
+        checks.map(c => `${c.name}: ${c.passed ? 'PASS' : 'FAIL'}`).join('; '), {
+          taskId, allPassed, checks
+        });
+    }
+
+    return { success: true, passed: allPassed, checks };
+  });
+
   ipcMain.handle(IPC_CHANNELS.TERMINAL_DETECT_SHELLS, async () => {
     const shells: Array<{ id: string; name: string; command: string; available: boolean }> = [];
 
@@ -1163,6 +1468,166 @@ function registerIPCHandlers(): void {
     }
 
     return shells;
+  });
+
+  // ─── Sprint 14: MCP Forge / App Adapter Studio ──
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_SCAN, async (_event, appPath: string) => {
+    try {
+      const report = await scanAppCapabilities(appPath);
+      return { success: true, report };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Scan failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_GENERATE, async (_event, capReport: any) => {
+    try {
+      const adaptersRoot = getAdaptersRoot();
+      const project = generateCLIAdapter(capReport, adaptersRoot);
+      const saved = saveAdapterProject(project);
+      // Save app record
+      saveAppRecord({
+        appName: capReport.appName,
+        appPath: capReport.appPath,
+        capabilityTypes: capReport.capabilities.map((c: any) => c.type),
+        adapterProjectId: saved.id,
+        adapterPath: saved.adapterPath,
+        generatedAt: new Date().toISOString(),
+      });
+      return { success: true, project: saved };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Generation failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_SAVE, async (_event, project: any) => {
+    try {
+      const saved = saveAdapterProject(project);
+      return { success: true, project: saved };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Save failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_LIST_ADAPTERS, async () => {
+    return listAdapterProjects();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_GET_ADAPTER, async (_event, id: string) => {
+    const projects = listAdapterProjects();
+    return projects.find(p => p.id === id) || null;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_UPDATE_ADAPTER, async (_event, id: string, updates: any) => {
+    try {
+      const result = updateAdapterProject(id, updates);
+      return { success: !!result, project: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Update failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_REMOVE_ADAPTER, async (_event, id: string) => {
+    return removeAdapterProject(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_TEST, async (_event, adapterId: string) => {
+    try {
+      const projects = listAdapterProjects();
+      const project = projects.find(p => p.id === adapterId);
+      if (!project) return { success: false, error: 'Adapter not found' };
+      const result = await testAdapter(project);
+      // Persist test result
+      updateAdapterProject(adapterId, { lastTestResult: result, status: result.passed ? 'tested' : 'error' });
+      // Update app record
+      saveAppRecord({
+        appName: project.appName,
+        appPath: project.appPath,
+        lastTestResult: result.passed ? 'passed' : 'failed',
+      });
+      return { success: true, result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Test failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_REGISTER, async (_event, adapterId: string) => {
+    try {
+      const projects = listAdapterProjects();
+      const project = projects.find(p => p.id === adapterId);
+      if (!project) return { success: false, error: 'Adapter not found' };
+      const result = await registerAndConnectAdapter(project);
+      if (result.success) {
+        saveAppRecord({
+          appName: project.appName,
+          appPath: project.appPath,
+          lastConnectionState: 'connected',
+          usageCount: 1,
+        });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Registration failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_UNREGISTER, async (_event, adapterId: string) => {
+    try {
+      const projects = listAdapterProjects();
+      const project = projects.find(p => p.id === adapterId);
+      if (!project) return false;
+      return await unregisterAdapter(project);
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_RESEARCH, async (_event, appName: string, capReport: any, sessionId: string) => {
+    try {
+      const summary = await researchAppForAdapter(appName, capReport, sessionId);
+      return { success: true, summary };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Research failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_ANALYSIS_CLONE, async (_event, repoUrl: string, branch?: string) => {
+    try {
+      const info = await cloneForAnalysis(repoUrl, branch);
+      return { success: true, info };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Clone failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_ANALYSIS_LIST, async () => {
+    return listForgeAnalysisRepos();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_ANALYSIS_REMOVE, async (_event, localPath: string) => {
+    return removeForgeAnalysisRepo(localPath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_RECORDS, async () => {
+    return listAppRecords();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_RECORD_SAVE, async (_event, record: any) => {
+    try {
+      const saved = saveAppRecord(record);
+      return { success: true, record: saved };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Save failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_RECORD_REMOVE, async (_event, id: string) => {
+    return removeAppRecord(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_TOGGLE_FAVORITE, async (_event, id: string) => {
+    return toggleAppFavorite(id);
   });
 }
 

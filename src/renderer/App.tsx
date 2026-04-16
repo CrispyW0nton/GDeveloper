@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useAppState, TabId } from './store';
 import Sidebar from './components/common/Sidebar';
 import ChatWorkspace from './components/chat/ChatWorkspace';
 import GitHubPanel from './components/github/GitHubPanel';
 import MCPServersPanel from './components/mcp/MCPServersPanel';
+import McpForgePanel from './components/mcp/McpForgePanel';
 import TaskLedgerPanel from './components/tasks/TaskLedgerPanel';
 import DiffViewer from './components/diff/DiffViewer';
 import ActivityLog from './components/activity/ActivityLog';
@@ -11,13 +12,27 @@ import SettingsPanel from './components/settings/SettingsPanel';
 import MatrixRainCanvas from './components/common/MatrixRainCanvas';
 import WorkspacePanel from './components/workspace/WorkspacePanel';
 import TerminalPanel from './components/terminal/TerminalPanel';
+import BottomPanel from './components/common/BottomPanel';
 
 export default function App() {
   const {
     state, setApiKey, connectGitHub, disconnectGitHub, selectRepo,
     setTab, setRepos, toggleSidebar, setActiveWorkspace, refreshWorkspaces,
-    clearStartupError,
+    clearStartupError, setExecutionMode, toggleTerminalPanel,
+    setTerminalPanelHeight, setTerminalPanelOpen,
   } = useAppState();
+
+  // Global Ctrl+` handler for toggling terminal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === '`' && e.ctrlKey) {
+        e.preventDefault();
+        toggleTerminalPanel();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleTerminalPanel]);
 
   /**
    * Build repo display from activeWorkspace (preferred) or selectedRepo.
@@ -63,6 +78,8 @@ export default function App() {
               session={state.currentSession}
               repo={repoDisplay}
               providerKey={state.apiKeyProvider}
+              executionMode={state.executionMode}
+              onModeChange={setExecutionMode}
             />
           );
         }
@@ -77,6 +94,7 @@ export default function App() {
         );
 
       case 'terminal':
+        // Terminal tab now opens bottom panel instead — but keep fallback
         return <TerminalPanel activeWorkspace={state.activeWorkspace} />;
 
       case 'github':
@@ -92,6 +110,9 @@ export default function App() {
 
       case 'mcp':
         return <MCPServersPanel />;
+
+      case 'forge':
+        return <McpForgePanel />;
 
       case 'tasks':
         if (state.currentSession) {
@@ -171,10 +192,28 @@ export default function App() {
           collapsed={state.sidebarCollapsed}
           onToggleCollapse={toggleSidebar}
           activeWorkspace={state.activeWorkspace}
+          terminalOpen={state.terminalPanelOpen}
         />
-        <main className="flex-1 overflow-hidden animate-fadeIn">
-          {renderMainContent()}
-        </main>
+
+        {/* Main content area + bottom terminal panel */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <main className="flex-1 overflow-hidden animate-fadeIn">
+            {renderMainContent()}
+          </main>
+
+          {/* Bottom Terminal Panel — persists across tab switches */}
+          <BottomPanel
+            open={state.terminalPanelOpen}
+            height={state.terminalPanelHeight}
+            onHeightChange={setTerminalPanelHeight}
+            onClose={() => setTerminalPanelOpen(false)}
+          >
+            <TerminalPanel
+              activeWorkspace={state.activeWorkspace}
+              onClose={() => setTerminalPanelOpen(false)}
+            />
+          </BottomPanel>
+        </div>
       </div>
     </>
   );

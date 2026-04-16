@@ -105,6 +105,56 @@ export const IPC_CHANNELS = {
   // ─── Terminal (Sprint 9) ───
   TERMINAL_EXECUTE: 'terminal:execute',
   TERMINAL_DETECT_SHELLS: 'terminal:detect-shells',
+
+  // ─── Sprint 12: Slash Commands & Mode ───
+  SLASH_COMMAND_EXECUTE: 'slash:execute',
+  SLASH_COMMAND_LIST: 'slash:list',
+  MODE_GET: 'mode:get',
+  MODE_SET: 'mode:set',
+
+  // ─── Sprint 13: Discovery, Migration, Environment, Research ───
+  DISCOVERY_SCAN: 'discovery:scan',
+  DISCOVERY_IMPORT: 'discovery:import',
+  MIGRATION_GET_MANAGED_ROOT: 'migration:get-managed-root',
+  MIGRATION_SET_MANAGED_ROOT: 'migration:set-managed-root',
+  MIGRATION_MOVE_WORKSPACE: 'migration:move-workspace',
+  MIGRATION_MOVE_TO_MANAGED: 'migration:move-to-managed',
+  ENV_DETECT_STACK: 'env:detect-stack',
+  ENV_GET_PROFILE: 'env:get-profile',
+  ENV_CREATE_PYTHON: 'env:create-python',
+  ENV_SYNC_DEPS: 'env:sync-deps',
+  ENV_IS_UV_AVAILABLE: 'env:is-uv-available',
+  RESEARCH_EXECUTE: 'research:execute',
+  RESEARCH_COMPARE: 'research:compare',
+  EXTERNAL_DOWNLOAD: 'external:download',
+  EXTERNAL_LIST: 'external:list',
+  EXTERNAL_REMOVE: 'external:remove',
+  // MCP Health (Sprint 13)
+  MCP_HEALTH: 'mcp:health',
+  // GitHub auth info (Sprint 13)
+  GITHUB_AUTH_STATUS: 'github:auth-status',
+  // Task lifecycle verification (Sprint 13)
+  TASK_VERIFY: 'task:verify',
+
+  // ─── Sprint 14: MCP Forge / App Adapter Studio ───
+  FORGE_SCAN: 'forge:scan',
+  FORGE_GENERATE: 'forge:generate',
+  FORGE_SAVE: 'forge:save',
+  FORGE_LIST_ADAPTERS: 'forge:list-adapters',
+  FORGE_GET_ADAPTER: 'forge:get-adapter',
+  FORGE_UPDATE_ADAPTER: 'forge:update-adapter',
+  FORGE_REMOVE_ADAPTER: 'forge:remove-adapter',
+  FORGE_TEST: 'forge:test',
+  FORGE_REGISTER: 'forge:register',
+  FORGE_UNREGISTER: 'forge:unregister',
+  FORGE_RESEARCH: 'forge:research',
+  FORGE_ANALYSIS_CLONE: 'forge:analysis-clone',
+  FORGE_ANALYSIS_LIST: 'forge:analysis-list',
+  FORGE_ANALYSIS_REMOVE: 'forge:analysis-remove',
+  FORGE_APP_RECORDS: 'forge:app-records',
+  FORGE_APP_RECORD_SAVE: 'forge:app-record-save',
+  FORGE_APP_RECORD_REMOVE: 'forge:app-record-remove',
+  FORGE_APP_TOGGLE_FAVORITE: 'forge:app-toggle-favorite',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];

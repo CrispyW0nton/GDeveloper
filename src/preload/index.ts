@@ -112,6 +112,65 @@ const electronAPI = {
   terminalExecute: (command: string, cwd?: string) => ipcRenderer.invoke('terminal:execute', command, cwd),
   detectShells: () => ipcRenderer.invoke('terminal:detect-shells'),
 
+  // ─── Slash Commands & Mode (Sprint 12) ─────────────
+  executeSlashCommand: (name: string, args: string, sessionId: string) => ipcRenderer.invoke('slash:execute', name, args, sessionId),
+  listSlashCommands: () => ipcRenderer.invoke('slash:list'),
+  getExecutionMode: () => ipcRenderer.invoke('mode:get'),
+  setExecutionMode: (mode: string) => ipcRenderer.invoke('mode:set', mode),
+
+  // ─── Sprint 13: Discovery ─────────────────────────
+  scanForRepos: (rootPath: string, maxDepth?: number) => ipcRenderer.invoke('discovery:scan', rootPath, maxDepth),
+  importDiscoveredRepos: (repos: any[]) => ipcRenderer.invoke('discovery:import', repos),
+
+  // ─── Sprint 13: Migration ─────────────────────────
+  getManagedRoot: () => ipcRenderer.invoke('migration:get-managed-root'),
+  setManagedRoot: (path: string) => ipcRenderer.invoke('migration:set-managed-root', path),
+  moveWorkspace: (id: string, destDir: string, deleteOriginal?: boolean) => ipcRenderer.invoke('migration:move-workspace', id, destDir, deleteOriginal),
+  moveToManagedRoot: (id: string, deleteOriginal?: boolean) => ipcRenderer.invoke('migration:move-to-managed', id, deleteOriginal),
+
+  // ─── Sprint 13: Environment Profiles ──────────────
+  detectStack: (workspacePath?: string) => ipcRenderer.invoke('env:detect-stack', workspacePath),
+  getEnvProfile: (workspacePath?: string) => ipcRenderer.invoke('env:get-profile', workspacePath),
+  createPythonEnv: (workspacePath?: string) => ipcRenderer.invoke('env:create-python', workspacePath),
+  syncPythonDeps: (workspacePath?: string, envPath?: string) => ipcRenderer.invoke('env:sync-deps', workspacePath, envPath),
+  isUvAvailable: () => ipcRenderer.invoke('env:is-uv-available'),
+
+  // ─── Sprint 13: Research & External ───────────────
+  executeResearch: (question: string, sessionId: string) => ipcRenderer.invoke('research:execute', question, sessionId),
+  compareRepos: (repoA: string, repoB: string, sessionId: string, focus?: string) => ipcRenderer.invoke('research:compare', repoA, repoB, sessionId, focus),
+  downloadExternalRepo: (repoUrl: string) => ipcRenderer.invoke('external:download', repoUrl),
+  listExternalRepos: () => ipcRenderer.invoke('external:list'),
+  removeExternalRepo: (localPath: string) => ipcRenderer.invoke('external:remove', localPath),
+
+  // ─── Sprint 13: MCP Health ────────────────────────
+  getMCPHealth: () => ipcRenderer.invoke('mcp:health'),
+
+  // ─── Sprint 13: GitHub Auth Status ────────────────
+  getGitHubAuthStatus: () => ipcRenderer.invoke('github:auth-status'),
+
+  // ─── Sprint 13: Task Verification ─────────────────
+  verifyTask: (taskId: string) => ipcRenderer.invoke('task:verify', taskId),
+
+  // ─── Sprint 14: MCP Forge / App Adapter Studio ────
+  forgeScan: (appPath: string) => ipcRenderer.invoke('forge:scan', appPath),
+  forgeGenerate: (capReport: any) => ipcRenderer.invoke('forge:generate', capReport),
+  forgeSave: (project: any) => ipcRenderer.invoke('forge:save', project),
+  forgeListAdapters: () => ipcRenderer.invoke('forge:list-adapters'),
+  forgeGetAdapter: (id: string) => ipcRenderer.invoke('forge:get-adapter', id),
+  forgeUpdateAdapter: (id: string, updates: any) => ipcRenderer.invoke('forge:update-adapter', id, updates),
+  forgeRemoveAdapter: (id: string) => ipcRenderer.invoke('forge:remove-adapter', id),
+  forgeTest: (adapterId: string) => ipcRenderer.invoke('forge:test', adapterId),
+  forgeRegister: (adapterId: string) => ipcRenderer.invoke('forge:register', adapterId),
+  forgeUnregister: (adapterId: string) => ipcRenderer.invoke('forge:unregister', adapterId),
+  forgeResearch: (appName: string, capReport: any, sessionId: string) => ipcRenderer.invoke('forge:research', appName, capReport, sessionId),
+  forgeAnalysisClone: (repoUrl: string, branch?: string) => ipcRenderer.invoke('forge:analysis-clone', repoUrl, branch),
+  forgeAnalysisList: () => ipcRenderer.invoke('forge:analysis-list'),
+  forgeAnalysisRemove: (localPath: string) => ipcRenderer.invoke('forge:analysis-remove', localPath),
+  forgeListAppRecords: () => ipcRenderer.invoke('forge:app-records'),
+  forgeSaveAppRecord: (record: any) => ipcRenderer.invoke('forge:app-record-save', record),
+  forgeRemoveAppRecord: (id: string) => ipcRenderer.invoke('forge:app-record-remove', id),
+  forgeToggleAppFavorite: (id: string) => ipcRenderer.invoke('forge:app-toggle-favorite', id),
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,
