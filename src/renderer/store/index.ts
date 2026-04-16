@@ -77,6 +77,33 @@ export interface WorkspaceInfo {
   status: string;
 }
 
+// Sprint 13 types
+export interface EnvironmentProfile {
+  stack: string;
+  manager: string;
+  envPath: string;
+  activationHint: string;
+  detectedAt: string;
+  details: Record<string, string>;
+}
+
+export interface MCPHealthInfo {
+  id: string;
+  name: string;
+  status: string;
+  transport: string;
+  toolCount: number;
+  lastConnected: string | null;
+}
+
+export interface GitHubAuthStatus {
+  connected: boolean;
+  username: string | null;
+  hasToken: boolean;
+  tokenValid: boolean;
+  needsReconnect: boolean;
+}
+
 // ─── Helpers ───
 
 /** Create a SessionInfo and SelectedRepo from a workspace */

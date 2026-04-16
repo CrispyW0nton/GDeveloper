@@ -7,7 +7,7 @@
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
 import { IPC_CHANNELS } from './ipc';
@@ -28,6 +28,10 @@ import {
   getAllCommands, getCommand, getExecutionMode, setExecutionMode,
   WRITE_TOOL_NAMES, WorkspaceContext,
 } from './commands';
+import { scanForRepositories, importDiscoveredRepos, DiscoveredRepo } from './discovery';
+import { getManagedRoot, setManagedRoot, moveWorkspace, moveToManagedRoot, ensureManagedRoot } from './migration';
+import { detectStack, getEnvironmentProfile, createPythonEnv, syncPythonDeps, isUvAvailable } from './environment';
+import { executeResearch, compareRepos, downloadExternalRepo, listExternalRepos, removeExternalRepo } from './research';
 import { v4 as uuid } from 'uuid';
 
 let mainWindow: BrowserWindow | null = null;
@@ -1201,6 +1205,224 @@ function registerIPCHandlers(): void {
       return { success: true, mode };
     }
     return { success: false, error: 'Invalid mode. Use "plan" or "build".' };
+  });
+
+  // ─── Sprint 13: Discovery ────────────────────────
+
+  ipcMain.handle(IPC_CHANNELS.DISCOVERY_SCAN, async (_event, rootPath: string, maxDepth?: number) => {
+    try {
+      const repos = await scanForRepositories(rootPath, maxDepth || 5);
+      return { success: true, repos };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Scan failed', repos: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DISCOVERY_IMPORT, async (_event, repos: DiscoveredRepo[]) => {
+    try {
+      const result = await importDiscoveredRepos(repos);
+      return { success: true, ...result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Import failed', imported: 0, skipped: 0 };
+    }
+  });
+
+  // ─── Sprint 13: Migration ────────────────────────
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_GET_MANAGED_ROOT, async () => {
+    return getManagedRoot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_SET_MANAGED_ROOT, async (_event, path: string) => {
+    setManagedRoot(path);
+    ensureManagedRoot();
+    return { success: true, path: getManagedRoot() };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_MOVE_WORKSPACE, async (_event, workspaceId: string, destDir: string, deleteOriginal?: boolean) => {
+    return moveWorkspace(workspaceId, destDir, deleteOriginal || false);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MIGRATION_MOVE_TO_MANAGED, async (_event, workspaceId: string, deleteOriginal?: boolean) => {
+    return moveToManagedRoot(workspaceId, deleteOriginal || false);
+  });
+
+  // ─── Sprint 13: Environment Profiles ─────────────
+
+  ipcMain.handle(IPC_CHANNELS.ENV_DETECT_STACK, async (_event, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return { stack: 'unknown', manager: '', indicators: [] };
+    return detectStack(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_GET_PROFILE, async (_event, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return null;
+    return getEnvironmentProfile(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_CREATE_PYTHON, async (_event, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return { success: false, error: 'No workspace active' };
+    try {
+      const profile = await createPythonEnv(ws);
+      return { success: true, profile };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_SYNC_DEPS, async (_event, workspacePath?: string, envPath?: string) => {
+    const ws = workspacePath || getActiveWorkspace();
+    if (!ws) return { success: false, error: 'No workspace active' };
+    try {
+      const profile = getEnvironmentProfile(ws);
+      const ep = envPath || profile?.envPath || '';
+      if (!ep) return { success: false, error: 'No environment found' };
+      const output = await syncPythonDeps(ws, ep);
+      return { success: true, output };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Sync failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ENV_IS_UV_AVAILABLE, async () => {
+    return isUvAvailable();
+  });
+
+  // ─── Sprint 13: Research & External ──────────────
+
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_EXECUTE, async (_event, question: string, sessionId: string) => {
+    try {
+      const wsPath = getActiveWorkspace() || undefined;
+      const report = await executeResearch(question, sessionId, wsPath, (stage, detail) => {
+        mainWindow?.webContents.send('chat:stream-chunk', {
+          sessionId,
+          type: 'text',
+          content: `\n[Research: ${stage}] ${detail}\n`,
+          fullContent: `[Research: ${stage}] ${detail}`,
+        });
+      });
+      return { success: true, report };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Research failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_COMPARE, async (_event, repoA: string, repoB: string, sessionId: string, focus?: string) => {
+    try {
+      const result = await compareRepos(repoA, repoB, sessionId, focus);
+      return { success: true, result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Comparison failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXTERNAL_DOWNLOAD, async (_event, repoUrl: string) => {
+    try {
+      const wsPath = getActiveWorkspace() || undefined;
+      const info = await downloadExternalRepo(repoUrl, wsPath);
+      return { success: true, info };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXTERNAL_LIST, async () => {
+    const wsPath = getActiveWorkspace() || undefined;
+    return listExternalRepos(wsPath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXTERNAL_REMOVE, async (_event, localPath: string) => {
+    return removeExternalRepo(localPath);
+  });
+
+  // ─── Sprint 13: MCP Health ──────────────────────
+
+  ipcMain.handle(IPC_CHANNELS.MCP_HEALTH, async () => {
+    const servers = mcp.getServers();
+    return servers.map(s => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      transport: s.transport,
+      toolCount: s.tools.length,
+      lastConnected: s.lastConnected || null,
+      url: s.url || null,
+      command: s.command || null,
+    }));
+  });
+
+  // ─── Sprint 13: GitHub Auth Status ───────────────
+
+  ipcMain.handle(IPC_CHANNELS.GITHUB_AUTH_STATUS, async () => {
+    const gh = getGitHub();
+    const connected = gh.isConnected();
+    const username = gh.getUsername();
+    const hasToken = !!settings.getGitHubToken();
+    return {
+      connected,
+      username,
+      hasToken,
+      tokenValid: connected,
+      needsReconnect: hasToken && !connected,
+    };
+  });
+
+  // ─── Sprint 13: Task Verification ────────────────
+
+  ipcMain.handle(IPC_CHANNELS.TASK_VERIFY, async (_event, taskId: string) => {
+    const wsPath = getActiveWorkspace();
+    if (!wsPath) return { success: false, checks: [], error: 'No active workspace' };
+
+    const checks: Array<{ name: string; passed: boolean; detail: string }> = [];
+
+    // Check 1: TypeScript compilation
+    try {
+      execSync('npx tsc --noEmit 2>&1', { cwd: wsPath, timeout: 60000, encoding: 'utf-8' });
+      checks.push({ name: 'TypeScript', passed: true, detail: 'tsc --noEmit passed' });
+    } catch (err: any) {
+      const stderr = err.stderr || err.stdout || '';
+      checks.push({ name: 'TypeScript', passed: false, detail: stderr.substring(0, 500) });
+    }
+
+    // Check 2: Git status clean
+    try {
+      const git = simpleGit(wsPath);
+      const status = await git.status();
+      const clean = status.isClean();
+      checks.push({ name: 'Git Status', passed: clean, detail: clean ? 'Working tree clean' : `${status.modified.length} modified, ${status.not_added.length} untracked` });
+    } catch (err) {
+      checks.push({ name: 'Git Status', passed: false, detail: err instanceof Error ? err.message : 'Git check failed' });
+    }
+
+    // Check 3: Build (if package.json has build script)
+    try {
+      const pkgPath = join(wsPath, 'package.json');
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        if (pkg.scripts?.build) {
+          execSync('npm run build 2>&1', { cwd: wsPath, timeout: 120000, encoding: 'utf-8' });
+          checks.push({ name: 'Build', passed: true, detail: 'npm run build succeeded' });
+        }
+      }
+    } catch (err: any) {
+      checks.push({ name: 'Build', passed: false, detail: (err.stderr || err.stdout || '').substring(0, 500) });
+    }
+
+    const allPassed = checks.every(c => c.passed);
+
+    // Update task status based on verification
+    if (taskId) {
+      db.updateTaskStatus(taskId, allPassed ? 'VERIFIED' : 'VERIFICATION_FAILED',
+        checks.map(c => `${c.name}: ${c.passed ? 'PASS' : 'FAIL'}`).join(', '));
+      db.logActivity('system', 'task_verified', `Verification ${allPassed ? 'passed' : 'failed'}: ${taskId}`,
+        checks.map(c => `${c.name}: ${c.passed ? 'PASS' : 'FAIL'}`).join('; '), {
+          taskId, allPassed, checks
+        });
+    }
+
+    return { success: true, passed: allPassed, checks };
   });
 
   ipcMain.handle(IPC_CHANNELS.TERMINAL_DETECT_SHELLS, async () => {

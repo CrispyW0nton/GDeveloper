@@ -13,6 +13,14 @@ GDeveloper connects Claude AI to your local workspace and gives it tools to read
 - Slash commands for git operations (`/commit`, `/push`, `/diff`, `/undo`, `/status`)
 - Plan/Build execution modes -- research first, then implement
 - VS Code-style bottom terminal panel (Ctrl+`)
+- Repository discovery -- scan a folder for Git repos and import them
+- Managed workspace root with safe migration
+- Python-first environment profiles (uv integration)
+- Deep research workflow (`/research`, `/compare-repos`)
+- External repo download for read-only analysis
+- MCP server health monitoring
+- GitHub auth status and token hardening
+- Task verification with automated checks
 - Clone wizard, workspace registry, git toolbar
 - GitHub OAuth integration for repo management
 - SQLite-backed persistence for chat history, tasks, and activity
@@ -23,6 +31,7 @@ GDeveloper connects Claude AI to your local workspace and gives it tools to read
 - [Node.js](https://nodejs.org/) 18 or later
 - npm 9+
 - A [Claude API key](https://console.anthropic.com/) from Anthropic
+- (Optional) [uv](https://docs.astral.sh/uv/) for Python environment management
 
 ### Install and Run
 
@@ -41,7 +50,7 @@ npm run dev
 ### First-time Setup
 
 1. **Add your API key** -- The app opens to Settings. Paste your Claude API key and click Validate.
-2. **Open a workspace** -- Go to Workspaces tab. Either clone a repo or open an existing local folder.
+2. **Open a workspace** -- Go to Workspaces tab. Either clone a repo, open an existing folder, or scan for repos.
 3. **Start chatting** -- The Chat tab is now active. Type what you want to build or fix. The AI can read your files, write code, and run commands.
 
 ### Build for Production
@@ -66,6 +75,9 @@ Type `/` in the chat input to see all available commands:
 | `/build` | Switch to Build mode -- all tools enabled. |
 | `/tools` | List all available tools (local + MCP). |
 | `/clear` | Clear the chat display. |
+| `/research <question>` | Start a deep research workflow with structured report output. |
+| `/research-continue <follow-up>` | Refine or continue the last research query. |
+| `/compare-repos <path1> <path2>` | Compare two repositories side by side. |
 
 ## Plan / Build Modes
 
@@ -73,6 +85,37 @@ Type `/` in the chat input to see all available commands:
 - **Build mode** (`/build`): The AI has full access to read, write, edit files, run commands, and make commits. This is the default mode.
 
 A mode indicator is shown in the chat header.
+
+## Repository Discovery (Sprint 13)
+
+In the Workspaces tab, click **Scan** to find Git repositories on your machine:
+- Pick a root folder and scan recursively (up to 5 levels deep)
+- Skips `node_modules`, `.venv`, `dist`, `build`, and system folders
+- Shows name, path, remote URL, branch, and clean/dirty status
+- Select repos to import into the workspace registry (duplicates prevented)
+
+## Managed Workspace Root
+
+Go to Workspaces > **Manage** to:
+- Set a managed workspace root (default: `~/Documents/GDeveloper/Workspaces`)
+- Move workspaces to the managed root with git integrity verification
+- Automatic rollback if verification fails
+
+## Environment Profiles
+
+Go to Workspaces > **Env** to see detected stack info:
+- Auto-detects Python, Node, Rust, Go, Java, .NET, and polyglot projects
+- Python projects get `uv` integration:
+  - Create a managed virtual environment
+  - Sync dependencies from `pyproject.toml` or `requirements.txt`
+  - Terminal activation hints
+
+## Research & External Analysis (Sprint 13)
+
+- `/research <question>` triggers a multi-step deep analysis workflow
+- `/compare-repos <path1> <path2>` generates feature comparison tables and architecture analysis
+- Download external public repos for read-only inspection (shallow clone into `.gdeveloper/external-analysis/`)
+- All research results are persisted to activity log
 
 ## Terminal
 
@@ -88,21 +131,26 @@ Press **Ctrl+`** (backtick) to toggle the bottom terminal panel. It stays visibl
 ```
 src/
   main/               Electron main process
-    commands/          Slash command registry
+    commands/          Slash command registry (Sprint 12+13)
     db/                SQLite database (chat, tasks, activity, workspaces)
+    discovery/         Repository scanning and import (Sprint 13)
+    environment/       Stack detection & Python env profiles (Sprint 13)
+    migration/         Safe workspace move & managed root (Sprint 13)
+    research/          Deep research & external repo analysis (Sprint 13)
     providers/         Claude API provider
     tools/             11 local coding tools
     mcp/               MCP server manager
     github/            GitHub OAuth + API
     orchestration/     System prompts
     ipc/               IPC channel definitions
+    security/          Encrypted settings via OS keychain
   preload/             Secure IPC bridge
   renderer/            React UI
     components/
       chat/            Chat workspace, slash dropdown, suggestions, follow-ups
       common/          Sidebar, Matrix rain, bottom panel
       terminal/        Terminal panel with tabs
-      workspace/       Clone wizard, git toolbar, commit panel
+      workspace/       Clone wizard, git toolbar, commit panel, scan, env, manage
       github/          GitHub connection panel
       mcp/             MCP server management
       tasks/           Task ledger
@@ -125,6 +173,13 @@ src/
 | Git | simple-git |
 | MCP | @modelcontextprotocol/sdk |
 | GitHub | Octokit |
+
+## Sprint History
+
+- **Sprint 9**: Workspace management, git toolbar, terminal, agentic chat loop
+- **Sprint 10**: Startup hydration, session auto-creation, relaxed gating, empty states
+- **Sprint 12**: Slash commands, plan/build modes, bottom terminal, suggestion cards, follow-up buttons
+- **Sprint 13**: Repository discovery, managed workspace root, environment profiles, deep research, external analysis, MCP health, GitHub auth hardening, task verification
 
 ## License
 

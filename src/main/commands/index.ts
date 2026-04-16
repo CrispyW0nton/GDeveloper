@@ -414,3 +414,63 @@ register({
     };
   },
 });
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  RESEARCH COMMANDS (Sprint 13)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+register({
+  name: 'research',
+  description: 'Start a deep research workflow. Usage: /research <question>',
+  category: 'workflow',
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    if (!args.trim()) {
+      return {
+        success: true,
+        message: '**Usage:** `/research <question>`\n\nExamples:\n- `/research best Electron PTY library for terminal emulation`\n- `/research MCP SSE retry logic patterns`\n- `/research compare React state management approaches`',
+      };
+    }
+
+    return {
+      success: true,
+      message: `**Research started:** "${args.trim()}"\n\nThe AI will analyze this question using deep research workflow.\nResults will appear in chat. This may take a moment...`,
+      data: { action: 'research', question: args.trim(), workspacePath: ctx.workspacePath, sessionId: ctx.sessionId },
+    };
+  },
+});
+
+register({
+  name: 'research-continue',
+  description: 'Continue or refine the last research query.',
+  category: 'workflow',
+  async execute(args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+    if (!args.trim()) {
+      return { success: true, message: '**Usage:** `/research-continue <follow-up question or refinement>`' };
+    }
+    return {
+      success: true,
+      message: `**Continuing research:** "${args.trim()}"`,
+      data: { action: 'research-continue', question: args.trim() },
+    };
+  },
+});
+
+register({
+  name: 'compare-repos',
+  description: 'Compare two repositories. Usage: /compare-repos <path1> <path2> [focus]',
+  category: 'workflow',
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const parts = args.trim().split(/\s+/);
+    if (parts.length < 2) {
+      return {
+        success: true,
+        message: '**Usage:** `/compare-repos <path-or-url-1> <path-or-url-2> [focus area]`\n\nCompares two projects side by side with architecture analysis, feature comparison, and recommendations.',
+      };
+    }
+    return {
+      success: true,
+      message: `**Comparing:** \`${parts[0]}\` vs \`${parts[1]}\`\nFocus: ${parts.slice(2).join(' ') || 'general'}`,
+      data: { action: 'compare-repos', repoA: parts[0], repoB: parts[1], focus: parts.slice(2).join(' ') },
+    };
+  },
+});

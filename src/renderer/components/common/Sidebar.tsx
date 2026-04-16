@@ -198,7 +198,7 @@ export default function Sidebar({
       <div className="relative z-10 p-3 border-t border-matrix-border">
         {!collapsed && (
           <div className="text-[9px] text-matrix-text-muted/30 text-center tracking-widest">
-            SPRINT 12 // v2.0
+            SPRINT 13 // v3.0
           </div>
         )}
         <button

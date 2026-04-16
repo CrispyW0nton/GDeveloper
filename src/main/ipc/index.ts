@@ -111,6 +111,30 @@ export const IPC_CHANNELS = {
   SLASH_COMMAND_LIST: 'slash:list',
   MODE_GET: 'mode:get',
   MODE_SET: 'mode:set',
+
+  // ─── Sprint 13: Discovery, Migration, Environment, Research ───
+  DISCOVERY_SCAN: 'discovery:scan',
+  DISCOVERY_IMPORT: 'discovery:import',
+  MIGRATION_GET_MANAGED_ROOT: 'migration:get-managed-root',
+  MIGRATION_SET_MANAGED_ROOT: 'migration:set-managed-root',
+  MIGRATION_MOVE_WORKSPACE: 'migration:move-workspace',
+  MIGRATION_MOVE_TO_MANAGED: 'migration:move-to-managed',
+  ENV_DETECT_STACK: 'env:detect-stack',
+  ENV_GET_PROFILE: 'env:get-profile',
+  ENV_CREATE_PYTHON: 'env:create-python',
+  ENV_SYNC_DEPS: 'env:sync-deps',
+  ENV_IS_UV_AVAILABLE: 'env:is-uv-available',
+  RESEARCH_EXECUTE: 'research:execute',
+  RESEARCH_COMPARE: 'research:compare',
+  EXTERNAL_DOWNLOAD: 'external:download',
+  EXTERNAL_LIST: 'external:list',
+  EXTERNAL_REMOVE: 'external:remove',
+  // MCP Health (Sprint 13)
+  MCP_HEALTH: 'mcp:health',
+  // GitHub auth info (Sprint 13)
+  GITHUB_AUTH_STATUS: 'github:auth-status',
+  // Task lifecycle verification (Sprint 13)
+  TASK_VERIFY: 'task:verify',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];

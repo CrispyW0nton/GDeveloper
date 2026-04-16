@@ -118,6 +118,39 @@ const electronAPI = {
   getExecutionMode: () => ipcRenderer.invoke('mode:get'),
   setExecutionMode: (mode: string) => ipcRenderer.invoke('mode:set', mode),
 
+  // ─── Sprint 13: Discovery ─────────────────────────
+  scanForRepos: (rootPath: string, maxDepth?: number) => ipcRenderer.invoke('discovery:scan', rootPath, maxDepth),
+  importDiscoveredRepos: (repos: any[]) => ipcRenderer.invoke('discovery:import', repos),
+
+  // ─── Sprint 13: Migration ─────────────────────────
+  getManagedRoot: () => ipcRenderer.invoke('migration:get-managed-root'),
+  setManagedRoot: (path: string) => ipcRenderer.invoke('migration:set-managed-root', path),
+  moveWorkspace: (id: string, destDir: string, deleteOriginal?: boolean) => ipcRenderer.invoke('migration:move-workspace', id, destDir, deleteOriginal),
+  moveToManagedRoot: (id: string, deleteOriginal?: boolean) => ipcRenderer.invoke('migration:move-to-managed', id, deleteOriginal),
+
+  // ─── Sprint 13: Environment Profiles ──────────────
+  detectStack: (workspacePath?: string) => ipcRenderer.invoke('env:detect-stack', workspacePath),
+  getEnvProfile: (workspacePath?: string) => ipcRenderer.invoke('env:get-profile', workspacePath),
+  createPythonEnv: (workspacePath?: string) => ipcRenderer.invoke('env:create-python', workspacePath),
+  syncPythonDeps: (workspacePath?: string, envPath?: string) => ipcRenderer.invoke('env:sync-deps', workspacePath, envPath),
+  isUvAvailable: () => ipcRenderer.invoke('env:is-uv-available'),
+
+  // ─── Sprint 13: Research & External ───────────────
+  executeResearch: (question: string, sessionId: string) => ipcRenderer.invoke('research:execute', question, sessionId),
+  compareRepos: (repoA: string, repoB: string, sessionId: string, focus?: string) => ipcRenderer.invoke('research:compare', repoA, repoB, sessionId, focus),
+  downloadExternalRepo: (repoUrl: string) => ipcRenderer.invoke('external:download', repoUrl),
+  listExternalRepos: () => ipcRenderer.invoke('external:list'),
+  removeExternalRepo: (localPath: string) => ipcRenderer.invoke('external:remove', localPath),
+
+  // ─── Sprint 13: MCP Health ────────────────────────
+  getMCPHealth: () => ipcRenderer.invoke('mcp:health'),
+
+  // ─── Sprint 13: GitHub Auth Status ────────────────
+  getGitHubAuthStatus: () => ipcRenderer.invoke('github:auth-status'),
+
+  // ─── Sprint 13: Task Verification ─────────────────
+  verifyTask: (taskId: string) => ipcRenderer.invoke('task:verify', taskId),
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,
