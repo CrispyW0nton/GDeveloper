@@ -7,6 +7,8 @@
  */
 
 import { useState, useCallback, useEffect } from 'react';
+import type { ThemeId } from '../themes';
+import { applyTheme } from '../themes';
 
 // Get electronAPI (available in Electron, undefined in web preview)
 const api = (window as any).electronAPI;
@@ -35,6 +37,8 @@ export interface AppState {
   executionMode: ExecutionMode;
   terminalPanelOpen: boolean;
   terminalPanelHeight: number;
+  // Sprint 15 theme
+  theme: ThemeId;
 }
 
 export interface SelectedRepo {
@@ -146,6 +150,8 @@ export const INITIAL_STATE: AppState = {
   executionMode: 'build',
   terminalPanelOpen: false,
   terminalPanelHeight: 250,
+  // Sprint 15
+  theme: 'matrix' as ThemeId,
 };
 
 // ─── State Hook ───
@@ -196,6 +202,10 @@ export function useAppState() {
           defaultTab = 'workspace';
         }
 
+        // ─── Sprint 15: Theme hydration ───
+        const savedTheme: ThemeId = (settings.theme as ThemeId) || 'matrix';
+        applyTheme(savedTheme);
+
         setState(prev => ({
           ...prev,
           apiKeyConfigured: hasKey,
@@ -207,6 +217,7 @@ export function useAppState() {
           currentSession,
           selectedRepo,
           startupError: null,
+          theme: savedTheme,
         }));
 
         // If GitHub is connected, try loading repos

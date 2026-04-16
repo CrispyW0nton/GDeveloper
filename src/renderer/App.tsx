@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { useAppState, TabId } from './store';
+import { ThemeProvider, useTheme } from './themes/ThemeContext';
 import Sidebar from './components/common/Sidebar';
 import ChatWorkspace from './components/chat/ChatWorkspace';
 import GitHubPanel from './components/github/GitHubPanel';
@@ -15,12 +16,21 @@ import TerminalPanel from './components/terminal/TerminalPanel';
 import BottomPanel from './components/common/BottomPanel';
 
 export default function App() {
+  return (
+    <ThemeProvider initialTheme="matrix">
+      <AppInner />
+    </ThemeProvider>
+  );
+}
+
+function AppInner() {
   const {
     state, setApiKey, connectGitHub, disconnectGitHub, selectRepo,
     setTab, setRepos, toggleSidebar, setActiveWorkspace, refreshWorkspaces,
     clearStartupError, setExecutionMode, toggleTerminalPanel,
     setTerminalPanelHeight, setTerminalPanelOpen,
   } = useAppState();
+  const { showMatrixRain, showCrtOverlay } = useTheme();
 
   // Global Ctrl+` handler for toggling terminal
   useEffect(() => {
@@ -166,17 +176,18 @@ export default function App() {
 
   return (
     <>
-      {/* Matrix Rain Canvas Background */}
-      <MatrixRainCanvas opacity={0.38} fontSize={14} color="#00ff41" speed={33} />
+      {/* Matrix Rain Canvas Background — only rendered for Matrix theme */}
+      {showMatrixRain && <MatrixRainCanvas opacity={0.38} fontSize={14} color="#00ff41" speed={33} />}
 
-      {/* CRT Scanline Overlay */}
-      <div className="crt-overlay" />
+      {/* CRT Scanline Overlay — only rendered for Matrix theme */}
+      {showCrtOverlay && <div className="crt-overlay" />}
 
       {/* Startup Error Banner */}
       {state.startupError && (
-        <div className="fixed top-0 left-0 right-0 z-50 bg-red-900/90 text-red-200 px-4 py-2 text-xs flex items-center justify-between">
+        <div className="fixed top-0 left-0 right-0 z-50 px-4 py-2 text-xs flex items-center justify-between"
+             style={{ background: 'rgba(127, 29, 29, 0.92)', color: '#fecaca' }}>
           <span>Startup error: {state.startupError}</span>
-          <button onClick={clearStartupError} className="text-red-300 hover:text-white ml-4">Dismiss</button>
+          <button onClick={clearStartupError} className="ml-4 opacity-70 hover:opacity-100 transition-opacity">Dismiss</button>
         </div>
       )}
 

@@ -55,7 +55,7 @@ export default function BottomPanel({ open, height, onHeightChange, onClose, chi
   return (
     <div
       ref={panelRef}
-      className="border-t border-matrix-green/20 bg-[#0a0a0a] flex flex-col"
+      className="border-t border-matrix-green/20 bg-matrix-bg flex flex-col"
       style={{ height: `${height}px`, minHeight: '100px' }}
     >
       {/* Resize Handle */}
