@@ -109,10 +109,32 @@ function registerIPCHandlers(): void {
     try {
       if (provider === 'claude') {
         const claude = new ClaudeProvider(key);
-        const valid = await claude.validateKey();
-        return { valid, error: valid ? null : 'Invalid API key' };
+        const result = await claude.validateKey();
+        if (result.valid) {
+          settings.setApiKey(provider, key);
+
+          // Pick the best available model from the returned list
+          let bestModel = 'claude-sonnet-4-6'; // default fallback
+          if (result.models && result.models.length > 0) {
+            // Prefer sonnet-4, then any sonnet, then first available
+            const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
+            const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
+            bestModel = sonnet4 || anySonnet || result.models[0];
+          }
+
+          // Register provider with the best available model
+          const registeredProvider = new ClaudeProvider(key, bestModel);
+          providerRegistry.register(registeredProvider);
+          db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
+        }
+        return { valid: result.valid, error: result.error };
       }
-      return { valid: key.length > 10, error: null };
+      // Generic provider: basic length check
+      const valid = key.length > 10;
+      if (valid) {
+        settings.setApiKey(provider, key);
+      }
+      return { valid, error: valid ? undefined : 'API key is too short' };
     } catch (err) {
       return { valid: false, error: err instanceof Error ? err.message : 'Validation failed' };
     }

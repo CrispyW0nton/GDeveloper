@@ -11,6 +11,7 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
   const [provider, setProvider] = useState('claude');
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState('');
+  const [warning, setWarning] = useState('');
   const [saved, setSaved] = useState(false);
   const [existingKey, setExistingKey] = useState('');
 
@@ -34,23 +35,26 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
     if (!apiKey.trim()) return;
     setValidating(true);
     setError('');
+    setWarning('');
     try {
       if (api) {
-        // Validate key with the main process
+        // Validate key with the main process (also stores key + registers provider on success)
         const result = await api.validateApiKey(provider, apiKey);
         if (!result.valid) {
           setError(result.error || 'Invalid API key. Check your key and try again.');
           setValidating(false);
           return;
         }
-        // Save the key securely
-        await api.setApiKey(provider, apiKey);
+        // Key is valid; show warning if present (e.g. insufficient credits, rate-limited)
+        if (result.error) {
+          setWarning(result.error);
+        }
       }
       onApiKeySet(provider);
       setSaved(true);
       setExistingKey('••••••••');
       setApiKey(''); // Clear the input after save
-      setTimeout(() => setSaved(false), 3000);
+      setTimeout(() => { setSaved(false); setWarning(''); }, 5000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save API key');
     } finally {
@@ -123,13 +127,24 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
 
             {error && (
               <div className="text-xs text-matrix-danger bg-matrix-danger/5 border border-matrix-danger/20 rounded px-3 py-2">
-                {error}
+                {error.split('\n').map((line: string, i: number) => (
+                  <React.Fragment key={i}>
+                    {line}
+                    {i < error.split('\n').length - 1 && <br />}
+                  </React.Fragment>
+                ))}
               </div>
             )}
 
-            {saved && (
+            {saved && !warning && (
               <div className="text-xs text-matrix-green bg-matrix-green/5 border border-matrix-green/20 rounded px-3 py-2">
                 API key saved and validated successfully. Key is encrypted via OS keychain.
+              </div>
+            )}
+
+            {saved && warning && (
+              <div className="text-xs text-yellow-400 bg-yellow-400/5 border border-yellow-400/20 rounded px-3 py-2">
+                API key saved. {warning}
               </div>
             )}
 

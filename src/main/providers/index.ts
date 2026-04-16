@@ -15,7 +15,7 @@ export class ClaudeProvider implements ILLMProvider {
   private model: string;
   private baseUrl: string;
 
-  constructor(apiKey: string, model = 'claude-sonnet-4-20250514', baseUrl = 'https://api.anthropic.com') {
+  constructor(apiKey: string, model = 'claude-sonnet-4-6', baseUrl = 'https://api.anthropic.com') {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl;
@@ -226,24 +226,55 @@ export class ClaudeProvider implements ILLMProvider {
     return Math.ceil(text.length / 4);
   }
 
-  async validateKey(): Promise<boolean> {
+  async validateKey(): Promise<{ valid: boolean; error?: string; models?: string[] }> {
+    // Format pre-check
+    if (!this.apiKey || this.apiKey.trim().length === 0) {
+      return { valid: false, error: 'Please enter an API key.' };
+    }
+    if (!this.apiKey.startsWith('sk-ant-')) {
+      return { valid: false, error: 'Invalid format. Anthropic API keys start with "sk-ant-".\nCheck that you copied the full key from console.anthropic.com.' };
+    }
+
     try {
-      const response = await fetch(`${this.baseUrl}/v1/messages`, {
-        method: 'POST',
+      const response = await fetch(`${this.baseUrl}/v1/models`, {
+        method: 'GET',
         headers: {
-          'Content-Type': 'application/json',
           'x-api-key': this.apiKey,
           'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: this.model,
-          max_tokens: 10,
-          messages: [{ role: 'user', content: 'Hi' }]
-        })
+        }
       });
-      return response.ok;
-    } catch {
-      return false;
+
+      if (response.ok) {
+        // Parse available models from response
+        try {
+          const data = await response.json();
+          const modelIds: string[] = (data.data || []).map((m: any) => m.id as string);
+          return { valid: true, models: modelIds };
+        } catch {
+          return { valid: true };
+        }
+      }
+
+      const bodyText = await response.text().catch(() => '');
+
+      switch (response.status) {
+        case 401:
+          return {
+            valid: false,
+            error: 'This API key is not recognized by Anthropic. Please verify:\n\u2022 The key was copied completely from console.anthropic.com\n\u2022 The key has not been revoked or deleted\n\u2022 Your account has active billing configured\n\u2022 Try generating a fresh key if this persists'
+          };
+        case 403:
+          return { valid: false, error: 'API key lacks required permissions. Check workspace settings at console.anthropic.com.' };
+        case 402:
+          return { valid: true, error: 'Key is valid but your account may have insufficient credits.' };
+        case 429:
+          return { valid: true, error: 'Key is valid but you are currently rate-limited. Wait a moment.' };
+        default:
+          return { valid: false, error: `Anthropic returned status ${response.status}: ${bodyText.slice(0, 200)}` };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { valid: false, error: `Connection failed: ${msg}. Check your internet and firewall.` };
     }
   }
 }
