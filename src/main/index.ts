@@ -32,6 +32,16 @@ import { scanForRepositories, importDiscoveredRepos, DiscoveredRepo } from './di
 import { getManagedRoot, setManagedRoot, moveWorkspace, moveToManagedRoot, ensureManagedRoot } from './migration';
 import { detectStack, getEnvironmentProfile, createPythonEnv, syncPythonDeps, isUvAvailable } from './environment';
 import { executeResearch, compareRepos, downloadExternalRepo, listExternalRepos, removeExternalRepo } from './research';
+import { scanAppCapabilities } from './mcp-forge/scan';
+import { generateCLIAdapter } from './mcp-forge/generate';
+import {
+  saveAdapterProject, listAdapterProjects, loadAdapterProject, updateAdapterProject,
+  removeAdapterProject, getAdaptersRoot,
+  saveAppRecord, listAppRecords, removeAppRecord, toggleAppFavorite,
+} from './mcp-forge/storage';
+import { testAdapter } from './mcp-forge/testHarness';
+import { registerAndConnectAdapter, unregisterAdapter } from './mcp-forge/register';
+import { researchAppForAdapter, cloneForAnalysis, listForgeAnalysisRepos, removeForgeAnalysisRepo } from './mcp-forge/research';
 import { v4 as uuid } from 'uuid';
 
 let mainWindow: BrowserWindow | null = null;
@@ -1458,6 +1468,166 @@ function registerIPCHandlers(): void {
     }
 
     return shells;
+  });
+
+  // ─── Sprint 14: MCP Forge / App Adapter Studio ──
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_SCAN, async (_event, appPath: string) => {
+    try {
+      const report = await scanAppCapabilities(appPath);
+      return { success: true, report };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Scan failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_GENERATE, async (_event, capReport: any) => {
+    try {
+      const adaptersRoot = getAdaptersRoot();
+      const project = generateCLIAdapter(capReport, adaptersRoot);
+      const saved = saveAdapterProject(project);
+      // Save app record
+      saveAppRecord({
+        appName: capReport.appName,
+        appPath: capReport.appPath,
+        capabilityTypes: capReport.capabilities.map((c: any) => c.type),
+        adapterProjectId: saved.id,
+        adapterPath: saved.adapterPath,
+        generatedAt: new Date().toISOString(),
+      });
+      return { success: true, project: saved };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Generation failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_SAVE, async (_event, project: any) => {
+    try {
+      const saved = saveAdapterProject(project);
+      return { success: true, project: saved };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Save failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_LIST_ADAPTERS, async () => {
+    return listAdapterProjects();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_GET_ADAPTER, async (_event, id: string) => {
+    const projects = listAdapterProjects();
+    return projects.find(p => p.id === id) || null;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_UPDATE_ADAPTER, async (_event, id: string, updates: any) => {
+    try {
+      const result = updateAdapterProject(id, updates);
+      return { success: !!result, project: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Update failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_REMOVE_ADAPTER, async (_event, id: string) => {
+    return removeAdapterProject(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_TEST, async (_event, adapterId: string) => {
+    try {
+      const projects = listAdapterProjects();
+      const project = projects.find(p => p.id === adapterId);
+      if (!project) return { success: false, error: 'Adapter not found' };
+      const result = await testAdapter(project);
+      // Persist test result
+      updateAdapterProject(adapterId, { lastTestResult: result, status: result.passed ? 'tested' : 'error' });
+      // Update app record
+      saveAppRecord({
+        appName: project.appName,
+        appPath: project.appPath,
+        lastTestResult: result.passed ? 'passed' : 'failed',
+      });
+      return { success: true, result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Test failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_REGISTER, async (_event, adapterId: string) => {
+    try {
+      const projects = listAdapterProjects();
+      const project = projects.find(p => p.id === adapterId);
+      if (!project) return { success: false, error: 'Adapter not found' };
+      const result = await registerAndConnectAdapter(project);
+      if (result.success) {
+        saveAppRecord({
+          appName: project.appName,
+          appPath: project.appPath,
+          lastConnectionState: 'connected',
+          usageCount: 1,
+        });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Registration failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_UNREGISTER, async (_event, adapterId: string) => {
+    try {
+      const projects = listAdapterProjects();
+      const project = projects.find(p => p.id === adapterId);
+      if (!project) return false;
+      return await unregisterAdapter(project);
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_RESEARCH, async (_event, appName: string, capReport: any, sessionId: string) => {
+    try {
+      const summary = await researchAppForAdapter(appName, capReport, sessionId);
+      return { success: true, summary };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Research failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_ANALYSIS_CLONE, async (_event, repoUrl: string, branch?: string) => {
+    try {
+      const info = await cloneForAnalysis(repoUrl, branch);
+      return { success: true, info };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Clone failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_ANALYSIS_LIST, async () => {
+    return listForgeAnalysisRepos();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_ANALYSIS_REMOVE, async (_event, localPath: string) => {
+    return removeForgeAnalysisRepo(localPath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_RECORDS, async () => {
+    return listAppRecords();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_RECORD_SAVE, async (_event, record: any) => {
+    try {
+      const saved = saveAppRecord(record);
+      return { success: true, record: saved };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Save failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_RECORD_REMOVE, async (_event, id: string) => {
+    return removeAppRecord(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FORGE_APP_TOGGLE_FAVORITE, async (_event, id: string) => {
+    return toggleAppFavorite(id);
   });
 }
 

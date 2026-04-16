@@ -15,7 +15,7 @@ const api = (window as any).electronAPI;
 
 export type ExecutionMode = 'plan' | 'build';
 
-export type TabId = 'chat' | 'github' | 'mcp' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
+export type TabId = 'chat' | 'github' | 'mcp' | 'forge' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
 
 // ─── App State Interface ───
 export interface AppState {
@@ -285,7 +285,7 @@ export function useAppState() {
   const setTab = useCallback((tab: TabId) => {
     setState(prev => {
       // Always accessible tabs (no workspace or repo needed)
-      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'settings', 'github'];
+      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'forge', 'settings', 'github'];
       if (alwaysAccessible.includes(tab)) {
         return { ...prev, activeTab: tab };
       }

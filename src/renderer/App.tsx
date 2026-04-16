@@ -4,6 +4,7 @@ import Sidebar from './components/common/Sidebar';
 import ChatWorkspace from './components/chat/ChatWorkspace';
 import GitHubPanel from './components/github/GitHubPanel';
 import MCPServersPanel from './components/mcp/MCPServersPanel';
+import McpForgePanel from './components/mcp/McpForgePanel';
 import TaskLedgerPanel from './components/tasks/TaskLedgerPanel';
 import DiffViewer from './components/diff/DiffViewer';
 import ActivityLog from './components/activity/ActivityLog';
@@ -109,6 +110,9 @@ export default function App() {
 
       case 'mcp':
         return <MCPServersPanel />;
+
+      case 'forge':
+        return <McpForgePanel />;
 
       case 'tasks':
         if (state.currentSession) {

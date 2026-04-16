@@ -151,6 +151,26 @@ const electronAPI = {
   // ─── Sprint 13: Task Verification ─────────────────
   verifyTask: (taskId: string) => ipcRenderer.invoke('task:verify', taskId),
 
+  // ─── Sprint 14: MCP Forge / App Adapter Studio ────
+  forgeScan: (appPath: string) => ipcRenderer.invoke('forge:scan', appPath),
+  forgeGenerate: (capReport: any) => ipcRenderer.invoke('forge:generate', capReport),
+  forgeSave: (project: any) => ipcRenderer.invoke('forge:save', project),
+  forgeListAdapters: () => ipcRenderer.invoke('forge:list-adapters'),
+  forgeGetAdapter: (id: string) => ipcRenderer.invoke('forge:get-adapter', id),
+  forgeUpdateAdapter: (id: string, updates: any) => ipcRenderer.invoke('forge:update-adapter', id, updates),
+  forgeRemoveAdapter: (id: string) => ipcRenderer.invoke('forge:remove-adapter', id),
+  forgeTest: (adapterId: string) => ipcRenderer.invoke('forge:test', adapterId),
+  forgeRegister: (adapterId: string) => ipcRenderer.invoke('forge:register', adapterId),
+  forgeUnregister: (adapterId: string) => ipcRenderer.invoke('forge:unregister', adapterId),
+  forgeResearch: (appName: string, capReport: any, sessionId: string) => ipcRenderer.invoke('forge:research', appName, capReport, sessionId),
+  forgeAnalysisClone: (repoUrl: string, branch?: string) => ipcRenderer.invoke('forge:analysis-clone', repoUrl, branch),
+  forgeAnalysisList: () => ipcRenderer.invoke('forge:analysis-list'),
+  forgeAnalysisRemove: (localPath: string) => ipcRenderer.invoke('forge:analysis-remove', localPath),
+  forgeListAppRecords: () => ipcRenderer.invoke('forge:app-records'),
+  forgeSaveAppRecord: (record: any) => ipcRenderer.invoke('forge:app-record-save', record),
+  forgeRemoveAppRecord: (id: string) => ipcRenderer.invoke('forge:app-record-remove', id),
+  forgeToggleAppFavorite: (id: string) => ipcRenderer.invoke('forge:app-toggle-favorite', id),
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,

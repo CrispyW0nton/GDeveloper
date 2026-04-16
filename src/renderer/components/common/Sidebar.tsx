@@ -74,6 +74,12 @@ const NAV_ITEMS: NavItem[] = [
     requiresWorkspace: false
   },
   {
+    id: 'forge' as TabId,
+    label: 'MCP Forge',
+    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>,
+    requiresWorkspace: false
+  },
+  {
     id: 'tasks',
     label: 'Task Ledger',
     icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>,
@@ -198,7 +204,7 @@ export default function Sidebar({
       <div className="relative z-10 p-3 border-t border-matrix-border">
         {!collapsed && (
           <div className="text-[9px] text-matrix-text-muted/30 text-center tracking-widest">
-            SPRINT 13 // v3.0
+            SPRINT 14 // v4.0
           </div>
         )}
         <button

@@ -135,6 +135,26 @@ export const IPC_CHANNELS = {
   GITHUB_AUTH_STATUS: 'github:auth-status',
   // Task lifecycle verification (Sprint 13)
   TASK_VERIFY: 'task:verify',
+
+  // ─── Sprint 14: MCP Forge / App Adapter Studio ───
+  FORGE_SCAN: 'forge:scan',
+  FORGE_GENERATE: 'forge:generate',
+  FORGE_SAVE: 'forge:save',
+  FORGE_LIST_ADAPTERS: 'forge:list-adapters',
+  FORGE_GET_ADAPTER: 'forge:get-adapter',
+  FORGE_UPDATE_ADAPTER: 'forge:update-adapter',
+  FORGE_REMOVE_ADAPTER: 'forge:remove-adapter',
+  FORGE_TEST: 'forge:test',
+  FORGE_REGISTER: 'forge:register',
+  FORGE_UNREGISTER: 'forge:unregister',
+  FORGE_RESEARCH: 'forge:research',
+  FORGE_ANALYSIS_CLONE: 'forge:analysis-clone',
+  FORGE_ANALYSIS_LIST: 'forge:analysis-list',
+  FORGE_ANALYSIS_REMOVE: 'forge:analysis-remove',
+  FORGE_APP_RECORDS: 'forge:app-records',
+  FORGE_APP_RECORD_SAVE: 'forge:app-record-save',
+  FORGE_APP_RECORD_REMOVE: 'forge:app-record-remove',
+  FORGE_APP_TOGGLE_FAVORITE: 'forge:app-toggle-favorite',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
