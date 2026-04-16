@@ -2,6 +2,7 @@
  * Application State Store
  * Loads persisted state from Electron main process on startup
  * Uses IPC to sync state changes
+ * Sprint 9: + workspace, git status, terminal state
  */
 
 import { useState, useCallback, useEffect } from 'react';
@@ -20,9 +21,12 @@ export interface AppState {
   currentSession: SessionInfo | null;
   activeTab: TabId;
   sidebarCollapsed: boolean;
+  // Sprint 9
+  activeWorkspace: WorkspaceInfo | null;
+  workspaces: WorkspaceInfo[];
 }
 
-export type TabId = 'chat' | 'github' | 'mcp' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings';
+export type TabId = 'chat' | 'github' | 'mcp' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
 
 export interface SelectedRepo {
   id: string;
@@ -50,6 +54,20 @@ export interface SessionInfo {
   status: 'active' | 'paused' | 'completed';
 }
 
+export interface WorkspaceInfo {
+  id: string;
+  name: string;
+  local_path: string;
+  remote_url?: string;
+  github_owner?: string;
+  github_repo?: string;
+  default_branch?: string;
+  cloned_at?: string;
+  last_opened_at?: string;
+  mcp_server_id?: string;
+  status: string;
+}
+
 // ─── Initial State ───
 export const INITIAL_STATE: AppState = {
   apiKeyConfigured: false,
@@ -59,8 +77,10 @@ export const INITIAL_STATE: AppState = {
   selectedRepo: null,
   repositories: [],
   currentSession: null,
-  activeTab: 'settings', // Start on settings if no API key
-  sidebarCollapsed: false
+  activeTab: 'settings',
+  sidebarCollapsed: false,
+  activeWorkspace: null,
+  workspaces: [],
 };
 
 // ─── State Hook ───
@@ -76,7 +96,6 @@ export function useAppState() {
       try {
         const settings = await api.getSettings();
 
-        // Check if any API key is configured
         const hasKey = settings.apiKeys && Object.keys(settings.apiKeys).some(
           (k: string) => settings.apiKeys[k] && settings.apiKeys[k] !== ''
         );
@@ -84,12 +103,22 @@ export function useAppState() {
           (k: string) => settings.apiKeys[k] && settings.apiKeys[k] !== ''
         ) || '' : '';
 
+        // Load workspaces
+        let workspaces: WorkspaceInfo[] = [];
+        let activeWorkspace: WorkspaceInfo | null = null;
+        try {
+          workspaces = await api.listWorkspaces();
+          activeWorkspace = await api.getActiveWorkspace();
+        } catch { /* ignore if not available */ }
+
         setState(prev => ({
           ...prev,
           apiKeyConfigured: hasKey,
           apiKeyProvider: provider,
           githubConnected: settings.github?.connected || false,
-          activeTab: hasKey ? (settings.github?.connected ? 'github' : 'github') : 'settings'
+          activeTab: hasKey ? 'workspace' : 'settings',
+          workspaces,
+          activeWorkspace,
         }));
 
         // If GitHub is connected, try loading repos
@@ -117,7 +146,7 @@ export function useAppState() {
       ...prev,
       apiKeyConfigured: true,
       apiKeyProvider: provider,
-      activeTab: prev.githubConnected ? 'github' : 'github'
+      activeTab: 'workspace'
     }));
   }, []);
 
@@ -158,8 +187,10 @@ export function useAppState() {
 
   const setTab = useCallback((tab: TabId) => {
     setState(prev => {
-      if (!prev.selectedRepo && !['github', 'mcp', 'settings'].includes(tab)) {
-        return { ...prev, activeTab: 'github' };
+      // workspace, mcp, settings, github, terminal are always accessible
+      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'settings', 'github', 'terminal'];
+      if (!prev.activeWorkspace && !prev.selectedRepo && !alwaysAccessible.includes(tab)) {
+        return { ...prev, activeTab: 'workspace' };
       }
       return { ...prev, activeTab: tab };
     });
@@ -173,6 +204,45 @@ export function useAppState() {
     setState(prev => ({ ...prev, sidebarCollapsed: !prev.sidebarCollapsed }));
   }, []);
 
+  const setActiveWorkspace = useCallback((ws: WorkspaceInfo | null) => {
+    setState(prev => {
+      // Create a session for the workspace
+      let currentSession = prev.currentSession;
+      let selectedRepo = prev.selectedRepo;
+
+      if (ws) {
+        currentSession = {
+          id: `session-ws-${ws.id}-${Date.now()}`,
+          repositoryId: ws.id,
+          repositoryFullName: ws.github_owner && ws.github_repo ? `${ws.github_owner}/${ws.github_repo}` : ws.name,
+          workingBranch: ws.default_branch || 'main',
+          status: 'active'
+        };
+        selectedRepo = {
+          id: ws.id,
+          fullName: ws.github_owner && ws.github_repo ? `${ws.github_owner}/${ws.github_repo}` : ws.name,
+          defaultBranch: ws.default_branch || 'main',
+          isPrivate: false,
+        };
+      }
+
+      return {
+        ...prev,
+        activeWorkspace: ws,
+        currentSession,
+        selectedRepo,
+      };
+    });
+  }, []);
+
+  const refreshWorkspaces = useCallback(async () => {
+    if (!api) return;
+    try {
+      const workspaces = await api.listWorkspaces();
+      setState(prev => ({ ...prev, workspaces }));
+    } catch { /* ignore */ }
+  }, []);
+
   return {
     state,
     setApiKey,
@@ -181,6 +251,8 @@ export function useAppState() {
     selectRepo,
     setTab,
     setRepos,
-    toggleSidebar
+    toggleSidebar,
+    setActiveWorkspace,
+    refreshWorkspaces
   };
 }

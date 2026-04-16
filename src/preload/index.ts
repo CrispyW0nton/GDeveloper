@@ -74,6 +74,44 @@ const electronAPI = {
   parseRoadmap: (content: string) => ipcRenderer.invoke('roadmap:parse', content),
   listRoadmaps: () => ipcRenderer.invoke('roadmap:list'),
 
+  // ─── Workspace Management (Sprint 9) ──────────────
+  listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
+  getWorkspace: (id: string) => ipcRenderer.invoke('workspace:get', id),
+  addWorkspace: (ws: any) => ipcRenderer.invoke('workspace:add', ws),
+  removeWorkspace: (id: string) => ipcRenderer.invoke('workspace:remove', id),
+  setActiveWorkspace: (id: string) => ipcRenderer.invoke('workspace:set-active', id),
+  getActiveWorkspace: () => ipcRenderer.invoke('workspace:get-active'),
+  updateWorkspacePath: (id: string, newPath: string) => ipcRenderer.invoke('workspace:update-path', id, newPath),
+  cloneWorkspace: (url: string, localPath: string, name: string) => ipcRenderer.invoke('workspace:clone', url, localPath, name),
+  openLocalWorkspace: (localPath: string, name: string) => ipcRenderer.invoke('workspace:open-local', localPath, name),
+
+  // ─── Git Operations (Sprint 9) ────────────────────
+  gitStatus: () => ipcRenderer.invoke('git:status'),
+  gitPull: () => ipcRenderer.invoke('git:pull'),
+  gitPush: () => ipcRenderer.invoke('git:push'),
+  gitFetch: () => ipcRenderer.invoke('git:fetch'),
+  gitBranches: () => ipcRenderer.invoke('git:branches'),
+  gitCheckout: (branch: string) => ipcRenderer.invoke('git:checkout', branch),
+  gitCreateBranch: (name: string) => ipcRenderer.invoke('git:create-branch', name),
+  gitStash: (message?: string) => ipcRenderer.invoke('git:stash', message),
+  gitStashPop: () => ipcRenderer.invoke('git:stash-pop'),
+  gitStageAll: () => ipcRenderer.invoke('git:stage-all'),
+  gitUnstageAll: () => ipcRenderer.invoke('git:unstage-all'),
+  gitStageFile: (path: string) => ipcRenderer.invoke('git:stage-file', path),
+  gitUnstageFile: (path: string) => ipcRenderer.invoke('git:unstage-file', path),
+  gitCommit: (message: string) => ipcRenderer.invoke('git:commit', message),
+  gitCommitPush: (message: string) => ipcRenderer.invoke('git:commit-push', message),
+  gitLog: (count?: number) => ipcRenderer.invoke('git:log', count),
+  gitDiff: (staged?: boolean) => ipcRenderer.invoke('git:diff', staged),
+  gitDiscard: () => ipcRenderer.invoke('git:discard'),
+  gitResetSoft: () => ipcRenderer.invoke('git:reset-soft'),
+  gitResetHard: (confirm: string) => ipcRenderer.invoke('git:reset-hard', confirm),
+  gitResetToRemote: (confirm: string) => ipcRenderer.invoke('git:reset-to-remote', confirm),
+
+  // ─── Terminal (Sprint 9) ──────────────────────────
+  terminalExecute: (command: string, cwd?: string) => ipcRenderer.invoke('terminal:execute', command, cwd),
+  detectShells: () => ipcRenderer.invoke('terminal:detect-shells'),
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,
