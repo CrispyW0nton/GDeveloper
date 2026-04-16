@@ -171,6 +171,22 @@ const electronAPI = {
   forgeRemoveAppRecord: (id: string) => ipcRenderer.invoke('forge:app-record-remove', id),
   forgeToggleAppFavorite: (id: string) => ipcRenderer.invoke('forge:app-toggle-favorite', id),
 
+  // ─── Sprint 16: Model Selection ───────────────────
+  listModels: () => ipcRenderer.invoke('model:list'),
+  getSelectedModel: () => ipcRenderer.invoke('model:get-selected'),
+  setSelectedModel: (model: string) => ipcRenderer.invoke('model:set-selected', model),
+  discoverModels: () => ipcRenderer.invoke('model:discover'),
+  checkModelToolSupport: (model?: string) => ipcRenderer.invoke('model:check-tools', model),
+
+  // ─── Sprint 16: Sandbox Monitor ───────────────────
+  getSandboxLog: () => ipcRenderer.invoke('sandbox:get-log'),
+  clearSandboxLog: () => ipcRenderer.invoke('sandbox:clear-log'),
+  onSandboxEvent: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('sandbox:event', handler);
+    return () => ipcRenderer.removeListener('sandbox:event', handler);
+  },
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,

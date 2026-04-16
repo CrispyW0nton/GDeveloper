@@ -525,7 +525,7 @@ function ResearchTab() {
 
   useEffect(() => { loadAnalysisRepos(); }, []);
 
-  const handleResearch = async () => {
+  const handleForgeResearch = async () => {
     if (!appName.trim() || !api) return;
     setResearching(true); setError(''); setResearchResult('');
     try {
@@ -556,18 +556,34 @@ function ResearchTab() {
 
   return (
     <div className="space-y-4 max-w-3xl">
-      {/* AI Research */}
+      {/* Deep Research notice — relocated to Chat */}
+      <div className="glass-panel p-4 border-matrix-info/20">
+        <h3 className="text-xs font-bold text-matrix-info mb-2 flex items-center gap-2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          Deep Research moved to Chat
+        </h3>
+        <p className="text-[10px] text-matrix-text-muted/50 leading-relaxed">
+          General-purpose deep research is now available directly in Chat via slash commands:
+        </p>
+        <div className="mt-2 space-y-1 text-[10px] text-matrix-text-dim">
+          <div><code className="text-matrix-green/70">/research &lt;question&gt;</code> — multi-step deep research with streaming results</div>
+          <div><code className="text-matrix-green/70">/research-continue &lt;follow-up&gt;</code> — refine a previous research query</div>
+          <div><code className="text-matrix-green/70">/compare-repos &lt;path1&gt; &lt;path2&gt;</code> — side-by-side repository comparison</div>
+        </div>
+      </div>
+
+      {/* Forge-specific: App Integration Research */}
       <div className="glass-panel p-4">
-        <h3 className="text-xs font-bold text-matrix-green mb-2">AI-Assisted Research</h3>
+        <h3 className="text-xs font-bold text-matrix-green mb-2">Adapter Research</h3>
         <p className="text-[10px] text-matrix-text-muted/40 mb-2">
-          Research an application to find docs, SDKs, existing wrappers, and integration strategies.
+          Research an application's integration surface — docs, SDKs, existing wrappers, and automation strategies for adapter generation.
         </p>
         <div className="flex gap-2 mb-2">
           <input value={appName} onChange={e => setAppName(e.target.value)}
             className="matrix-input flex-1" placeholder="Application name (e.g., ffmpeg, docker, git)"
-            onKeyDown={e => e.key === 'Enter' && handleResearch()} />
-          <button onClick={handleResearch} disabled={researching || !appName.trim()} className="matrix-btn matrix-btn-primary text-xs">
-            {researching ? 'Researching...' : 'Research'}
+            onKeyDown={e => e.key === 'Enter' && handleForgeResearch()} />
+          <button onClick={handleForgeResearch} disabled={researching || !appName.trim()} className="matrix-btn matrix-btn-primary text-xs">
+            {researching ? 'Researching...' : 'Research for Adapter'}
           </button>
         </div>
       </div>
@@ -576,7 +592,7 @@ function ResearchTab() {
 
       {researchResult && (
         <div className="glass-panel p-4 animate-fadeIn">
-          <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">Research Results</h4>
+          <h4 className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider mb-2">Adapter Research Results</h4>
           <div className="prose-matrix text-[10px] text-matrix-text-dim whitespace-pre-wrap max-h-96 overflow-y-auto">
             {researchResult}
           </div>

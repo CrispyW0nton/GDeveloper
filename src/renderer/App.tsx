@@ -11,9 +11,11 @@ import DiffViewer from './components/diff/DiffViewer';
 import ActivityLog from './components/activity/ActivityLog';
 import SettingsPanel from './components/settings/SettingsPanel';
 import MatrixRainCanvas from './components/common/MatrixRainCanvas';
+import BackdropRenderer from './components/background/BackdropRenderer';
 import WorkspacePanel from './components/workspace/WorkspacePanel';
 import TerminalPanel from './components/terminal/TerminalPanel';
 import BottomPanel from './components/common/BottomPanel';
+import SandboxMonitor from './components/sandbox/SandboxMonitor';
 
 export default function App() {
   return (
@@ -29,8 +31,13 @@ function AppInner() {
     setTab, setRepos, toggleSidebar, setActiveWorkspace, refreshWorkspaces,
     clearStartupError, setExecutionMode, toggleTerminalPanel,
     setTerminalPanelHeight, setTerminalPanelOpen,
+    setSelectedModel, toggleSandboxMonitor, setSandboxMonitorOpen,
   } = useAppState();
-  const { showMatrixRain, showCrtOverlay } = useTheme();
+  const {
+    showMatrixRain, showCrtOverlay,
+    backdropType, backdropOpacity, backdropIntensity, matrixRainEnabled, crtOverlayEnabled,
+    activePreset,
+  } = useTheme();
 
   // Global Ctrl+` handler for toggling terminal
   useEffect(() => {
@@ -62,7 +69,7 @@ function AppInner() {
   const renderMainContent = () => {
     // If no API key, show settings first
     if (!state.apiKeyConfigured && state.activeTab !== 'settings') {
-      return <SettingsPanel onApiKeySet={setApiKey} />;
+      return <SettingsPanel onApiKeySet={setApiKey} selectedModel={state.selectedModel} availableModels={state.availableModels} onModelChange={setSelectedModel} />;
     }
 
     switch (state.activeTab) {
@@ -90,6 +97,9 @@ function AppInner() {
               providerKey={state.apiKeyProvider}
               executionMode={state.executionMode}
               onModeChange={setExecutionMode}
+              selectedModel={state.selectedModel}
+              availableModels={state.availableModels}
+              onModelChange={setSelectedModel}
             />
           );
         }
@@ -167,7 +177,14 @@ function AppInner() {
         );
 
       case 'settings':
-        return <SettingsPanel onApiKeySet={setApiKey} />;
+        return (
+          <SettingsPanel
+            onApiKeySet={setApiKey}
+            selectedModel={state.selectedModel}
+            availableModels={state.availableModels}
+            onModelChange={setSelectedModel}
+          />
+        );
 
       default:
         return null;
@@ -176,11 +193,22 @@ function AppInner() {
 
   return (
     <>
-      {/* Matrix Rain Canvas Background — only rendered for Matrix theme */}
-      {showMatrixRain && <MatrixRainCanvas opacity={0.38} fontSize={14} color="#00ff41" speed={33} />}
+      {/* Backdrop Renderer — Sprint 16 Addendum: supports matrix-rain, puddles, gradient, noise, none */}
+      <BackdropRenderer
+        type={backdropType}
+        opacity={backdropOpacity}
+        intensity={backdropIntensity}
+        enabled={backdropType !== 'none'}
+        accentColor={activePreset?.tokens?.accent || '#00ff41'}
+      />
 
-      {/* CRT Scanline Overlay — only rendered for Matrix theme */}
-      {showCrtOverlay && <div className="crt-overlay" />}
+      {/* Legacy Matrix Rain — shown if backdrop is not matrix-rain but matrixRainEnabled is true */}
+      {matrixRainEnabled && backdropType !== 'matrix-rain' && (
+        <MatrixRainCanvas opacity={0.2} fontSize={14} color={activePreset?.tokens?.accent || '#00ff41'} speed={33} />
+      )}
+
+      {/* CRT Scanline Overlay */}
+      {crtOverlayEnabled && <div className="crt-overlay" />}
 
       {/* Startup Error Banner */}
       {state.startupError && (
@@ -204,6 +232,9 @@ function AppInner() {
           onToggleCollapse={toggleSidebar}
           activeWorkspace={state.activeWorkspace}
           terminalOpen={state.terminalPanelOpen}
+          sandboxMonitorOpen={state.sandboxMonitorOpen}
+          onToggleSandboxMonitor={toggleSandboxMonitor}
+          executionMode={state.executionMode}
         />
 
         {/* Main content area + bottom terminal panel */}
@@ -219,10 +250,19 @@ function AppInner() {
             onHeightChange={setTerminalPanelHeight}
             onClose={() => setTerminalPanelOpen(false)}
           >
-            <TerminalPanel
-              activeWorkspace={state.activeWorkspace}
-              onClose={() => setTerminalPanelOpen(false)}
-            />
+            <div className="flex h-full">
+              <div className={`${state.sandboxMonitorOpen ? 'w-1/2' : 'w-full'} h-full overflow-hidden`}>
+                <TerminalPanel
+                  activeWorkspace={state.activeWorkspace}
+                  onClose={() => setTerminalPanelOpen(false)}
+                />
+              </div>
+              {state.sandboxMonitorOpen && (
+                <div className="w-1/2 h-full border-l border-matrix-border/20 overflow-hidden">
+                  <SandboxMonitor onClose={() => setSandboxMonitorOpen(false)} />
+                </div>
+              )}
+            </div>
           </BottomPanel>
         </div>
       </div>

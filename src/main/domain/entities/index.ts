@@ -236,6 +236,8 @@ export interface AppSettings {
     autoApproveReadOnly: boolean;
     autoApproveWrite: boolean;
   };
+  // Sprint 16: Model selection persistence
+  selectedModel?: string;
 }
 
 export interface GitHubInstallation {

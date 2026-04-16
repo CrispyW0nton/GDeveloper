@@ -39,6 +39,10 @@ export interface AppState {
   terminalPanelHeight: number;
   // Sprint 15 theme
   theme: ThemeId;
+  // Sprint 16: Model selection + Sandbox monitor
+  selectedModel: string;
+  availableModels: string[];
+  sandboxMonitorOpen: boolean;
 }
 
 export interface SelectedRepo {
@@ -152,6 +156,10 @@ export const INITIAL_STATE: AppState = {
   terminalPanelHeight: 250,
   // Sprint 15
   theme: 'matrix' as ThemeId,
+  // Sprint 16
+  selectedModel: 'claude-sonnet-4-6',
+  availableModels: [],
+  sandboxMonitorOpen: false,
 };
 
 // ─── State Hook ───
@@ -373,6 +381,25 @@ export function useAppState() {
     setState(prev => ({ ...prev, terminalPanelOpen: open }));
   }, []);
 
+  // Sprint 16: Model selection
+  const setSelectedModel = useCallback((model: string) => {
+    setState(prev => ({ ...prev, selectedModel: model }));
+    if (api?.setSelectedModel) api.setSelectedModel(model);
+  }, []);
+
+  const setAvailableModels = useCallback((models: string[]) => {
+    setState(prev => ({ ...prev, availableModels: models }));
+  }, []);
+
+  // Sprint 16: Sandbox monitor
+  const toggleSandboxMonitor = useCallback(() => {
+    setState(prev => ({ ...prev, sandboxMonitorOpen: !prev.sandboxMonitorOpen }));
+  }, []);
+
+  const setSandboxMonitorOpen = useCallback((open: boolean) => {
+    setState(prev => ({ ...prev, sandboxMonitorOpen: open }));
+  }, []);
+
   return {
     state,
     setApiKey,
@@ -390,5 +417,10 @@ export function useAppState() {
     toggleTerminalPanel,
     setTerminalPanelHeight,
     setTerminalPanelOpen,
+    // Sprint 16
+    setSelectedModel,
+    setAvailableModels,
+    toggleSandboxMonitor,
+    setSandboxMonitorOpen,
   };
 }

@@ -1,8 +1,11 @@
 /**
- * ChatWorkspace — Sprint 12
+ * ChatWorkspace — Sprint 12 + Sprint 15.2
  * Full chat UI with streaming, tool-call display, history persistence.
  * Sprint 12 additions: slash command autocomplete, mode indicator,
  * suggestion cards on empty chat, follow-up action buttons.
+ * Sprint 15.2: fix empty tool cards (pass full input/result),
+ * prevent raw Anthropic tool_use JSON from rendering in chat,
+ * improved tool result matching by toolCallId.
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -10,6 +13,8 @@ import { SessionInfo, SelectedRepo, ExecutionMode } from '../../store';
 import SlashCommandDropdown, { SlashCommandInfo } from './SlashCommandDropdown';
 import SuggestionCards from './SuggestionCards';
 import FollowupButtons from './FollowupButtons';
+import ToolCallCard from './ToolCallCard';
+import TaskPlanCard from './TaskPlanCard';
 
 const api = (window as any).electronAPI;
 
@@ -19,12 +24,17 @@ interface ChatWorkspaceProps {
   providerKey: string;
   executionMode: ExecutionMode;
   onModeChange: (mode: ExecutionMode) => void;
+  selectedModel?: string;
+  availableModels?: string[];
+  onModelChange?: (model: string) => void;
 }
 
 interface ToolCallDisplay {
   name: string;
   description: string;
   status: 'success' | 'error' | 'running';
+  input?: any;
+  result?: any;
 }
 
 interface Message {
@@ -36,7 +46,7 @@ interface Message {
   streaming?: boolean;
 }
 
-export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange }: ChatWorkspaceProps) {
+export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange }: ChatWorkspaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -69,11 +79,13 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           const dbMessages: Message[] = history.map((m: any) => ({
             id: m.id,
             role: m.role,
-            content: m.content,
+            content: sanitizeContent(m.content),
             toolCalls: m.tool_calls?.map((tc: any) => ({
               name: tc.name,
               description: `Called ${tc.name}`,
               status: 'success' as const,
+              input: tc.input || undefined,
+              result: tc.result || undefined,
             })),
             timestamp: m.timestamp,
           }));
@@ -94,24 +106,90 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       if (data.sessionId !== session.id) return;
 
       if (data.type === 'text') {
-        setStreamingContent(data.fullContent || '');
+        // Sprint 15.2: filter out raw tool_use JSON that may leak into text stream
+        const content = data.fullContent || '';
+        if (content.includes('"type":"tool_use"') && content.startsWith('[{')) {
+          console.debug('[Chat] Suppressed raw tool_use JSON from text stream');
+          return;
+        }
+        setStreamingContent(content);
       } else if (data.type === 'tool_call' && data.toolCall) {
         setStreamingToolCalls(prev => [
           ...prev,
-          { name: data.toolCall.name, description: `Calling ${data.toolCall.name}...`, status: 'running' as const },
+          {
+            name: data.toolCall.name,
+            description: `Calling ${data.toolCall.name}...`,
+            status: 'running' as const,
+            input: data.toolCall.input,
+            toolCallId: data.toolCall.id,
+          },
         ]);
       } else if (data.type === 'tool_result' || data.type === 'tool_error') {
+        // Sprint 15.2: match by toolCallId first, then fallback to last matching name
+        setStreamingToolCalls(prev => {
+          // Try to match by toolCallId (exact match)
+          const idxById = data.toolCallId
+            ? prev.findIndex(tc => (tc as any).toolCallId === data.toolCallId)
+            : -1;
+          // Fallback: find the last tool call with matching name still in 'running' status
+          const idxByName = idxById === -1
+            ? prev.reduce((found, tc, i) => tc.name === data.toolName && tc.status === 'running' ? i : found, -1)
+            : idxById;
+          const idx = idxByName >= 0 ? idxByName : prev.findIndex(tc => tc.name === data.toolName);
+
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            status: data.type === 'tool_error' ? 'error' as const : 'success' as const,
+            description: `${data.toolName}: ${(data.result || '').substring(0, 100)}`,
+            result: data.result,
+          };
+          return updated;
+        });
+      } else if (data.type === 'task_plan_update' && data.plan) {
+        // Live task plan update
         setStreamingToolCalls(prev =>
           prev.map(tc =>
-            tc.name === data.toolName
-              ? { ...tc, status: data.type === 'tool_error' ? 'error' as const : 'success' as const, description: `${data.toolName}: ${(data.result || '').substring(0, 100)}` }
+            tc.name === 'task_plan'
+              ? { ...tc, result: JSON.stringify({ plan: data.plan }) }
               : tc
           )
         );
+      } else if (data.type === 'research-complete' && data.report) {
+        // Deep Research result streamed from main process
+        const report = data.report;
+        const content = [
+          `## Research Report: ${report.topic || 'Analysis'}`,
+          '',
+          report.plan?.length ? `**Research Plan:**\n${report.plan.map((s: string) => `- ${s}`).join('\n')}\n` : '',
+          report.findings || '',
+          report.recommendation ? `\n**Recommendation:** ${report.recommendation}` : '',
+        ].filter(Boolean).join('\n');
+
+        const researchMsg: Message = {
+          id: `msg-research-${Date.now()}`,
+          role: 'assistant',
+          content,
+          timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, researchMsg]);
+        setStreamingContent('');
+        setIsLoading(false);
       } else if (data.type === 'done') {
         setStreamingContent('');
       } else if (data.type === 'error') {
         setStreamingContent('');
+        // Show error in chat if it was a research error
+        if (data.content) {
+          const errMsg: Message = {
+            id: `msg-err-${Date.now()}`,
+            role: 'system',
+            content: data.content,
+            timestamp: new Date().toISOString(),
+          };
+          setMessages(prev => [...prev, errMsg]);
+        }
       }
     });
 
@@ -191,6 +269,13 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, responseMsg]);
+
+      // If research was started, show loading indicator for streamed results
+      if (result.data?.action === 'research-started' || result.data?.action === 'comparison-started') {
+        setIsLoading(true);
+        setStreamingContent('');
+        setStreamingToolCalls([{ name: 'Deep Research', description: 'Analyzing...', status: 'running' }]);
+      }
     } catch (err) {
       const errMsg: Message = {
         id: `msg-${Date.now() + 1}`,
@@ -235,11 +320,13 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         const assistantMsg: Message = {
           id: result.id || `msg-${Date.now() + 1}`,
           role: 'assistant',
-          content: result.content,
+          content: sanitizeContent(result.content),
           toolCalls: result.toolCalls?.map((tc: any) => ({
             name: tc.name,
             description: `Called ${tc.name}`,
             status: 'success' as const,
+            input: tc.input || undefined,
+            result: tc.result || undefined,
           })),
           timestamp: new Date().toISOString(),
         };
@@ -313,6 +400,19 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             <span>{executionMode === 'plan' ? '\uD83D\uDD0D' : '\uD83D\uDD28'}</span>
             <span>{executionMode === 'plan' ? 'PLAN MODE' : 'BUILD MODE'}</span>
           </div>
+          {/* Model picker */}
+          {availableModels && availableModels.length > 0 && onModelChange && (
+            <select
+              value={selectedModel || ''}
+              onChange={e => onModelChange(e.target.value)}
+              className="text-[9px] bg-transparent border border-matrix-border rounded px-1.5 py-0.5 text-matrix-text-dim outline-none focus:border-matrix-green/50 max-w-[140px]"
+              title="Select AI model"
+            >
+              {availableModels.map(m => (
+                <option key={m} value={m} className="bg-matrix-bg text-matrix-text-dim">{m}</option>
+              ))}
+            </select>
+          )}
           <span className={`badge ${isLoading ? 'badge-executing' : 'badge-connected'}`}>
             {isLoading ? 'Streaming...' : 'Ready'}
           </span>
@@ -355,22 +455,17 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                   </div>
 
                   {msg.toolCalls && msg.toolCalls.length > 0 && (
-                    <div className="mt-3 pt-2 border-t border-matrix-border/30">
+                    <div className="mt-3 pt-2 border-t border-matrix-border/30 space-y-1.5">
                       <p className="text-[9px] text-matrix-text-muted/40 mb-1.5 uppercase tracking-wider">Tool Calls</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {msg.toolCalls.map((tc, i) => (
-                          <div key={i} className={`text-[10px] px-2 py-0.5 rounded border ${
-                            tc.status === 'success'
-                              ? 'border-matrix-green/20 text-matrix-green/70 bg-matrix-green/5'
-                              : tc.status === 'error'
-                                ? 'border-matrix-danger/20 text-matrix-danger/70 bg-matrix-danger/5'
-                                : 'border-matrix-warning/20 text-matrix-warning/70 bg-matrix-warning/5'
-                          }`}>
-                            {tc.status === 'running' && <span className="inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin mr-1" />}
-                            {tc.name}
-                          </div>
-                        ))}
-                      </div>
+                      {msg.toolCalls.map((tc, i) => (
+                        <ToolCallCard
+                          key={i}
+                          name={tc.name}
+                          input={tc.input}
+                          result={tc.result}
+                          status={tc.status}
+                        />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -399,18 +494,15 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
               </div>
 
               {streamingToolCalls.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-1.5">
+                <div className="mb-2 space-y-1.5">
                   {streamingToolCalls.map((tc, i) => (
-                    <div key={i} className={`text-[10px] px-2 py-0.5 rounded border ${
-                      tc.status === 'success'
-                        ? 'border-matrix-green/20 text-matrix-green/70 bg-matrix-green/5'
-                        : tc.status === 'error'
-                          ? 'border-matrix-danger/20 text-matrix-danger/70 bg-matrix-danger/5'
-                          : 'border-matrix-warning/20 text-matrix-warning/70 bg-matrix-warning/5 animate-pulse'
-                    }`}>
-                      {tc.status === 'running' && <span className="inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin mr-1" />}
-                      {tc.name}
-                    </div>
+                    <ToolCallCard
+                      key={i}
+                      name={tc.name}
+                      input={tc.input}
+                      result={tc.result}
+                      status={tc.status}
+                    />
                   ))}
                 </div>
               )}
@@ -483,6 +575,23 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       </div>
     </div>
   );
+}
+
+/**
+ * Sprint 15.2: Strip accidental raw tool_use JSON blocks from assistant content.
+ * The Anthropic API may return [{"type":"tool_use",...}] as stringified assistant content.
+ */
+function sanitizeContent(content: string): string {
+  if (!content) return '';
+  // Strip raw JSON arrays of tool_use blocks
+  const stripped = content.replace(/\[\s*\{\s*"type"\s*:\s*"tool_use"[\s\S]*?\}\s*\]/g, '').trim();
+  // Strip individual tool_use JSON objects
+  const cleaned = stripped.replace(/\{\s*"type"\s*:\s*"tool_use"[\s\S]*?"input"\s*:\s*\{[\s\S]*?\}\s*\}/g, '').trim();
+  if (cleaned.length === 0 && content.length > 0) {
+    console.debug('[Chat] Entire message was tool_use JSON — suppressed from display');
+    return '';
+  }
+  return cleaned;
 }
 
 function renderContent(content: string): React.ReactNode {

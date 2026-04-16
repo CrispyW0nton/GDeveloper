@@ -1,7 +1,8 @@
 /**
- * Slash Command Registry — Sprint 12
+ * Slash Command Registry — Sprint 12 + Sprint 15.2
  * Defines command interfaces, registers all commands, and executes them.
  * Commands are invoked from the renderer via IPC and run in the main process.
+ * Sprint 15.2: /verify-last truthfulness guard, workspace cwd alignment.
  */
 
 import simpleGit, { SimpleGit } from 'simple-git';
@@ -9,6 +10,7 @@ import { getActiveWorkspace, LOCAL_TOOL_DEFINITIONS } from '../tools';
 import { getDatabase } from '../db';
 import { getMCPManager } from '../mcp';
 import { providerRegistry, ClaudeProvider } from '../providers';
+import { executeResearch, compareRepos, downloadExternalRepo } from '../research';
 
 // ─── Interfaces ───
 
@@ -35,13 +37,38 @@ export interface SlashCommand {
 }
 
 // ─── Write tools that are disabled in Plan mode ───
+// Sprint 16: added multi_edit and bash_command to the blocked set
 export const WRITE_TOOL_NAMES = [
   'write_file',
   'patch_file',
   'run_command',
   'git_commit',
   'git_create_branch',
+  // Sprint 16 mutating tools
+  'multi_edit',
+  'bash_command',
 ];
+
+// Tools that are always allowed in Plan mode (read-only/planning)
+export const PLAN_MODE_ALLOWED = [
+  'read_file',
+  'list_files',
+  'search_files',
+  'git_status',
+  'git_diff',
+  'git_log',
+  'parallel_search',
+  'parallel_read',
+  'summarize_large_document',
+  'task_plan',
+];
+
+// ─── Main window reference (for streaming results to renderer) ───
+let _mainWindow: any = null;
+
+export function setCommandsMainWindow(win: any): void {
+  _mainWindow = win;
+}
 
 // ─── Execution Mode State ───
 let currentMode: 'plan' | 'build' = 'build';
@@ -92,6 +119,11 @@ register({
   category: 'git',
   async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
     const ws = requireWorkspace(ctx);
+    // Sprint 15.2: warn if workspace path differs from the git cwd
+    const realWs = getActiveWorkspace();
+    if (realWs && realWs !== ws) {
+      return { success: false, message: `**Warning:** Workspace path mismatch. Active: \`${realWs}\`, Context: \`${ws}\`. Please re-activate the workspace.` };
+    }
     const git: SimpleGit = simpleGit(ws);
     const db = getDatabase();
 
@@ -161,6 +193,10 @@ register({
   category: 'git',
   async execute(_args: string, ctx: WorkspaceContext): Promise<CommandResult> {
     const ws = requireWorkspace(ctx);
+    const realWs = getActiveWorkspace();
+    if (realWs && realWs !== ws) {
+      return { success: false, message: `**Warning:** Workspace path mismatch. Active: \`${realWs}\`, Context: \`${ws}\`. Please re-activate the workspace.` };
+    }
     const git: SimpleGit = simpleGit(ws);
     const db = getDatabase();
 
@@ -381,37 +417,140 @@ register({
 
 register({
   name: 'pr',
-  description: 'Create a pull request (coming in Sprint 15).',
+  description: 'Create a pull request (coming in Sprint 16).',
   category: 'workflow',
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     return {
       success: true,
-      message: '**PR workflow** is coming in Sprint 15. This will create branch + commit + push + draft PR from chat.',
+      message: '**PR workflow** is coming in Sprint 16. This will create branch + commit + push + draft PR from chat.',
     };
   },
 });
 
 register({
   name: 'handoff',
-  description: 'Generate developer handoff package (coming in Sprint 15).',
+  description: 'Generate developer handoff package (coming in Sprint 16).',
   category: 'workflow',
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     return {
       success: true,
-      message: '**Handoff generation** is coming in Sprint 15. This will generate a zip of plans, tasks, changes, and conversation summary.',
+      message: '**Handoff generation** is coming in Sprint 16. This will generate a zip of plans, tasks, changes, and conversation summary.',
     };
   },
 });
 
 register({
   name: 'plan-generate',
-  description: 'Generate a development roadmap (coming in Sprint 15).',
+  description: 'Generate a development roadmap (coming in Sprint 16).',
   category: 'workflow',
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     return {
       success: true,
-      message: '**Roadmap generation** is coming in Sprint 15. This will analyze the repo and generate plan.md + tasks.md.',
+      message: '**Roadmap generation** is coming in Sprint 16. This will analyze the repo and generate plan.md + tasks.md.',
     };
+  },
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  TRUTHFULNESS VERIFICATION (Sprint 15.2)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+register({
+  name: 'verify-last',
+  description: 'Verify the last agent session: compare git status with reported actions, run truthfulness checks.',
+  category: 'workflow',
+  async execute(_args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const git: SimpleGit = simpleGit(ws);
+    const db = getDatabase();
+
+    try {
+      // 1. Get current git status
+      const status = await git.status();
+      const modified = status.modified;
+      const staged = status.staged;
+      const untracked = status.not_added;
+      const deleted = status.deleted;
+
+      // 2. Get recent activity from DB (last 50 events)
+      const activity = db.getActivity(ctx.sessionId).slice(0, 50);
+      const toolCalls = activity.filter(a => a.action === 'tool_call' || a.action === 'tool_result' || a.action === 'tool_error');
+      const fileEdits = toolCalls.filter(a =>
+        a.title?.includes('write_file') || a.title?.includes('patch_file') ||
+        a.title?.includes('multi_edit') || a.title?.includes('run_command')
+      );
+
+      // 3. Get recent diffs from DB
+      const diffs = db.getDiffs(ctx.sessionId) || [];
+      const systemDiffs = db.getDiffs('system') || [];
+      const allDiffs = [...diffs, ...systemDiffs];
+      const diffFiles = [...new Set(allDiffs.map(d => d.file_path))];
+
+      // 4. Get last 3 commits
+      const log = await git.log({ maxCount: 3 });
+      const recentCommits = log.all.map(c => `${c.hash.substring(0, 7)} ${c.message}`);
+
+      // 5. Build verification report
+      const lines: string[] = [
+        '## Truthfulness Verification Report',
+        '',
+        '### Git Status (actual)',
+        `**Branch:** \`${status.current || '(detached)'}\``,
+        `**Working tree:** ${status.isClean() ? 'Clean' : 'Has changes'}`,
+        `- Modified: ${modified.length} ${modified.length > 0 ? '(\`' + modified.join('\`, \`') + '\`)' : ''}`,
+        `- Staged: ${staged.length} ${staged.length > 0 ? '(\`' + staged.join('\`, \`') + '\`)' : ''}`,
+        `- Untracked: ${untracked.length}`,
+        `- Deleted: ${deleted.length}`,
+        '',
+        '### Agent-Reported Activity',
+        `- Total tool calls in session: ${toolCalls.length}`,
+        `- File-editing tool calls: ${fileEdits.length}`,
+        `- DB-recorded diffs: ${allDiffs.length} across ${diffFiles.length} files`,
+        '',
+        '### Recent Commits',
+        recentCommits.length > 0 ? recentCommits.map(c => `- \`${c}\``).join('\n') : '- (none)',
+        '',
+        '### Cross-Check',
+      ];
+
+      // Cross-check: files in git modified vs files in DB diffs
+      const gitChangedFiles = new Set([...modified, ...staged, ...untracked]);
+      const dbChangedFiles = new Set(diffFiles);
+      const inGitNotDb = [...gitChangedFiles].filter(f => !dbChangedFiles.has(f));
+      const inDbNotGit = [...dbChangedFiles].filter(f => !gitChangedFiles.has(f));
+
+      if (inGitNotDb.length > 0) {
+        lines.push(`**Files changed in git but not tracked in DB diffs:** ${inGitNotDb.map(f => '\`' + f + '\`').join(', ')}`);
+        lines.push('This may indicate edits happened outside agent tool calls (e.g., shell commands, manual edits).');
+      }
+      if (inDbNotGit.length > 0) {
+        lines.push(`**Files in DB diffs but clean in git:** ${inDbNotGit.map(f => '\`' + f + '\`').join(', ')}`);
+        lines.push('These files may have been committed or reverted since the agent edited them.');
+      }
+      if (inGitNotDb.length === 0 && inDbNotGit.length === 0) {
+        lines.push('**All files match.** Git status and agent-reported diffs are consistent.');
+      }
+
+      // Truthfulness score
+      const totalChecks = Math.max(gitChangedFiles.size, 1);
+      const mismatches = inGitNotDb.length + inDbNotGit.length;
+      const truthScore = Math.round(((totalChecks - mismatches) / totalChecks) * 100);
+      lines.push('');
+      lines.push(`### Truthfulness Score: **${truthScore}%** (${totalChecks - mismatches}/${totalChecks} files consistent)`);
+
+      if (truthScore < 100) {
+        lines.push('');
+        lines.push('> **Recommendation:** Review mismatched files. Use `/diff` to inspect changes, then `/commit` to stage and commit verified work.');
+      }
+
+      return {
+        success: true,
+        message: lines.join('\n'),
+        data: { truthScore, gitChangedFiles: [...gitChangedFiles], dbChangedFiles: [...dbChangedFiles], mismatches },
+      };
+    } catch (err) {
+      return { success: false, message: `Verification failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
   },
 });
 
@@ -431,26 +570,115 @@ register({
       };
     }
 
+    const question = args.trim();
+
+    // Stream progress to chat via mainWindow
+    const sendProgress = (stage: string, detail: string) => {
+      if (_mainWindow && !_mainWindow.isDestroyed()) {
+        _mainWindow.webContents.send('chat:stream-chunk', {
+          sessionId: ctx.sessionId,
+          type: 'text',
+          content: `\n**[Research: ${stage}]** ${detail}\n`,
+          fullContent: `**[Research: ${stage}]** ${detail}`,
+        });
+      }
+    };
+
+    // Execute research asynchronously — don't await; let it stream into chat
+    (async () => {
+      try {
+        const wsPath = ctx.workspacePath || undefined;
+        const report = await executeResearch(question, ctx.sessionId, wsPath, (stage, detail) => {
+          sendProgress(stage, detail);
+        });
+
+        // Send final report as a done message
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'research-complete',
+            report: {
+              topic: report.topic,
+              findings: report.findings,
+              recommendation: report.recommendation,
+              plan: report.plan,
+            },
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'error',
+            content: `Research failed: ${errMsg}`,
+          });
+        }
+      }
+    })();
+
     return {
       success: true,
-      message: `**Research started:** "${args.trim()}"\n\nThe AI will analyze this question using deep research workflow.\nResults will appear in chat. This may take a moment...`,
-      data: { action: 'research', question: args.trim(), workspacePath: ctx.workspacePath, sessionId: ctx.sessionId },
+      message: `**Deep Research started:** "${question}"\n\nAnalyzing with multi-step research workflow...\nProgress and results will stream into this chat.`,
+      data: { action: 'research-started', question },
     };
   },
 });
 
 register({
   name: 'research-continue',
-  description: 'Continue or refine the last research query.',
+  description: 'Continue or refine the last research query. Usage: /research-continue <follow-up>',
   category: 'workflow',
-  async execute(args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
     if (!args.trim()) {
       return { success: true, message: '**Usage:** `/research-continue <follow-up question or refinement>`' };
     }
+
+    const question = args.trim();
+
+    // Same async pattern as /research
+    (async () => {
+      try {
+        const wsPath = ctx.workspacePath || undefined;
+        const report = await executeResearch(question, ctx.sessionId, wsPath, (stage, detail) => {
+          if (_mainWindow && !_mainWindow.isDestroyed()) {
+            _mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId: ctx.sessionId,
+              type: 'text',
+              content: `\n**[Research: ${stage}]** ${detail}\n`,
+              fullContent: `**[Research: ${stage}]** ${detail}`,
+            });
+          }
+        });
+
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'research-complete',
+            report: {
+              topic: report.topic,
+              findings: report.findings,
+              recommendation: report.recommendation,
+              plan: report.plan,
+            },
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'error',
+            content: `Research failed: ${errMsg}`,
+          });
+        }
+      }
+    })();
+
     return {
       success: true,
-      message: `**Continuing research:** "${args.trim()}"`,
-      data: { action: 'research-continue', question: args.trim() },
+      message: `**Continuing research:** "${question}"\n\nDeep analysis in progress...`,
+      data: { action: 'research-started', question },
     };
   },
 });
@@ -467,10 +695,53 @@ register({
         message: '**Usage:** `/compare-repos <path-or-url-1> <path-or-url-2> [focus area]`\n\nCompares two projects side by side with architecture analysis, feature comparison, and recommendations.',
       };
     }
+
+    const repoA = parts[0];
+    const repoB = parts[1];
+    const focus = parts.slice(2).join(' ') || undefined;
+
+    // Execute comparison asynchronously
+    (async () => {
+      try {
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'text',
+            content: '\n**[Comparison]** Gathering repository context...\n',
+            fullContent: '**[Comparison]** Gathering repository context...',
+          });
+        }
+
+        const result = await compareRepos(repoA, repoB, ctx.sessionId, focus);
+
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'research-complete',
+            report: {
+              topic: `Comparison: ${repoA} vs ${repoB}`,
+              findings: result,
+              recommendation: '',
+              plan: [],
+            },
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (_mainWindow && !_mainWindow.isDestroyed()) {
+          _mainWindow.webContents.send('chat:stream-chunk', {
+            sessionId: ctx.sessionId,
+            type: 'error',
+            content: `Comparison failed: ${errMsg}`,
+          });
+        }
+      }
+    })();
+
     return {
       success: true,
-      message: `**Comparing:** \`${parts[0]}\` vs \`${parts[1]}\`\nFocus: ${parts.slice(2).join(' ') || 'general'}`,
-      data: { action: 'compare-repos', repoA: parts[0], repoB: parts[1], focus: parts.slice(2).join(' ') },
+      message: `**Comparing:** \`${repoA}\` vs \`${repoB}\`\nFocus: ${focus || 'general'}\n\nAnalysis in progress — results will stream into this chat.`,
+      data: { action: 'comparison-started', repoA, repoB, focus },
     };
   },
 });
