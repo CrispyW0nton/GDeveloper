@@ -1,5 +1,6 @@
 import React from 'react';
 import { TabId, SelectedRepo, WorkspaceInfo } from '../../store';
+import { useTheme } from '../../themes/ThemeContext';
 
 interface SidebarProps {
   activeTab: TabId;
@@ -109,26 +110,30 @@ export default function Sidebar({
   activeTab, onTabChange, repoSelected, githubConnected, apiKeyConfigured,
   selectedRepo, collapsed, onToggleCollapse, activeWorkspace, terminalOpen
 }: SidebarProps) {
+  const { showMatrixRain } = useTheme();
+
   return (
     <aside className={`glass-panel-solid h-full flex flex-col transition-all duration-300 relative overflow-hidden ${collapsed ? 'w-14' : 'w-56'}`}>
-      {/* Matrix Rain Effect */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-30">
-        {RAIN_COLUMNS.map((col, i) => (
-          <div
-            key={i}
-            className="rain-column"
-            style={{
-              left: col.left,
-              '--rain-speed': col.speed,
-              '--rain-delay': col.delay,
-            } as React.CSSProperties}
-          >
-            {col.chars.split('').map((ch, j) => (
-              <span key={j} className="block">{ch}</span>
-            ))}
-          </div>
-        ))}
-      </div>
+      {/* Matrix Rain Effect — only for Matrix theme */}
+      {showMatrixRain && (
+        <div className="absolute inset-0 overflow-hidden pointer-events-none opacity-30">
+          {RAIN_COLUMNS.map((col, i) => (
+            <div
+              key={i}
+              className="rain-column"
+              style={{
+                left: col.left,
+                '--rain-speed': col.speed,
+                '--rain-delay': col.delay,
+              } as React.CSSProperties}
+            >
+              {col.chars.split('').map((ch, j) => (
+                <span key={j} className="block">{ch}</span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Logo */}
       <div className="relative z-10 p-3 border-b border-matrix-border">
@@ -204,7 +209,7 @@ export default function Sidebar({
       <div className="relative z-10 p-3 border-t border-matrix-border">
         {!collapsed && (
           <div className="text-[9px] text-matrix-text-muted/30 text-center tracking-widest">
-            SPRINT 14 // v4.0
+            SPRINT 15 // v5.0
           </div>
         )}
         <button

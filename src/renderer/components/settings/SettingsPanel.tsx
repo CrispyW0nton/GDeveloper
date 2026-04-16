@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { useTheme } from '../../themes/ThemeContext';
+import { THEME_META, THEME_IDS, type ThemeId } from '../../themes';
 
 const api = (window as any).electronAPI;
 
@@ -14,6 +16,9 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
   const [warning, setWarning] = useState('');
   const [saved, setSaved] = useState(false);
   const [existingKey, setExistingKey] = useState('');
+
+  // Theme
+  const { themeId, setTheme } = useTheme();
 
   // Preferences
   const [maxTurns, setMaxTurns] = useState(50);
@@ -170,6 +175,50 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
               Get an API key
             </a>
           </p>
+        </div>
+
+        {/* Theme Selector — Sprint 15 */}
+        <div className="glass-panel p-5 space-y-4">
+          <h2 className="text-sm font-bold text-matrix-green flex items-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20 10 10 0 0 1 0-20"/><path d="M12 2a7 7 0 0 1 0 14 7 7 0 0 1 0-14" fill="currentColor" opacity="0.1"/></svg>
+            Theme
+          </h2>
+          <p className="text-[10px] text-matrix-text-muted/50">
+            Choose a visual theme. Matrix is the default with rain effects. Other themes are calmer for extended sessions.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            {THEME_IDS.map(id => {
+              const meta = THEME_META[id];
+              const isActive = themeId === id;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setTheme(id)}
+                  className={`relative p-3 rounded-lg border text-left transition-all ${
+                    isActive
+                      ? 'border-matrix-accent bg-matrix-accent/10 ring-1 ring-matrix-accent/30'
+                      : 'border-matrix-border hover:border-matrix-accent/30 hover:bg-matrix-bg-hover'
+                  }`}
+                >
+                  {/* Swatch row */}
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="flex gap-1">
+                      {meta.swatches.map((color, i) => (
+                        <div key={i} className="w-4 h-4 rounded-full border border-white/10" style={{ background: color }} />
+                      ))}
+                    </div>
+                    {isActive && (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-matrix-green ml-auto">
+                        <polyline points="20 6 9 17 4 12"/>
+                      </svg>
+                    )}
+                  </div>
+                  <div className="text-xs font-bold text-matrix-green">{meta.name}</div>
+                  <div className="text-[9px] text-matrix-text-muted/50 mt-0.5">{meta.description}</div>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Orchestration Preferences */}

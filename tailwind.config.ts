@@ -8,29 +8,29 @@ const config: Config = {
     extend: {
       colors: {
         matrix: {
-          green: '#00ff41',
-          'green-dim': '#00cc33',
-          'green-dark': '#009926',
-          'green-darker': '#006b1a',
-          bg: '#0a0a0a',
-          'bg-light': '#0d120d',
-          'bg-card': '#0a150a',
-          'bg-hover': '#0f1f0f',
-          border: '#003300',
-          'border-bright': '#00ff41',
-          text: '#00ff41',
-          'text-dim': '#00cc33',
-          'text-muted': '#33cc33',
-          accent: '#00ff41',
-          danger: '#ff0040',
-          warning: '#ccff00',
-          info: '#00ccff'
+          green: 'var(--matrix-green, #00ff41)',
+          'green-dim': 'var(--matrix-green-dim, #00cc33)',
+          'green-dark': 'var(--matrix-green-dark, #009926)',
+          'green-darker': 'var(--matrix-green-darker, #006b1a)',
+          bg: 'var(--matrix-bg, #0a0a0a)',
+          'bg-light': 'var(--matrix-bg-light, #0d120d)',
+          'bg-card': 'var(--matrix-bg-card, #0a150a)',
+          'bg-hover': 'var(--matrix-bg-hover, #0f1f0f)',
+          border: 'var(--matrix-border, #003300)',
+          'border-bright': 'var(--matrix-border-bright, #00ff41)',
+          text: 'var(--matrix-text, #00ff41)',
+          'text-dim': 'var(--matrix-text-dim, #00cc33)',
+          'text-muted': 'var(--matrix-text-muted, #33cc33)',
+          accent: 'var(--matrix-accent, #00ff41)',
+          danger: 'var(--matrix-danger, #ff0040)',
+          warning: 'var(--matrix-warning, #ccff00)',
+          info: 'var(--matrix-info, #00ccff)'
         },
         surface: {
-          bg: '#0a0a0a',
-          card: '#0a150a',
-          border: '#003300',
-          hover: '#0f1f0f'
+          bg: 'var(--theme-app-bg, #0a0a0a)',
+          card: 'var(--theme-card-bg, #0a150a)',
+          border: 'var(--theme-border, #003300)',
+          hover: 'var(--theme-hover-bg, #0f1f0f)'
         }
       },
       fontFamily: {

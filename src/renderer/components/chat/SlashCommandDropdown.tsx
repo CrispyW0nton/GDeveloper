@@ -104,7 +104,7 @@ export default function SlashCommandDropdown({
     >
       <div
         ref={listRef}
-        className="glass-panel border border-matrix-green/20 bg-[#0a0f0a]/95 backdrop-blur-lg rounded-lg shadow-[0_0_20px_rgba(0,255,65,0.1)] max-h-[280px] overflow-y-auto"
+        className="glass-panel-solid border border-matrix-green/20 backdrop-blur-lg rounded-lg shadow-matrix max-h-[280px] overflow-y-auto"
       >
         <div className="px-3 py-1.5 border-b border-matrix-border/30">
           <span className="text-[9px] text-matrix-text-muted/40 uppercase tracking-wider">Commands</span>

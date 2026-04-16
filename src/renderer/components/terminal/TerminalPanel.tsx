@@ -176,14 +176,14 @@ export default function TerminalPanel({ activeWorkspace, onClose }: TerminalPane
   return (
     <div className="h-full flex flex-col">
       {/* Tab Bar + Controls */}
-      <div className="flex items-center justify-between px-2 py-1 border-b border-matrix-border/30 bg-[#0c0c0c] flex-shrink-0">
+      <div className="flex items-center justify-between px-2 py-1 border-b border-matrix-border/30 bg-matrix-bg-light flex-shrink-0">
         <div className="flex items-center gap-0.5 overflow-x-auto flex-1 min-w-0">
           {tabs.map(tab => (
             <div
               key={tab.id}
               className={`flex items-center gap-1 px-2 py-1 text-[10px] cursor-pointer transition-colors rounded-t ${
                 tab.id === activeTabId
-                  ? 'bg-[#0a0a0a] text-matrix-green border-t border-x border-matrix-green/20'
+                  ? 'bg-matrix-bg text-matrix-green border-t border-x border-matrix-green/20'
                   : 'text-matrix-text-muted/40 hover:text-matrix-text-dim hover:bg-matrix-bg-hover'
               }`}
               onClick={() => setActiveTabId(tab.id)}
@@ -215,7 +215,7 @@ export default function TerminalPanel({ activeWorkspace, onClose }: TerminalPane
             className="text-[9px] bg-transparent border border-matrix-border/20 text-matrix-text-dim rounded px-1 py-0.5 outline-none"
           >
             {shells.filter(s => s.available).map(s => (
-              <option key={s.id} value={s.id} className="bg-[#0a0a0a]">{s.name}</option>
+              <option key={s.id} value={s.id} className="bg-matrix-bg">{s.name}</option>
             ))}
           </select>
 
@@ -236,7 +236,7 @@ export default function TerminalPanel({ activeWorkspace, onClose }: TerminalPane
       </div>
 
       {/* Terminal Output */}
-      <div className="flex-1 overflow-y-auto bg-[#0a0a0a] font-mono text-xs p-3 space-y-2" onClick={() => inputRef.current?.focus()}>
+      <div className="flex-1 overflow-y-auto bg-matrix-bg font-mono text-xs p-3 space-y-2" onClick={() => inputRef.current?.focus()}>
         {/* Welcome message */}
         {(!activeTab || activeTab.history.length === 0) && (
           <div className="text-matrix-green/30 text-[11px] space-y-1">
@@ -287,7 +287,7 @@ export default function TerminalPanel({ activeWorkspace, onClose }: TerminalPane
       </div>
 
       {/* Input line */}
-      <div className="border-t border-matrix-border/30 bg-[#0a0a0a] px-3 py-2 flex items-center gap-2 font-mono flex-shrink-0">
+      <div className="border-t border-matrix-border/30 bg-matrix-bg px-3 py-2 flex items-center gap-2 font-mono flex-shrink-0">
         <span className="text-matrix-green text-xs shrink-0">$</span>
         <input
           ref={inputRef}
