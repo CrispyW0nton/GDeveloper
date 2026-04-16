@@ -66,7 +66,45 @@ export const IPC_CHANNELS = {
   VERIFICATION_RUN: 'verification:run',
 
   // Diff
-  DIFF_GET: 'diff:get'
+  DIFF_GET: 'diff:get',
+
+  // ─── Workspace Management (Sprint 9) ───
+  WORKSPACE_LIST: 'workspace:list',
+  WORKSPACE_GET: 'workspace:get',
+  WORKSPACE_ADD: 'workspace:add',
+  WORKSPACE_REMOVE: 'workspace:remove',
+  WORKSPACE_SET_ACTIVE: 'workspace:set-active',
+  WORKSPACE_GET_ACTIVE: 'workspace:get-active',
+  WORKSPACE_UPDATE_PATH: 'workspace:update-path',
+  WORKSPACE_CLONE: 'workspace:clone',
+  WORKSPACE_OPEN_LOCAL: 'workspace:open-local',
+
+  // ─── Git Operations (Sprint 9) ───
+  GIT_STATUS: 'git:status',
+  GIT_PULL: 'git:pull',
+  GIT_PUSH: 'git:push',
+  GIT_FETCH: 'git:fetch',
+  GIT_BRANCHES: 'git:branches',
+  GIT_CHECKOUT: 'git:checkout',
+  GIT_CREATE_BRANCH: 'git:create-branch',
+  GIT_STASH: 'git:stash',
+  GIT_STASH_POP: 'git:stash-pop',
+  GIT_STAGE_ALL: 'git:stage-all',
+  GIT_UNSTAGE_ALL: 'git:unstage-all',
+  GIT_STAGE_FILE: 'git:stage-file',
+  GIT_UNSTAGE_FILE: 'git:unstage-file',
+  GIT_COMMIT: 'git:commit',
+  GIT_COMMIT_PUSH: 'git:commit-push',
+  GIT_LOG: 'git:log',
+  GIT_DIFF: 'git:diff',
+  GIT_DISCARD: 'git:discard',
+  GIT_RESET_SOFT: 'git:reset-soft',
+  GIT_RESET_HARD: 'git:reset-hard',
+  GIT_RESET_TO_REMOTE: 'git:reset-to-remote',
+
+  // ─── Terminal (Sprint 9) ───
+  TERMINAL_EXECUTE: 'terminal:execute',
+  TERMINAL_DETECT_SHELLS: 'terminal:detect-shells',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];

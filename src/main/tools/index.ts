@@ -1,389 +1,589 @@
 /**
- * Sandbox Tool Registry & Permission Model
- * Categories: file-ops, code-search, git, github-api, shell, package-manager, test-lint-build, browser, mcp, artifact
- * Permission Tiers: read-only (auto), write (auto in trusted), high-risk (approval required)
+ * Local Coding Tools — Real Implementations
+ * All file tools resolve relative to active workspace root.
+ * Refuse operations outside workspace boundary.
+ * Log every operation to activity via DB.
  */
 
-import { ToolDefinition, ToolResult } from '../domain/entities';
-import { PermissionTier, ToolCategory } from '../domain/enums';
-import { IToolRegistry } from '../domain/interfaces';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { join, resolve, relative, isAbsolute, dirname, sep } from 'path';
+import { execSync } from 'child_process';
+import simpleGit, { SimpleGit } from 'simple-git';
+import { getDatabase } from '../db';
 
-class ToolRegistry implements IToolRegistry {
-  private tools: Map<string, ToolDefinition> = new Map();
-  private pendingApprovals: Map<string, (approved: boolean) => void> = new Map();
-  private approvalCallback?: (toolName: string, input: Record<string, unknown>) => Promise<boolean>;
+// ─── Workspace State ───
 
-  constructor() {
-    this.registerBuiltinTools();
+let activeWorkspacePath: string | null = null;
+
+export function setActiveWorkspace(path: string | null): void {
+  activeWorkspacePath = path;
+  console.log(`[Tools] Active workspace set to: ${path || '(none)'}`);
+}
+
+export function getActiveWorkspace(): string | null {
+  return activeWorkspacePath;
+}
+
+// ─── Path Security ───
+
+function resolveSafe(workspacePath: string, filePath: string): string {
+  const base = resolve(workspacePath);
+  const target = isAbsolute(filePath)
+    ? resolve(filePath)
+    : resolve(base, filePath);
+
+  // Ensure resolved path is within workspace
+  if (!target.startsWith(base + sep) && target !== base) {
+    throw new Error(`Access denied: path "${filePath}" resolves outside workspace boundary`);
   }
+  return target;
+}
 
-  register(tool: ToolDefinition): void {
-    this.tools.set(tool.name, tool);
+function requireWorkspace(): string {
+  if (!activeWorkspacePath || !existsSync(activeWorkspacePath)) {
+    throw new Error('No active workspace. Clone or open a repository first.');
   }
+  return activeWorkspacePath;
+}
 
-  unregister(name: string): void {
-    this.tools.delete(name);
+// ─── Tool Definitions for Claude (Anthropic format) ───
+
+export interface LocalToolDef {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+export const LOCAL_TOOL_DEFINITIONS: LocalToolDef[] = [
+  {
+    name: 'read_file',
+    description: 'Read the contents of a file from the workspace. Returns the file content as text.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to workspace root' }
+      },
+      required: ['path']
+    }
+  },
+  {
+    name: 'write_file',
+    description: 'Write content to a file in the workspace. Creates the file (and parent directories) if it does not exist, overwrites if it does.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to workspace root' },
+        content: { type: 'string', description: 'Content to write to the file' }
+      },
+      required: ['path', 'content']
+    }
+  },
+  {
+    name: 'patch_file',
+    description: 'Search and replace text in a file. Finds the first occurrence of `search` and replaces it with `replace`.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to workspace root' },
+        search: { type: 'string', description: 'Text to find in the file' },
+        replace: { type: 'string', description: 'Replacement text' }
+      },
+      required: ['path', 'search', 'replace']
+    }
+  },
+  {
+    name: 'list_files',
+    description: 'List files and directories in a directory. Returns names with trailing / for directories.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory path relative to workspace root (default: ".")' },
+        recursive: { type: 'boolean', description: 'If true, list files recursively (max 500 entries)' }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'search_files',
+    description: 'Search for text across files in the workspace using grep. Returns matching lines with file paths and line numbers.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Text or regex pattern to search for' },
+        path: { type: 'string', description: 'Subdirectory to search within (default: ".")' },
+        include: { type: 'string', description: 'File glob pattern to filter (e.g., "*.ts")' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'run_command',
+    description: 'Run a shell command in the workspace directory. Returns stdout, stderr, and exit code. Timeout: 30 seconds.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to execute' },
+        cwd: { type: 'string', description: 'Working directory relative to workspace (default: workspace root)' }
+      },
+      required: ['command']
+    }
+  },
+  {
+    name: 'git_status',
+    description: 'Get the git status of the workspace: current branch, staged/unstaged/untracked files, ahead/behind counts.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: 'git_diff',
+    description: 'Get the git diff of the workspace. Shows changes between working tree and index (or staged changes).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        staged: { type: 'boolean', description: 'If true, show staged changes (--cached). Default: false (working tree changes).' }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'git_log',
+    description: 'Get recent git log entries.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        count: { type: 'number', description: 'Number of log entries (default: 10, max: 50)' }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'git_create_branch',
+    description: 'Create a new git branch and switch to it.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Branch name to create' }
+      },
+      required: ['name']
+    }
+  },
+  {
+    name: 'git_commit',
+    description: 'Stage all changes and create a commit.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Commit message' }
+      },
+      required: ['message']
+    }
   }
+];
 
-  get(name: string): ToolDefinition | undefined {
-    return this.tools.get(name);
-  }
+// ─── Tool Executor ───
 
-  getAll(): ToolDefinition[] {
-    return Array.from(this.tools.values());
-  }
+export async function executeLocalTool(
+  name: string,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const ws = requireWorkspace();
 
-  getByCategory(category: string): ToolDefinition[] {
-    return this.getAll().filter(t => t.category === category);
-  }
+  try {
+    let result: string;
 
-  setApprovalCallback(cb: (toolName: string, input: Record<string, unknown>) => Promise<boolean>): void {
-    this.approvalCallback = cb;
-  }
-
-  async executeTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
-    const tool = this.tools.get(name);
-    if (!tool) {
-      return { success: false, output: '', error: `Tool not found: ${name}` };
+    switch (name) {
+      case 'read_file':
+        result = toolReadFile(ws, args);
+        break;
+      case 'write_file':
+        result = toolWriteFile(ws, args);
+        break;
+      case 'patch_file':
+        result = toolPatchFile(ws, args);
+        break;
+      case 'list_files':
+        result = toolListFiles(ws, args);
+        break;
+      case 'search_files':
+        result = toolSearchFiles(ws, args);
+        break;
+      case 'run_command':
+        result = toolRunCommand(ws, args);
+        break;
+      case 'git_status':
+        result = await toolGitStatus(ws);
+        break;
+      case 'git_diff':
+        result = await toolGitDiff(ws, args);
+        break;
+      case 'git_log':
+        result = await toolGitLog(ws, args);
+        break;
+      case 'git_create_branch':
+        result = await toolGitCreateBranch(ws, args);
+        break;
+      case 'git_commit':
+        result = await toolGitCommit(ws, args);
+        break;
+      default:
+        throw new Error(`Unknown local tool: ${name}`);
     }
 
-    // Permission check
-    if (tool.permissionTier === PermissionTier.HIGH_RISK) {
-      if (this.approvalCallback) {
-        const approved = await this.approvalCallback(name, input);
-        if (!approved) {
-          return { success: false, output: '', error: `Permission denied for high-risk tool: ${name}` };
-        }
-      }
-    }
+    // Log to activity
+    try {
+      const db = getDatabase();
+      db.logActivity('system', 'tool_execute', `Tool: ${name}`, result.substring(0, 200), {
+        toolName: name,
+        source: 'local',
+        success: true
+      });
+    } catch { /* ignore logging errors */ }
+
+    return { content: [{ type: 'text', text: result }] };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
 
     try {
-      const startTime = Date.now();
-      const result = await tool.execute(input);
-      const duration = Date.now() - startTime;
-      return result;
-    } catch (error) {
-      return {
-        success: false,
-        output: '',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
+      const db = getDatabase();
+      db.logActivity('system', 'tool_error', `Tool failed: ${name}`, errMsg, {
+        toolName: name,
+        source: 'local'
+      }, 'error');
+    } catch { /* ignore */ }
+
+    return { content: [{ type: 'text', text: `Error: ${errMsg}` }] };
+  }
+}
+
+// ─── Individual Tool Implementations ───
+
+function toolReadFile(ws: string, args: Record<string, unknown>): string {
+  const filePath = String(args.path || '');
+  if (!filePath) throw new Error('path is required');
+
+  const absPath = resolveSafe(ws, filePath);
+  if (!existsSync(absPath)) throw new Error(`File not found: ${filePath}`);
+
+  const stat = statSync(absPath);
+  if (stat.isDirectory()) throw new Error(`Path is a directory: ${filePath}`);
+  if (stat.size > 1024 * 1024) throw new Error(`File too large (${(stat.size / 1024).toFixed(0)} KB). Max: 1 MB.`);
+
+  const content = readFileSync(absPath, 'utf-8');
+  return content;
+}
+
+function toolWriteFile(ws: string, args: Record<string, unknown>): string {
+  const filePath = String(args.path || '');
+  const content = String(args.content ?? '');
+  if (!filePath) throw new Error('path is required');
+
+  const absPath = resolveSafe(ws, filePath);
+  const dir = dirname(absPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  const existed = existsSync(absPath);
+  // Store old content for diff
+  const oldContent = existed ? readFileSync(absPath, 'utf-8') : '';
+
+  writeFileSync(absPath, content, 'utf-8');
+
+  // Record diff
+  try {
+    const db = getDatabase();
+    db.addDiff('system', null, filePath, oldContent, content);
+  } catch { /* ignore */ }
+
+  const bytes = Buffer.byteLength(content, 'utf-8');
+  return `${existed ? 'Updated' : 'Created'} ${filePath} (${bytes} bytes)`;
+}
+
+function toolPatchFile(ws: string, args: Record<string, unknown>): string {
+  const filePath = String(args.path || '');
+  const search = String(args.search || '');
+  const replace = String(args.replace ?? '');
+  if (!filePath || !search) throw new Error('path and search are required');
+
+  const absPath = resolveSafe(ws, filePath);
+  if (!existsSync(absPath)) throw new Error(`File not found: ${filePath}`);
+
+  const oldContent = readFileSync(absPath, 'utf-8');
+  if (!oldContent.includes(search)) {
+    throw new Error(`Search text not found in ${filePath}. Provide exact text including whitespace.`);
+  }
+
+  const newContent = oldContent.replace(search, replace);
+  writeFileSync(absPath, newContent, 'utf-8');
+
+  // Record diff
+  try {
+    const db = getDatabase();
+    db.addDiff('system', null, filePath, oldContent, newContent);
+  } catch { /* ignore */ }
+
+  return `Patched ${filePath}: replaced ${search.length} chars with ${replace.length} chars`;
+}
+
+function toolListFiles(ws: string, args: Record<string, unknown>): string {
+  const dirPath = String(args.path || '.');
+  const recursive = Boolean(args.recursive);
+  const absDir = resolveSafe(ws, dirPath);
+
+  if (!existsSync(absDir)) throw new Error(`Directory not found: ${dirPath}`);
+  if (!statSync(absDir).isDirectory()) throw new Error(`Not a directory: ${dirPath}`);
+
+  const entries: string[] = [];
+  const maxEntries = 500;
+
+  function walk(dir: string, prefix: string): void {
+    if (entries.length >= maxEntries) return;
+    const items = readdirSync(dir);
+    for (const item of items) {
+      if (entries.length >= maxEntries) break;
+      if (item === '.git' || item === 'node_modules' || item === '.worktrees') continue;
+
+      const fullPath = join(dir, item);
+      const relPath = prefix ? `${prefix}/${item}` : item;
+      try {
+        const s = statSync(fullPath);
+        if (s.isDirectory()) {
+          entries.push(`${relPath}/`);
+          if (recursive) walk(fullPath, relPath);
+        } else {
+          entries.push(relPath);
+        }
+      } catch { /* skip inaccessible */ }
     }
   }
 
-  private registerBuiltinTools(): void {
-    // ─── File Operations ───
-    this.register({
-      name: 'read_file',
-      description: 'Read the contents of a file at the given path',
-      category: ToolCategory.FILE_OPS,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path relative to repo root' }
-        },
-        required: ['path']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Contents of ${input.path}:\n// File content would be read here`
-      })
+  walk(absDir, '');
+  const truncated = entries.length >= maxEntries ? `\n... (truncated at ${maxEntries} entries)` : '';
+  return entries.join('\n') + truncated;
+}
+
+function toolSearchFiles(ws: string, args: Record<string, unknown>): string {
+  const query = String(args.query || '');
+  const searchPath = String(args.path || '.');
+  const include = args.include ? String(args.include) : '';
+  if (!query) throw new Error('query is required');
+
+  const absDir = resolveSafe(ws, searchPath);
+  if (!existsSync(absDir)) throw new Error(`Directory not found: ${searchPath}`);
+
+  try {
+    let cmd = `grep -rn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.md" --include="*.css" --include="*.html"`;
+    if (include) {
+      cmd = `grep -rn --include="${include}"`;
+    }
+    cmd += ` "${query.replace(/"/g, '\\"')}" "${absDir}" 2>/dev/null || true`;
+
+    const output = execSync(cmd, { maxBuffer: 512 * 1024, timeout: 10000 }).toString();
+
+    // Relativize paths
+    const lines = output.split('\n').filter(Boolean).slice(0, 100);
+    const relLines = lines.map(line => {
+      const replaced = line.replace(absDir + '/', '').replace(absDir + '\\', '');
+      return replaced;
     });
 
-    this.register({
-      name: 'write_file',
-      description: 'Write content to a file, creating or overwriting it',
-      category: ToolCategory.FILE_OPS,
-      permissionTier: PermissionTier.WRITE,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path' },
-          content: { type: 'string', description: 'File content' }
-        },
-        required: ['path', 'content']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `File written: ${input.path} (${String(input.content).length} bytes)`
-      })
-    });
-
-    this.register({
-      name: 'list_directory',
-      description: 'List files and directories at the given path',
-      category: ToolCategory.FILE_OPS,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory path' }
-        },
-        required: ['path']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Directory listing of ${input.path}:\nsrc/\npackage.json\ntsconfig.json\nREADME.md`
-      })
-    });
-
-    this.register({
-      name: 'edit_file',
-      description: 'Apply a targeted edit to an existing file',
-      category: ToolCategory.FILE_OPS,
-      permissionTier: PermissionTier.WRITE,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          old_text: { type: 'string' },
-          new_text: { type: 'string' }
-        },
-        required: ['path', 'old_text', 'new_text']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Edited ${input.path}: replaced text`
-      })
-    });
-
-    // ─── Code Search (ripgrep) ───
-    this.register({
-      name: 'search_code',
-      description: 'Search code using ripgrep patterns across the repository',
-      category: ToolCategory.CODE_SEARCH,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Search pattern (regex)' },
-          path: { type: 'string', description: 'Path to search within' },
-          include: { type: 'string', description: 'File pattern filter' }
-        },
-        required: ['pattern']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Search results for "${input.pattern}":\nsrc/index.ts:3: matching line`
-      })
-    });
-
-    // ─── Git Operations ───
-    this.register({
-      name: 'git_status',
-      description: 'Show the working tree status',
-      category: ToolCategory.GIT,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: { type: 'object', properties: {} },
-      source: 'builtin',
-      execute: async () => ({
-        success: true,
-        output: 'On branch main\nnothing to commit, working tree clean'
-      })
-    });
-
-    this.register({
-      name: 'git_diff',
-      description: 'Show changes between commits, working tree, etc.',
-      category: ToolCategory.GIT,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: {
-        type: 'object',
-        properties: { path: { type: 'string' } }
-      },
-      source: 'builtin',
-      execute: async () => ({
-        success: true,
-        output: 'diff --git a/src/index.ts b/src/index.ts\n--- a/src/index.ts\n+++ b/src/index.ts'
-      })
-    });
-
-    this.register({
-      name: 'git_create_branch',
-      description: 'Create a new git branch',
-      category: ToolCategory.GIT,
-      permissionTier: PermissionTier.WRITE,
-      inputSchema: {
-        type: 'object',
-        properties: { branch: { type: 'string' } },
-        required: ['branch']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Created branch: ${input.branch}`
-      })
-    });
-
-    this.register({
-      name: 'git_commit',
-      description: 'Create a commit with staged changes',
-      category: ToolCategory.GIT,
-      permissionTier: PermissionTier.WRITE,
-      inputSchema: {
-        type: 'object',
-        properties: { message: { type: 'string' } },
-        required: ['message']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Committed: ${input.message}\nSHA: abc123def`
-      })
-    });
-
-    // ─── GitHub API ───
-    this.register({
-      name: 'github_create_pr',
-      description: 'Create a pull request on GitHub',
-      category: ToolCategory.GITHUB_API,
-      permissionTier: PermissionTier.HIGH_RISK,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          body: { type: 'string' },
-          head: { type: 'string' },
-          base: { type: 'string' }
-        },
-        required: ['title', 'head', 'base']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `PR created: #42 "${input.title}"\nhttps://github.com/repo/pull/42`
-      })
-    });
-
-    this.register({
-      name: 'github_push',
-      description: 'Push changes to remote repository',
-      category: ToolCategory.GITHUB_API,
-      permissionTier: PermissionTier.HIGH_RISK,
-      inputSchema: {
-        type: 'object',
-        properties: { branch: { type: 'string' } },
-        required: ['branch']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Pushed to origin/${input.branch}`
-      })
-    });
-
-    // ─── Shell Execution ───
-    this.register({
-      name: 'bash_execute',
-      description: 'Execute a bash command in the workspace',
-      category: ToolCategory.SHELL,
-      permissionTier: PermissionTier.WRITE,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'Bash command to execute' },
-          timeout: { type: 'number', description: 'Timeout in ms' }
-        },
-        required: ['command']
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `$ ${input.command}\n[Command output]`
-      })
-    });
-
-    // ─── Package Managers ───
-    this.register({
-      name: 'npm_install',
-      description: 'Install npm packages',
-      category: ToolCategory.PACKAGE_MANAGER,
-      permissionTier: PermissionTier.WRITE,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          packages: { type: 'string', description: 'Packages to install' }
-        }
-      },
-      source: 'builtin',
-      execute: async (input) => ({
-        success: true,
-        output: `Installed: ${input.packages || 'all dependencies'}`
-      })
-    });
-
-    // ─── Test/Lint/Build ───
-    this.register({
-      name: 'run_tests',
-      description: 'Run the test suite',
-      category: ToolCategory.TEST_LINT_BUILD,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: {
-        type: 'object',
-        properties: { pattern: { type: 'string' } }
-      },
-      source: 'builtin',
-      execute: async () => ({
-        success: true,
-        output: 'Test Suites: 3 passed, 3 total\nTests: 12 passed, 12 total'
-      })
-    });
-
-    this.register({
-      name: 'run_lint',
-      description: 'Run the linter',
-      category: ToolCategory.TEST_LINT_BUILD,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: { type: 'object', properties: {} },
-      source: 'builtin',
-      execute: async () => ({
-        success: true,
-        output: 'ESLint: 0 errors, 2 warnings'
-      })
-    });
-
-    this.register({
-      name: 'run_build',
-      description: 'Run the build process',
-      category: ToolCategory.TEST_LINT_BUILD,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: { type: 'object', properties: {} },
-      source: 'builtin',
-      execute: async () => ({
-        success: true,
-        output: 'Build succeeded in 4.2s'
-      })
-    });
-
-    this.register({
-      name: 'run_typecheck',
-      description: 'Run TypeScript type checking',
-      category: ToolCategory.TEST_LINT_BUILD,
-      permissionTier: PermissionTier.READ_ONLY,
-      inputSchema: { type: 'object', properties: {} },
-      source: 'builtin',
-      execute: async () => ({
-        success: true,
-        output: 'TypeScript: No errors found'
-      })
-    });
+    if (relLines.length === 0) return `No matches found for "${query}"`;
+    return relLines.join('\n') + (lines.length >= 100 ? '\n... (truncated at 100 results)' : '');
+  } catch (err) {
+    return `Search failed: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
-// Singleton
-let registryInstance: ToolRegistry | null = null;
+function toolRunCommand(ws: string, args: Record<string, unknown>): string {
+  const command = String(args.command || '');
+  if (!command) throw new Error('command is required');
 
-export function getToolRegistry(): ToolRegistry {
-  if (!registryInstance) {
-    registryInstance = new ToolRegistry();
+  // Block obviously dangerous commands
+  const blocked = ['rm -rf /', 'format c:', 'del /f /s /q'];
+  if (blocked.some(b => command.toLowerCase().includes(b))) {
+    throw new Error('Command blocked for safety');
   }
-  return registryInstance;
+
+  const cwdRel = args.cwd ? String(args.cwd) : '.';
+  const cwd = resolveSafe(ws, cwdRel);
+
+  try {
+    const output = execSync(command, {
+      cwd,
+      maxBuffer: 1024 * 1024,
+      timeout: 30000,
+      encoding: 'utf-8',
+      shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash'
+    });
+    return output || '(no output)';
+  } catch (err: any) {
+    const stdout = err.stdout || '';
+    const stderr = err.stderr || '';
+    const code = err.status ?? 1;
+    return `Exit code: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`;
+  }
 }
 
-export { ToolRegistry };
+async function toolGitStatus(ws: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  const status = await git.status();
+
+  const lines = [
+    `Branch: ${status.current || '(detached)'}`,
+    `Tracking: ${status.tracking || '(none)'}`,
+    `Ahead: ${status.ahead}, Behind: ${status.behind}`,
+    `Staged: ${status.staged.length} files`,
+    `Modified: ${status.modified.length} files`,
+    `Untracked: ${status.not_added.length} files`,
+    `Deleted: ${status.deleted.length} files`,
+    `Conflicted: ${status.conflicted.length} files`,
+    status.isClean() ? 'Working tree is clean' : 'Working tree has changes'
+  ];
+
+  if (status.staged.length > 0) lines.push('\nStaged:\n  ' + status.staged.join('\n  '));
+  if (status.modified.length > 0) lines.push('\nModified:\n  ' + status.modified.join('\n  '));
+  if (status.not_added.length > 0) lines.push('\nUntracked:\n  ' + status.not_added.join('\n  '));
+
+  return lines.join('\n');
+}
+
+async function toolGitDiff(ws: string, args: Record<string, unknown>): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  const staged = Boolean(args.staged);
+
+  const diff = staged
+    ? await git.diff(['--cached'])
+    : await git.diff();
+
+  if (!diff) return staged ? 'No staged changes' : 'No changes in working tree';
+
+  // Truncate very large diffs
+  if (diff.length > 50000) {
+    return diff.substring(0, 50000) + '\n\n... (diff truncated at 50 KB)';
+  }
+  return diff;
+}
+
+async function toolGitLog(ws: string, args: Record<string, unknown>): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  const count = Math.min(Number(args.count) || 10, 50);
+
+  const log = await git.log({ maxCount: count });
+  const entries = log.all.map(entry =>
+    `${entry.hash.substring(0, 7)} ${entry.date.substring(0, 19)} ${entry.author_name}: ${entry.message}`
+  );
+
+  return entries.join('\n') || 'No commits found';
+}
+
+async function toolGitCreateBranch(ws: string, args: Record<string, unknown>): Promise<string> {
+  const branchName = String(args.name || '');
+  if (!branchName) throw new Error('name is required');
+
+  const git: SimpleGit = simpleGit(ws);
+  await git.checkoutLocalBranch(branchName);
+  return `Created and switched to branch: ${branchName}`;
+}
+
+async function toolGitCommit(ws: string, args: Record<string, unknown>): Promise<string> {
+  const message = String(args.message || '');
+  if (!message) throw new Error('message is required');
+
+  const git: SimpleGit = simpleGit(ws);
+  await git.add('.');
+  const result = await git.commit(message);
+  return `Committed: ${result.commit || '(no changes)'}\nBranch: ${result.branch}\nSummary: ${result.summary.changes} changed, ${result.summary.insertions} insertions, ${result.summary.deletions} deletions`;
+}
+
+// ─── Git Operations for Toolbar ───
+
+export async function gitPull(ws: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  const result = await git.pull();
+  return `Pulled: ${result.summary.changes} changes, ${result.summary.insertions} insertions, ${result.summary.deletions} deletions`;
+}
+
+export async function gitPush(ws: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  await git.push();
+  return 'Pushed successfully';
+}
+
+export async function gitFetch(ws: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  await git.fetch(['--all']);
+  return 'Fetched all remotes';
+}
+
+export async function gitStash(ws: string, message?: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  const args = message ? ['push', '-m', message] : ['push'];
+  await git.stash(args);
+  return `Stashed changes${message ? `: ${message}` : ''}`;
+}
+
+export async function gitStashPop(ws: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  await git.stash(['pop']);
+  return 'Applied stashed changes';
+}
+
+export async function gitBranches(ws: string): Promise<{ current: string; local: string[]; remote: string[] }> {
+  const git: SimpleGit = simpleGit(ws);
+  const summary = await git.branchLocal();
+  const remoteSummary = await git.branch(['-r']);
+  return {
+    current: summary.current,
+    local: summary.all,
+    remote: remoteSummary.all
+  };
+}
+
+export async function gitCheckout(ws: string, branch: string): Promise<string> {
+  const git: SimpleGit = simpleGit(ws);
+  await git.checkout(branch);
+  return `Switched to branch: ${branch}`;
+}
+
+export async function gitGetStatus(ws: string) {
+  const git: SimpleGit = simpleGit(ws);
+  const status = await git.status();
+  return {
+    current: status.current || '',
+    tracking: status.tracking || '',
+    ahead: status.ahead,
+    behind: status.behind,
+    staged: status.staged.length,
+    modified: status.modified.length,
+    untracked: status.not_added.length,
+    conflicted: status.conflicted.length,
+    isClean: status.isClean(),
+    files: {
+      staged: status.staged,
+      modified: status.modified,
+      untracked: status.not_added,
+      deleted: status.deleted,
+      conflicted: status.conflicted
+    }
+  };
+}
+
+export async function gitClone(url: string, localPath: string): Promise<string> {
+  const git: SimpleGit = simpleGit();
+  await git.clone(url, localPath);
+  return `Cloned ${url} to ${localPath}`;
+}
+
+// Check if a path is a git repository
+export async function isGitRepo(path: string): Promise<boolean> {
+  try {
+    const git: SimpleGit = simpleGit(path);
+    await git.status();
+    return true;
+  } catch {
+    return false;
+  }
+}

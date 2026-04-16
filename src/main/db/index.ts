@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  local_path TEXT NOT NULL,
+  remote_url TEXT,
+  github_owner TEXT,
+  github_repo TEXT,
+  default_branch TEXT DEFAULT 'main',
+  cloned_at TEXT,
+  last_opened_at TEXT,
+  mcp_server_id TEXT,
+  status TEXT DEFAULT 'active'
+);
+
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
 CREATE INDEX IF NOT EXISTS idx_activity_session ON activity_events(session_id);
@@ -244,6 +258,51 @@ export class DatabaseManager {
 
   removeMCPServer(id: string): void {
     this.db.prepare(`DELETE FROM mcp_servers WHERE id = ?`).run(id);
+  }
+
+  // ─── Workspaces ─────────────────────────────────────
+  saveWorkspace(ws: any): string {
+    const id = ws.id || uuid();
+    const existing = this.db.prepare(`SELECT id FROM workspaces WHERE id = ?`).get(id);
+    if (existing) {
+      this.db.prepare(
+        `UPDATE workspaces SET name=?, local_path=?, remote_url=?, github_owner=?, github_repo=?,
+         default_branch=?, last_opened_at=datetime('now'), mcp_server_id=?, status=? WHERE id=?`
+      ).run(ws.name, ws.local_path || ws.localPath, ws.remote_url || ws.remoteUrl || null,
+            ws.github_owner || ws.githubOwner || null, ws.github_repo || ws.githubRepo || null,
+            ws.default_branch || ws.defaultBranch || 'main', ws.mcp_server_id || ws.mcpServerId || null,
+            ws.status || 'active', id);
+    } else {
+      this.db.prepare(
+        `INSERT INTO workspaces (id, name, local_path, remote_url, github_owner, github_repo,
+         default_branch, cloned_at, last_opened_at, mcp_server_id, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?, ?)`
+      ).run(id, ws.name, ws.local_path || ws.localPath, ws.remote_url || ws.remoteUrl || null,
+            ws.github_owner || ws.githubOwner || null, ws.github_repo || ws.githubRepo || null,
+            ws.default_branch || ws.defaultBranch || 'main', ws.mcp_server_id || ws.mcpServerId || null,
+            ws.status || 'active');
+    }
+    return id;
+  }
+
+  getWorkspaces(): any[] {
+    return this.db.prepare(`SELECT * FROM workspaces WHERE status = 'active' ORDER BY last_opened_at DESC`).all();
+  }
+
+  getWorkspace(id: string): any | undefined {
+    return this.db.prepare(`SELECT * FROM workspaces WHERE id = ?`).get(id);
+  }
+
+  removeWorkspace(id: string): void {
+    this.db.prepare(`DELETE FROM workspaces WHERE id = ?`).run(id);
+  }
+
+  updateWorkspacePath(id: string, newPath: string): void {
+    this.db.prepare(`UPDATE workspaces SET local_path = ?, last_opened_at = datetime('now') WHERE id = ?`).run(newPath, id);
+  }
+
+  touchWorkspace(id: string): void {
+    this.db.prepare(`UPDATE workspaces SET last_opened_at = datetime('now') WHERE id = ?`).run(id);
   }
 
   // ─── Settings (non-sensitive) ──────────────────────
