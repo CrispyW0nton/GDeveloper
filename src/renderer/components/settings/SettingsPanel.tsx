@@ -127,7 +127,12 @@ export default function SettingsPanel({ onApiKeySet }: SettingsPanelProps) {
 
             {error && (
               <div className="text-xs text-matrix-danger bg-matrix-danger/5 border border-matrix-danger/20 rounded px-3 py-2">
-                {error}
+                {error.split('\n').map((line: string, i: number) => (
+                  <React.Fragment key={i}>
+                    {line}
+                    {i < error.split('\n').length - 1 && <br />}
+                  </React.Fragment>
+                ))}
               </div>
             )}
 

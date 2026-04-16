@@ -83,12 +83,11 @@ export default function MatrixRainCanvas({
       const w = window.innerWidth;
       const h = window.innerHeight;
 
-      // Fade trail
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+      // Fade trail — lower alpha = longer cinematic trails
+      ctx.fillStyle = 'rgba(0, 4, 1, 0.04)';
       ctx.fillRect(0, 0, w, h);
 
       ctx.font = `${fontSize}px "Share Tech Mono", "Fira Code", monospace`;
-      ctx.fillStyle = color;
 
       const drops = dropsRef.current;
       for (let i = 0; i < drops.length; i++) {
@@ -97,7 +96,29 @@ export default function MatrixRainCanvas({
         const y = drops[i] * fontSize;
 
         if (y > 0) {
+          // Determine character brightness based on position in trail
+          if (drops[i] < 3) {
+            // Leading edge — bright white with strong glow
+            ctx.shadowBlur = 18;
+            ctx.shadowColor = '#ffffff';
+            ctx.fillStyle = '#ffffff';
+          } else if (Math.random() > 0.95) {
+            // Occasional bright flash for sparkle
+            ctx.shadowBlur = 12;
+            ctx.shadowColor = '#88ffaa';
+            ctx.fillStyle = '#aaffcc';
+          } else {
+            // Normal trail character with subtle glow
+            ctx.shadowBlur = 6;
+            ctx.shadowColor = color;
+            ctx.fillStyle = color;
+          }
+
           ctx.fillText(char, x, y);
+
+          // CRITICAL: Reset shadow after each character to prevent bleed
+          ctx.shadowBlur = 0;
+          ctx.shadowColor = 'transparent';
         }
 
         // Reset when off-screen (with some randomness to stagger)
@@ -130,6 +151,7 @@ export default function MatrixRainCanvas({
         zIndex: 0,
         pointerEvents: 'none',
         opacity,
+        filter: 'brightness(1.3) contrast(1.1)',
       }}
     />
   );

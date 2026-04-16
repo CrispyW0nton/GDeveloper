@@ -111,12 +111,23 @@ function registerIPCHandlers(): void {
         const claude = new ClaudeProvider(key);
         const result = await claude.validateKey();
         if (result.valid) {
-          // Store the key and register the provider on successful validation
           settings.setApiKey(provider, key);
-          providerRegistry.register(claude);
-          db.logActivity('system', 'api_key_validated', `API key validated for ${provider}`, '', { provider });
+
+          // Pick the best available model from the returned list
+          let bestModel = 'claude-sonnet-4-6'; // default fallback
+          if (result.models && result.models.length > 0) {
+            // Prefer sonnet-4, then any sonnet, then first available
+            const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
+            const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
+            bestModel = sonnet4 || anySonnet || result.models[0];
+          }
+
+          // Register provider with the best available model
+          const registeredProvider = new ClaudeProvider(key, bestModel);
+          providerRegistry.register(registeredProvider);
+          db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
         }
-        return result;
+        return { valid: result.valid, error: result.error };
       }
       // Generic provider: basic length check
       const valid = key.length > 10;

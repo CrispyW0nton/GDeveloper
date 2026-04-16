@@ -70,7 +70,7 @@ export default function App() {
   return (
     <>
       {/* Matrix Rain Canvas Background */}
-      <MatrixRainCanvas opacity={0.12} fontSize={14} color="#00ff41" speed={45} />
+      <MatrixRainCanvas opacity={0.38} fontSize={14} color="#00ff41" speed={33} />
 
       {/* CRT Scanline Overlay */}
       <div className="crt-overlay" />
