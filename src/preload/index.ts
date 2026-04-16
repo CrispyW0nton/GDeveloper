@@ -112,6 +112,12 @@ const electronAPI = {
   terminalExecute: (command: string, cwd?: string) => ipcRenderer.invoke('terminal:execute', command, cwd),
   detectShells: () => ipcRenderer.invoke('terminal:detect-shells'),
 
+  // ─── Slash Commands & Mode (Sprint 12) ─────────────
+  executeSlashCommand: (name: string, args: string, sessionId: string) => ipcRenderer.invoke('slash:execute', name, args, sessionId),
+  listSlashCommands: () => ipcRenderer.invoke('slash:list'),
+  getExecutionMode: () => ipcRenderer.invoke('mode:get'),
+  setExecutionMode: (mode: string) => ipcRenderer.invoke('mode:set', mode),
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,

@@ -3,12 +3,19 @@
  * Loads persisted state from Electron main process on startup
  * Uses IPC to sync state changes
  * Sprint 9 fix: workspace activation flow, startup hydration, session auto-creation, relaxed gating
+ * Sprint 12: ExecutionMode (plan/build), terminal panel visibility
  */
 
 import { useState, useCallback, useEffect } from 'react';
 
 // Get electronAPI (available in Electron, undefined in web preview)
 const api = (window as any).electronAPI;
+
+// ─── Types ───
+
+export type ExecutionMode = 'plan' | 'build';
+
+export type TabId = 'chat' | 'github' | 'mcp' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
 
 // ─── App State Interface ───
 export interface AppState {
@@ -24,9 +31,11 @@ export interface AppState {
   activeWorkspace: WorkspaceInfo | null;
   workspaces: WorkspaceInfo[];
   startupError: string | null;
+  // Sprint 12 additions
+  executionMode: ExecutionMode;
+  terminalPanelOpen: boolean;
+  terminalPanelHeight: number;
 }
-
-export type TabId = 'chat' | 'github' | 'mcp' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
 
 export interface SelectedRepo {
   id: string;
@@ -106,6 +115,10 @@ export const INITIAL_STATE: AppState = {
   activeWorkspace: null,
   workspaces: [],
   startupError: null,
+  // Sprint 12
+  executionMode: 'build',
+  terminalPanelOpen: false,
+  terminalPanelHeight: 250,
 };
 
 // ─── State Hook ───
@@ -249,6 +262,10 @@ export function useAppState() {
       if (alwaysAccessible.includes(tab)) {
         return { ...prev, activeTab: tab };
       }
+      // Terminal tab now toggles bottom panel instead
+      if (tab === 'terminal') {
+        return { ...prev, terminalPanelOpen: !prev.terminalPanelOpen };
+      }
       // All other tabs only require an active workspace
       if (!prev.activeWorkspace) {
         return { ...prev, activeTab: 'workspace' };
@@ -300,6 +317,24 @@ export function useAppState() {
     setState(prev => ({ ...prev, startupError: null }));
   }, []);
 
+  // ─── Sprint 12: Execution mode ───
+  const setExecutionMode = useCallback((mode: ExecutionMode) => {
+    setState(prev => ({ ...prev, executionMode: mode }));
+  }, []);
+
+  // ─── Sprint 12: Terminal panel ───
+  const toggleTerminalPanel = useCallback(() => {
+    setState(prev => ({ ...prev, terminalPanelOpen: !prev.terminalPanelOpen }));
+  }, []);
+
+  const setTerminalPanelHeight = useCallback((height: number) => {
+    setState(prev => ({ ...prev, terminalPanelHeight: Math.max(100, Math.min(height, window.innerHeight * 0.7)) }));
+  }, []);
+
+  const setTerminalPanelOpen = useCallback((open: boolean) => {
+    setState(prev => ({ ...prev, terminalPanelOpen: open }));
+  }, []);
+
   return {
     state,
     setApiKey,
@@ -312,5 +347,10 @@ export function useAppState() {
     setActiveWorkspace,
     refreshWorkspaces,
     clearStartupError,
+    // Sprint 12
+    setExecutionMode,
+    toggleTerminalPanel,
+    setTerminalPanelHeight,
+    setTerminalPanelOpen,
   };
 }

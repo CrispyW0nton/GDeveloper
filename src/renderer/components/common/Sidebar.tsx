@@ -11,17 +11,18 @@ interface SidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   activeWorkspace?: WorkspaceInfo | null;
+  terminalOpen?: boolean;
 }
 
-const MATRIX_CHARS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン';
+const MATRIX_CHARS = '\u30A2\u30A4\u30A6\u30A8\u30AA\u30AB\u30AD\u30AF\u30B1\u30B3\u30B5\u30B7\u30B9\u30BB\u30BD\u30BF\u30C1\u30C4\u30C6\u30C8\u30CA\u30CB\u30CC\u30CD\u30CE\u30CF\u30D2\u30D5\u30D8\u30DB\u30DE\u30DF\u30E0\u30E1\u30E2\u30E4\u30E6\u30E8\u30E9\u30EA\u30EB\u30EC\u30ED\u30EF\u30F2\u30F3';
 
 // Deterministic rain columns to avoid hydration mismatch
 const RAIN_COLUMNS = [
-  { left: '10%', delay: '0s', speed: '4.2s', chars: 'アカサタナ' },
-  { left: '30%', delay: '1.1s', speed: '3.8s', chars: 'ウケスツヌ' },
-  { left: '50%', delay: '0.5s', speed: '5.1s', chars: 'オコソトノ' },
-  { left: '70%', delay: '2.3s', speed: '3.5s', chars: 'エクセテネ' },
-  { left: '90%', delay: '0.8s', speed: '4.7s', chars: 'イキシチニ' },
+  { left: '10%', delay: '0s', speed: '4.2s', chars: '\u30A2\u30AB\u30B5\u30BF\u30CA' },
+  { left: '30%', delay: '1.1s', speed: '3.8s', chars: '\u30A6\u30B1\u30B9\u30C4\u30CC' },
+  { left: '50%', delay: '0.5s', speed: '5.1s', chars: '\u30AA\u30B3\u30BD\u30C8\u30CE' },
+  { left: '70%', delay: '2.3s', speed: '3.5s', chars: '\u30A8\u30AF\u30BB\u30C6\u30CD' },
+  { left: '90%', delay: '0.8s', speed: '4.7s', chars: '\u30A4\u30AD\u30B7\u30C1\u30CB' },
 ];
 
 interface NavItem {
@@ -30,12 +31,15 @@ interface NavItem {
   icon: React.ReactNode;
   /** Tab requires an active workspace to be enabled */
   requiresWorkspace: boolean;
+  /** If true, this entry toggles the bottom panel instead of switching tab */
+  togglesPanel?: boolean;
 }
 
 /**
  * TASK 4 — Relaxed tab gating:
  * Only `requiresWorkspace` matters. No checks for repo, messages, tasks, diffs,
  * GitHub connection, or MCP connection.
+ * Sprint 12: Terminal entry toggles bottom panel instead of switching tab.
  */
 const NAV_ITEMS: NavItem[] = [
   {
@@ -60,7 +64,8 @@ const NAV_ITEMS: NavItem[] = [
     id: 'terminal',
     label: 'Terminal',
     icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>,
-    requiresWorkspace: true
+    requiresWorkspace: false,
+    togglesPanel: true,
   },
   {
     id: 'mcp',
@@ -95,7 +100,8 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 export default function Sidebar({
-  activeTab, onTabChange, repoSelected, githubConnected, apiKeyConfigured, selectedRepo, collapsed, onToggleCollapse, activeWorkspace
+  activeTab, onTabChange, repoSelected, githubConnected, apiKeyConfigured,
+  selectedRepo, collapsed, onToggleCollapse, activeWorkspace, terminalOpen
 }: SidebarProps) {
   return (
     <aside className={`glass-panel-solid h-full flex flex-col transition-all duration-300 relative overflow-hidden ${collapsed ? 'w-14' : 'w-56'}`}>
@@ -157,9 +163,11 @@ export default function Sidebar({
       {/* Navigation */}
       <nav className="relative z-10 flex-1 overflow-y-auto py-2">
         {NAV_ITEMS.map(item => {
-          // TASK 4: disabled only when tab requiresWorkspace AND no activeWorkspace
-          const disabled = item.requiresWorkspace && !activeWorkspace;
-          const isActive = activeTab === item.id;
+          // Terminal entry: disabled only if no workspace and not a panel toggle
+          const isTerminal = item.togglesPanel;
+          const disabled = !isTerminal && item.requiresWorkspace && !activeWorkspace;
+          const isActive = isTerminal ? !!terminalOpen : activeTab === item.id;
+
           return (
             <button
               key={item.id}
@@ -170,10 +178,17 @@ export default function Sidebar({
                 ${isActive ? 'tab-active text-matrix-green glow-text-dim' : 'text-matrix-text-muted/60 hover:text-matrix-text-dim hover:bg-matrix-bg-hover'}
                 ${disabled ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'}
               `}
-              title={collapsed ? item.label : undefined}
+              title={collapsed ? (isTerminal ? `${item.label} (Ctrl+\`)` : item.label) : undefined}
             >
               <span className={isActive ? 'text-matrix-green' : ''}>{item.icon}</span>
-              {!collapsed && <span>{item.label}</span>}
+              {!collapsed && (
+                <span className="flex items-center gap-1.5">
+                  {item.label}
+                  {isTerminal && (
+                    <span className="text-[8px] text-matrix-text-muted/25 font-mono">Ctrl+`</span>
+                  )}
+                </span>
+              )}
             </button>
           );
         })}
@@ -183,7 +198,7 @@ export default function Sidebar({
       <div className="relative z-10 p-3 border-t border-matrix-border">
         {!collapsed && (
           <div className="text-[9px] text-matrix-text-muted/30 text-center tracking-widest">
-            SPRINT 10 // v1.2
+            SPRINT 12 // v2.0
           </div>
         )}
         <button

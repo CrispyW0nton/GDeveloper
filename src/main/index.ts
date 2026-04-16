@@ -24,6 +24,10 @@ import {
   gitPull, gitPush, gitFetch, gitStash, gitStashPop,
   gitBranches, gitCheckout, gitGetStatus, gitClone, isGitRepo,
 } from './tools';
+import {
+  getAllCommands, getCommand, getExecutionMode, setExecutionMode,
+  WRITE_TOOL_NAMES, WorkspaceContext,
+} from './commands';
 import { v4 as uuid } from 'uuid';
 
 let mainWindow: BrowserWindow | null = null;
@@ -297,9 +301,14 @@ function registerIPCHandlers(): void {
         }
       }
 
-      // Build combined tools array (local + MCP)
+      // Build combined tools array (local + MCP) — Sprint 12: filter by mode
+      const mode = getExecutionMode();
+      const filteredLocalTools = mode === 'plan'
+        ? LOCAL_TOOL_DEFINITIONS.filter(t => !WRITE_TOOL_NAMES.includes(t.name))
+        : LOCAL_TOOL_DEFINITIONS;
+
       const allTools: any[] = [
-        ...LOCAL_TOOL_DEFINITIONS.map(t => ({
+        ...filteredLocalTools.map(t => ({
           name: t.name,
           description: t.description,
           inputSchema: t.input_schema,
@@ -311,6 +320,13 @@ function registerIPCHandlers(): void {
       // Build enhanced system prompt with workspace context
       const wsPath = getActiveWorkspace();
       let enhancedPrompt = SYSTEM_PROMPT;
+
+      // Sprint 12: mode-aware system prompt prefix
+      if (mode === 'plan') {
+        enhancedPrompt = 'You are in PLAN MODE. You can read, search, and analyze the codebase but you CANNOT modify files, run commands, or make commits. Focus on understanding, researching, and proposing plans. When ready to implement, tell the user to switch to Build mode with /build.\n\n' + enhancedPrompt;
+      } else {
+        enhancedPrompt = 'You are in BUILD MODE. You have full access to read, write, patch, and execute commands in the workspace. You can create branches, commit changes, and run shell commands.\n\n' + enhancedPrompt;
+      }
       if (wsPath) {
         enhancedPrompt += `\n\nCurrent workspace: ${wsPath}`;
         try {
@@ -322,8 +338,11 @@ function registerIPCHandlers(): void {
         } catch { /* git context optional */ }
       }
 
-      enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${LOCAL_TOOL_DEFINITIONS.length} local + ${mcpTools.length} MCP).`;
-      enhancedPrompt += `\nLocal tools: ${LOCAL_TOOL_DEFINITIONS.map(t => t.name).join(', ')}`;
+      enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
+      enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(t => t.name).join(', ')}`;
+      if (mode === 'plan') {
+        enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`;
+      }
 
       // ─── Agentic Loop: stream → execute tools → continue ───
       let loopCount = 0;
@@ -1128,6 +1147,60 @@ function registerIPCHandlers(): void {
       const exitCode = err.status ?? 1;
       return { success: false, output: stdout, stderr, exitCode, error: stderr || err.message };
     }
+  });
+
+  // ─── Slash Commands & Mode (Sprint 12) ────────────
+
+  ipcMain.handle(IPC_CHANNELS.SLASH_COMMAND_EXECUTE, async (_event, name: string, args: string, sessionId: string) => {
+    try {
+      const cmd = getCommand(name);
+      if (!cmd) {
+        return { success: false, message: `Unknown command: /${name}` };
+      }
+
+      const wsPath = getActiveWorkspace();
+      const context: WorkspaceContext = {
+        workspacePath: wsPath || '',
+        sessionId: sessionId || 'system',
+      };
+
+      const result = await cmd.execute(args || '', context);
+
+      // If mode command returned a mode change, sync
+      if (result.data?.mode) {
+        setExecutionMode(result.data.mode);
+      }
+
+      db.logActivity(sessionId || 'system', 'slash_command', `/${name} ${args || ''}`.trim(), result.message.substring(0, 200), {
+        command: name,
+        args,
+        success: result.success,
+      });
+
+      return result;
+    } catch (err) {
+      return { success: false, message: `Command error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SLASH_COMMAND_LIST, async () => {
+    return getAllCommands().map(cmd => ({
+      name: cmd.name,
+      description: cmd.description,
+      category: cmd.category,
+    }));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODE_GET, async () => {
+    return getExecutionMode();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODE_SET, async (_event, mode: string) => {
+    if (mode === 'plan' || mode === 'build') {
+      setExecutionMode(mode);
+      return { success: true, mode };
+    }
+    return { success: false, error: 'Invalid mode. Use "plan" or "build".' };
   });
 
   ipcMain.handle(IPC_CHANNELS.TERMINAL_DETECT_SHELLS, async () => {

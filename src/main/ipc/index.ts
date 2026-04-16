@@ -105,6 +105,12 @@ export const IPC_CHANNELS = {
   // ─── Terminal (Sprint 9) ───
   TERMINAL_EXECUTE: 'terminal:execute',
   TERMINAL_DETECT_SHELLS: 'terminal:detect-shells',
+
+  // ─── Sprint 12: Slash Commands & Mode ───
+  SLASH_COMMAND_EXECUTE: 'slash:execute',
+  SLASH_COMMAND_LIST: 'slash:list',
+  MODE_GET: 'mode:get',
+  MODE_SET: 'mode:set',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
