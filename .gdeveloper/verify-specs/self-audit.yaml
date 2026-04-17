@@ -1,0 +1,52 @@
+name: "Self-Audit Dry Run"
+version: "1.0"
+description: >
+  Quick structural audit of GDeveloper's own codebase.
+  Validates that all Sprint 27.1 hardening deliverables are in place.
+  Human-authored spec — AI must NOT modify or override these assertions.
+threshold: 0.95
+tags:
+  - self-audit
+  - sprint-27.1
+assertions:
+  # 1. Write-scope enforcement exists and is wired
+  - FILE_EXISTS src/main/mode/writeScope.ts
+  - FILE_CONTAINS src/main/mode/writeScope.ts "isWriteAllowed"
+  - FILE_CONTAINS src/main/mode/writeScope.ts "parseWriteScopeArgs"
+
+  # 2. External verify-spec loader exists
+  - FILE_EXISTS src/main/orchestration/verifySpecLoader.ts
+  - FILE_CONTAINS src/main/orchestration/verifySpecLoader.ts "loadVerifySpec"
+  - FILE_CONTAINS src/main/orchestration/verifySpecLoader.ts "resolveSpecArg"
+
+  # 3. Spec files exist
+  - FILE_EXISTS .gdeveloper/verify-specs/d19-preflight.yaml
+  - FILE_EXISTS .gdeveloper/verify-specs/self-audit.yaml
+
+  # 4. TPM survival layer
+  - FILE_EXISTS src/main/providers/rateLimitLite.ts
+  - FILE_CONTAINS src/main/providers/rateLimitLite.ts "shouldThrottle"
+  - FILE_EXISTS src/main/providers/cachePolicy.ts
+  - FILE_CONTAINS src/main/providers/cachePolicy.ts "cache_control"
+
+  # 5. /status command reports enriched info
+  - FILE_CONTAINS src/main/commands/index.ts "status-full"
+
+  # 6. IPC channels wired
+  - FILE_CONTAINS src/main/ipc/index.ts "WRITE_SCOPE_GET"
+  - FILE_CONTAINS src/main/ipc/index.ts "VERIFY_SPEC_LIST"
+
+  # 7. Preload bindings
+  - FILE_CONTAINS src/preload/index.ts "getWriteScope"
+  - FILE_CONTAINS src/preload/index.ts "listVerifySpecs"
+
+  # 8. Self-audit dry-run prompt exists
+  - FILE_EXISTS prompts/self-audit-dry-run.md
+
+  # 9. Tests exist
+  - FILE_EXISTS tests/unit/writeScope.test.ts
+  - FILE_EXISTS tests/unit/verifySpecLoader.test.ts
+  - FILE_EXISTS tests/unit/rateLimitLite.test.ts
+
+  # 10. TypeScript compiles
+  - COMMAND_SUCCEEDS npx tsc --noEmit

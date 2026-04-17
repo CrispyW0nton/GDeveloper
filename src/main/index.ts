@@ -86,6 +86,18 @@ import {
 import {
   buildChangelogEntry, writeChangelog,
 } from './orchestration/changelog';
+// Sprint 27.1: Write-scope, verify-spec, TPM survival
+import {
+  getWriteScope, setWriteScope, clearWriteScope, isWriteAllowed,
+} from './mode/writeScope';
+import {
+  listVerifySpecs, resolveSpecArg, loadVerifySpec,
+} from './orchestration/verifySpecLoader';
+import {
+  shouldThrottle, parseAnthropicHeaders, record429,
+  formatRateLimitLiteSnapshot, getLastHeaders,
+} from './providers/rateLimitLite';
+import { applyCacheControl, shouldEnableCache } from './providers/cachePolicy';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -540,6 +552,20 @@ function registerIPCHandlers(): void {
           break;
         }
 
+        // Sprint 27.1: TPM survival layer — check Anthropic header-based throttle
+        const tpmCheck = shouldThrottle();
+        if (tpmCheck.shouldWait) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId,
+              type: 'text',
+              content: `\n*[TPM] ${tpmCheck.reason}*\n`,
+              fullContent: '',
+            });
+          }
+          await new Promise(resolve => setTimeout(resolve, tpmCheck.waitMs));
+        }
+
         // Sprint 24: Pre-flight rate-limit check before every API call
         const preCheck = getRateLimiter().preFlightCheck();
         if (!preCheck.ok) {
@@ -614,11 +640,13 @@ function registerIPCHandlers(): void {
           let toolResultContent: string;
           let isError = false;
 
-          // Sprint 16: Plan/Build mode enforcement — reject write tools in plan mode
-          if (mode === 'plan' && WRITE_TOOL_NAMES.includes(tc.name)) {
-            toolResultContent = `Error: Tool "${tc.name}" is disabled in Plan mode. Switch to Build mode with /build to use write tools.`;
+          // Sprint 16 + Sprint 27.1: Plan/Build mode enforcement with write-scope
+          const isWriteToolCall = WRITE_TOOL_NAMES.includes(tc.name);
+          const writeCheck = isWriteAllowed(tc.name, tc.input || {}, wsPath || '', isWriteToolCall, mode);
+          if (!writeCheck.allowed) {
+            toolResultContent = `Error: ${writeCheck.reason}`;
             isError = true;
-            emitSandboxEvent({ type: 'error', tool: tc.name, summary: `Blocked ${tc.name} (Plan mode)`, status: 'error' });
+            emitSandboxEvent({ type: 'error', tool: tc.name, summary: `Blocked ${tc.name} (${mode} mode${getWriteScope().active ? ' + write-scope' : ''})`, status: 'error' });
             toolResults.push({
               type: 'tool_result',
               tool_use_id: tc.id,
@@ -2582,6 +2610,61 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.VERIFY_HISTORY, async () => {
     return getPersistedReports();
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27.1: Write-Scope IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.WRITE_SCOPE_GET, async () => {
+    return getWriteScope();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WRITE_SCOPE_SET, async (_event, prefixes: string[]) => {
+    setWriteScope(prefixes);
+    return getWriteScope();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WRITE_SCOPE_CLEAR, async () => {
+    clearWriteScope();
+    return { success: true };
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27.1: Verify Spec IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_SPEC_LIST, async () => {
+    const ws = getActiveWorkspace() || '';
+    return listVerifySpecs(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_SPEC_LOAD, async (_event, specArg: string) => {
+    const ws = getActiveWorkspace() || '';
+    return resolveSpecArg(specArg, ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_SPEC_RUN, async (_event, specArg: string) => {
+    const ws = getActiveWorkspace() || '';
+    const loadResult = resolveSpecArg(specArg, ws);
+    if (!loadResult.success || !loadResult.spec) {
+      return { success: false, error: loadResult.error };
+    }
+    const assertionText = loadResult.spec.assertions.join('\n');
+    const report = await runAssertions(assertionText, ws);
+    return { success: true, report, spec: loadResult.spec };
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27.1: Rate Limit Lite IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_LITE_SNAPSHOT, async () => {
+    return formatRateLimitLiteSnapshot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_LITE_HEADERS, async () => {
+    return getLastHeaders();
   });
 }
 

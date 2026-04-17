@@ -300,6 +300,20 @@ const electronAPI = {
   runVerifyAssertions: (assertions: string, workspacePath?: string) => ipcRenderer.invoke('verify:run', assertions, workspacePath),
   getVerifyHistory: () => ipcRenderer.invoke('verify:history'),
 
+  // ─── Sprint 27.1: Write-Scope ──────────────────────
+  getWriteScope: () => ipcRenderer.invoke('write-scope:get'),
+  setWriteScope: (prefixes: string[]) => ipcRenderer.invoke('write-scope:set', prefixes),
+  clearWriteScope: () => ipcRenderer.invoke('write-scope:clear'),
+
+  // ─── Sprint 27.1: Verify Specs ─────────────────────
+  listVerifySpecs: () => ipcRenderer.invoke('verify-spec:list'),
+  loadVerifySpec: (specArg: string) => ipcRenderer.invoke('verify-spec:load', specArg),
+  runVerifySpec: (specArg: string) => ipcRenderer.invoke('verify-spec:run', specArg),
+
+  // ─── Sprint 27.1: Rate Limit Lite ──────────────────
+  getRateLimitLiteSnapshot: () => ipcRenderer.invoke('rate-limit-lite:snapshot'),
+  getRateLimitLiteHeaders: () => ipcRenderer.invoke('rate-limit-lite:headers'),
+
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,
   isElectron: true,

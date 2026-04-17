@@ -1,0 +1,58 @@
+name: "D19 Pre-flight Audit"
+version: "1.0"
+description: >
+  Deterministic assertions for verifying GDeveloper is ready to execute
+  the GhostRigger D19 handoff prompt. These assertions are human-authored
+  and MUST NOT be modified by the AI. The AI must only run them and report
+  results without silent fallback.
+threshold: 0.95
+tags:
+  - d19
+  - pre-flight
+  - audit
+assertions:
+  # Block 1: MCP Client exists
+  - FILE_EXISTS src/main/mcp/index.ts
+  - FILE_CONTAINS package.json "@modelcontextprotocol"
+
+  # Block 2: Plan/Build mode with write-scope
+  - FILE_EXISTS src/main/mode/writeScope.ts
+  - FILE_CONTAINS src/main/commands/index.ts "write-scope"
+
+  # Block 3: Worktree support
+  - FILE_EXISTS src/main/git/worktree.ts
+  - FILE_CONTAINS src/main/commands/index.ts "worktree"
+
+  # Block 4: Long-task orchestration
+  - FILE_EXISTS src/main/orchestration/todoManager.ts
+  - FILE_EXISTS src/main/orchestration/checkpoint.ts
+  - FILE_EXISTS src/main/orchestration/changelog.ts
+
+  # Block 5: Verify DSL with external spec support
+  - FILE_EXISTS src/main/orchestration/verifier.ts
+  - FILE_EXISTS src/main/orchestration/verifySpecLoader.ts
+  - FILE_CONTAINS src/main/orchestration/verifier.ts "runAssertions"
+
+  # Block 6: Research with source verification
+  - FILE_EXISTS src/main/research/githubSource.ts
+
+  # Block 7: Command registry completeness
+  - FILE_CONTAINS src/main/commands/index.ts "verify"
+  - FILE_CONTAINS src/main/commands/index.ts "todo"
+  - FILE_CONTAINS src/main/commands/index.ts "checkpoint"
+  - FILE_CONTAINS src/main/commands/index.ts "mcp"
+  - FILE_CONTAINS src/main/commands/index.ts "status"
+
+  # Block 8: Agent loop hardening
+  - FILE_CONTAINS src/main/index.ts "MAX_CONSECUTIVE_ERRORS"
+  - FILE_CONTAINS src/main/index.ts "maxLoops"
+
+  # TPM survival layer
+  - FILE_EXISTS src/main/providers/rateLimitLite.ts
+  - FILE_EXISTS src/main/providers/cachePolicy.ts
+
+  # TypeScript compilation
+  - COMMAND_SUCCEEDS npx tsc --noEmit
+
+  # Build check
+  - COMMAND_SUCCEEDS npx electron-vite build

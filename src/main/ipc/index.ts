@@ -260,6 +260,20 @@ export const IPC_CHANNELS = {
   // ─── Sprint 27: Verify ───
   VERIFY_RUN: 'verify:run',
   VERIFY_HISTORY: 'verify:history',
+
+  // ─── Sprint 27.1: Write-Scope ───
+  WRITE_SCOPE_GET: 'write-scope:get',
+  WRITE_SCOPE_SET: 'write-scope:set',
+  WRITE_SCOPE_CLEAR: 'write-scope:clear',
+
+  // ─── Sprint 27.1: Verify Spec ───
+  VERIFY_SPEC_LIST: 'verify-spec:list',
+  VERIFY_SPEC_LOAD: 'verify-spec:load',
+  VERIFY_SPEC_RUN: 'verify-spec:run',
+
+  // ─── Sprint 27.1: Rate Limit Lite ───
+  RATE_LIMIT_LITE_SNAPSHOT: 'rate-limit-lite:snapshot',
+  RATE_LIMIT_LITE_HEADERS: 'rate-limit-lite:headers',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];

@@ -1,10 +1,11 @@
 /**
- * Slash Command Registry — Sprint 12 + Sprint 15.2 + Sprint 17 + Sprint 27
+ * Slash Command Registry — Sprint 12 + Sprint 15.2 + Sprint 17 + Sprint 27 + Sprint 27.1
  * Defines command interfaces, registers all commands, and executes them.
  * Commands are invoked from the renderer via IPC and run in the main process.
  * Sprint 15.2: /verify-last truthfulness guard, workspace cwd alignment.
  * Sprint 17: Worktree slash commands for full worktree lifecycle management.
  * Sprint 27: Compare Agent commands + MCP, Todo, Checkpoint, CHANGELOG, Verify DSL.
+ * Sprint 27.1: Write-scope enforcement, external verify spec, enhanced /status.
  */
 
 import simpleGit, { SimpleGit } from 'simple-git';
@@ -36,6 +37,16 @@ import {
 import {
   runAssertions, formatVerifyReport, getPersistedReports,
 } from '../orchestration/verifier';
+import {
+  setWriteScope, getWriteScope, clearWriteScope, parseWriteScopeArgs,
+  isWriteAllowed,
+} from '../mode/writeScope';
+import {
+  resolveSpecArg, listVerifySpecs, type VerifySpec,
+} from '../orchestration/verifySpecLoader';
+import {
+  shouldThrottle, formatRateLimitLiteSnapshot, getLastHeaders,
+} from '../providers/rateLimitLite';
 
 // ─── Interfaces ───
 
@@ -347,22 +358,117 @@ register({
   },
 });
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  SPRINT 27.1: ENHANCED STATUS COMMAND
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+register({
+  name: 'status-full',
+  description: 'Enriched /status: repo state + mode + write-scope + rate limits + tools + todo progress.',
+  category: 'info',
+  safe: true,
+  async execute(_args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const git: SimpleGit = simpleGit(ws);
+    const lines: string[] = [];
+
+    try {
+      // Git status
+      const status = await git.status();
+      lines.push(`## GDeveloper Status Report`);
+      lines.push('');
+      lines.push('### Repository');
+      lines.push(`| | |`);
+      lines.push(`|---|---|`);
+      lines.push(`| **Branch** | \`${status.current || '(detached)'}\` |`);
+      lines.push(`| **Tracking** | \`${status.tracking || '(none)'}\` |`);
+      lines.push(`| **Ahead/Behind** | +${status.ahead} / -${status.behind} |`);
+      lines.push(`| **Working Tree** | ${status.isClean() ? 'Clean' : `Dirty (${status.modified.length}M, ${status.staged.length}S, ${status.not_added.length}U)`} |`);
+
+      // Mode & write-scope
+      const mode = getExecutionMode();
+      const scope = getWriteScope();
+      lines.push('');
+      lines.push('### Mode');
+      lines.push(`| | |`);
+      lines.push(`|---|---|`);
+      lines.push(`| **Execution Mode** | ${mode.toUpperCase()} |`);
+      lines.push(`| **Write-Scope** | ${scope.active ? '`' + scope.prefixes.join(', ') + '`' : '(none — ' + (mode === 'build' ? 'all writes allowed' : 'all writes blocked') + ')'} |`);
+
+      // Tool counts
+      const mcp = getMCPManager();
+      const mcpServers = mcp.getServers();
+      let mcpToolCount = 0;
+      for (const s of mcpServers) {
+        if (s.status === 'connected') mcpToolCount += s.tools.filter(t => t.enabled).length;
+      }
+      const localToolCount = LOCAL_TOOL_DEFINITIONS.length;
+      lines.push(`| **Local Tools** | ${localToolCount} |`);
+      lines.push(`| **MCP Tools** | ${mcpToolCount} |`);
+
+      // Rate limit
+      lines.push('');
+      lines.push('### Rate Limits');
+      const rateLimitInfo = formatRateLimitLiteSnapshot();
+      lines.push(rateLimitInfo);
+
+      // Todo progress
+      const todoProgress = getTodoProgress(ctx.sessionId);
+      if (todoProgress.total > 0) {
+        lines.push('');
+        lines.push('### Task Progress');
+        lines.push(`**${todoProgress.done}/${todoProgress.total}** tasks completed`);
+        if (todoProgress.pending.length > 0) {
+          lines.push(`Next: ${todoProgress.pending.slice(0, 3).join(', ')}`);
+        }
+      }
+
+      // Verify specs available
+      const specs = listVerifySpecs(ws);
+      if (specs.length > 0) {
+        lines.push('');
+        lines.push('### Verify Specs Available');
+        for (const s of specs) {
+          lines.push(`- **${s.name}** (${s.assertions.length} assertions, threshold ${(s.threshold * 100).toFixed(0)}%)`);
+        }
+      }
+
+      return { success: true, message: lines.join('\n') };
+    } catch (err) {
+      return { success: false, message: `Status failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  MODE COMMANDS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 register({
   name: 'plan',
-  description: 'Switch to Plan mode — read-only research, write tools disabled. Safe for exploration.',
+  description: 'Switch to Plan mode. Usage: /plan [--write-scope <path>] — read-only, or scoped writes.',
   category: 'mode',
   safe: true,
-  async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+  async execute(args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     setExecutionMode('plan');
-    return {
-      success: true,
-      message: '**Switched to PLAN MODE.** Write tools disabled. Read, search, and analyze only.\nUse `/build` when ready to implement.',
-      data: { mode: 'plan' },
-    };
+
+    // Sprint 27.1: Parse --write-scope flag
+    const scopePrefixes = parseWriteScopeArgs(args);
+    if (scopePrefixes.length > 0) {
+      setWriteScope(scopePrefixes);
+      return {
+        success: true,
+        message: `**Switched to PLAN MODE** with write-scope: \`${scopePrefixes.join(', ')}\`\nOnly file writes targeting these paths are allowed.\nUse \`/build\` to remove restrictions.`,
+        data: { mode: 'plan', writeScope: scopePrefixes },
+      };
+    } else {
+      clearWriteScope();
+      return {
+        success: true,
+        message: '**Switched to PLAN MODE.** Write tools disabled. Read, search, and analyze only.\nUse `/build` when ready to implement.',
+        data: { mode: 'plan' },
+      };
+    }
   },
 });
 
@@ -373,6 +479,7 @@ register({
   safe: true,
   async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
     setExecutionMode('build');
+    clearWriteScope(); // Sprint 27.1: clear any write-scope restriction
     return {
       success: true,
       message: '**Switched to BUILD MODE.** All tools enabled. Full read/write access.',
@@ -1389,7 +1496,7 @@ register({
 
 register({
   name: 'verify',
-  description: 'Run deterministic assertions. Usage: /verify <assertions...> (one per line). See /verify help for syntax.',
+  description: 'Run deterministic assertions. Usage: /verify <assertions...> OR /verify --spec <name|path>. See /verify help.',
   category: 'workflow',
   safe: true,
   async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
@@ -1398,6 +1505,11 @@ register({
         success: true,
         message: [
           '## /verify — Deterministic Assertion DSL',
+          '',
+          '**Usage:**',
+          '- `/verify <assertions...>` — inline assertions (one per line)',
+          '- `/verify --spec <name|path>` — load from a YAML/JSON spec file',
+          '- `/verify --spec d19-preflight` — load from .gdeveloper/verify-specs/',
           '',
           '**Assertion types:**',
           '- `FILE_EXISTS <path>`',
@@ -1421,6 +1533,43 @@ register({
     }
 
     const ws = requireWorkspace(ctx);
+
+    // Sprint 27.1: --spec flag support
+    const specMatch = args.trim().match(/^--spec\s+(.+)$/i);
+    if (specMatch) {
+      const specArg = specMatch[1].trim();
+      const loadResult = resolveSpecArg(specArg, ws);
+
+      if (!loadResult.success || !loadResult.spec) {
+        return { success: false, message: `**Spec load failed:** ${loadResult.error}` };
+      }
+
+      const spec = loadResult.spec;
+      const assertionText = spec.assertions.join('\n');
+      const report = await runAssertions(assertionText, ws);
+      const markdown = formatVerifyReport(report);
+
+      const specHeader = [
+        `## Verify Spec: ${spec.name} (v${spec.version})`,
+        spec.description ? `> ${spec.description}` : '',
+        `**Source:** \`${spec.filePath}\``,
+        `**Threshold:** ${(spec.threshold * 100).toFixed(0)}%`,
+        spec.tags.length > 0 ? `**Tags:** ${spec.tags.join(', ')}` : '',
+        '',
+      ].filter(Boolean).join('\n');
+
+      const meetsThreshold = report.score >= spec.threshold;
+      const thresholdMsg = meetsThreshold
+        ? `\n**Result: PASS** (${(report.score * 100).toFixed(0)}% >= ${(spec.threshold * 100).toFixed(0)}% threshold)`
+        : `\n**Result: FAIL** (${(report.score * 100).toFixed(0)}% < ${(spec.threshold * 100).toFixed(0)}% threshold)`;
+
+      return {
+        success: true,
+        message: specHeader + '\n' + markdown + thresholdMsg,
+        data: { verifyReport: report, spec: { name: spec.name, threshold: spec.threshold, meetsThreshold } },
+      };
+    }
+
     const report = await runAssertions(args.trim(), ws);
     const markdown = formatVerifyReport(report);
 
