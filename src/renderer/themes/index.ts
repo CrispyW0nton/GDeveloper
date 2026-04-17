@@ -10,6 +10,7 @@
  */
 
 import { ThemePreset, TOKEN_DEFINITIONS, type BackdropType } from './tokens';
+import { applyMatrixRainHue } from './applyTheme';
 
 // ─── Theme ID Enum ───
 
@@ -154,9 +155,9 @@ const matrixTokens: ThemeTokens = {
   cardBg: '#0a150a',
 
   textPrimary: '#00ff41',
-  textSecondary: '#00cc33',
-  textMuted: '#33cc33',
-  textDim: '#00cc33',
+  textSecondary: '#33dd55',
+  textMuted: '#44cc55',
+  textDim: '#33dd55',
 
   accent: '#00ff41',
   accentDim: '#00cc33',
@@ -178,11 +179,11 @@ const matrixTokens: ThemeTokens = {
 
   btnBg: 'rgba(0, 255, 65, 0.05)',
   btnBorder: 'rgba(0, 255, 65, 0.3)',
-  btnText: '#00ff41',
+  btnText: '#00ff55',
   btnPrimaryBg: 'rgba(0, 255, 65, 0.15)',
   btnPrimaryBorder: '#00ff41',
 
-  badgeTextMuted: 'rgba(255, 255, 255, 0.4)',
+  badgeTextMuted: 'rgba(255, 255, 255, 0.55)',
 
   scrollTrack: 'rgba(0, 51, 0, 0.2)',
   scrollThumb: 'rgba(0, 255, 65, 0.3)',
@@ -526,6 +527,9 @@ export function getCurrentTheme(): ThemeId {
 /**
  * Convert a ThemeTokens object + metadata into a ThemePreset.
  */
+/** Default Matrix rain green hue */
+export const DEFAULT_MATRIX_RAIN_HUE = '#00ff41';
+
 export function themeToPreset(
   id: ThemeId,
   tokens: ThemeTokens,
@@ -552,6 +556,7 @@ export function themeToPreset(
     backdropIntensity: 1.0,
     matrixRainEnabled: tokens.showMatrixRain,
     crtOverlayEnabled: tokens.showCrtOverlay,
+    matrixRainHue: id === 'matrix' ? DEFAULT_MATRIX_RAIN_HUE : DEFAULT_MATRIX_RAIN_HUE,
     createdAt: now,
     updatedAt: now,
   };
@@ -581,7 +586,11 @@ export function applyTokenMap(tokenMap: Record<string, string>, presetName?: str
 
 /**
  * Apply a ThemePreset (full preset object) to the document.
+ * Sprint 20: Also applies matrixRainHue as a CSS variable for real-time rain color.
  */
 export function applyPreset(preset: ThemePreset): void {
   applyTokenMap(preset.tokens, preset.id);
+  // Sprint 20: Apply rain hue (fallback to default for legacy presets)
+  const hue = preset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE;
+  applyMatrixRainHue(hue);
 }

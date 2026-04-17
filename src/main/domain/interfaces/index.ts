@@ -23,6 +23,8 @@ export interface LLMResponse {
   }>;
   usage: { inputTokens: number; outputTokens: number };
   stopReason: string;
+  /** Sprint 24: Parsed Anthropic rate-limit headers from response */
+  rateLimitHeaders?: Record<string, any>;
 }
 
 export interface LLMStreamChunk {

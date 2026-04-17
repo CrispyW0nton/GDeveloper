@@ -1,8 +1,10 @@
 /**
- * DiffViewer — Sprint 15.2
+ * DiffViewer — Sprint 15.2 + Sprint 18
  * Shows file changes from agent tool calls AND live git diff.
  * Tracks write_file, patch_file, multi_edit, and run_command edits.
  * Falls back to live git diff when DB diffs are empty but git status shows changes.
+ * Sprint 18: improved labels, clearer empty states, file change badges,
+ * timestamp display, source labels (AI vs Git), better contrast.
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import { SelectedRepo } from '../../store';
@@ -25,22 +27,20 @@ interface DiffRecord {
   created_at: string;
 }
 
-/** Live git diff entry (from git:diff IPC) */
-interface GitDiffEntry {
-  id: string;
-  file_path: string;
-  old_content: string;
-  new_content: string;
-  status: string;
-  created_at: string;
-  session_id: string;
-  task_id: null;
-}
-
 interface DiffLine {
   type: 'add' | 'del' | 'context';
   lineNumber: number;
   content: string;
+}
+
+function relativeTime(timestamp: string): string {
+  const now = Date.now();
+  const then = new Date(timestamp).getTime();
+  const diff = now - then;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return new Date(timestamp).toLocaleDateString();
 }
 
 export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
@@ -146,16 +146,38 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
     return lines;
   };
 
+  const addedCount = diffs.filter(d => !d.old_content).length;
+  const deletedCount = diffs.filter(d => !d.new_content).length;
+  const modifiedCount = diffs.filter(d => d.old_content && d.new_content).length;
+
   return (
     <div className="h-full flex flex-col">
-      {/* Header */}
+      {/* Header — Sprint 18: improved labels and stats */}
       <div className="px-4 py-3 border-b border-matrix-border flex items-center justify-between">
-        <h2 className="text-sm font-bold text-matrix-green glow-text-dim flex items-center gap-2">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 3v18M3 12h18"/></svg>
-          Diff View
-        </h2>
         <div className="flex items-center gap-3">
-          <span className="text-[10px] text-matrix-text-muted/30">{diffs.length} file(s) changed</span>
+          <h2 className="text-sm font-bold text-matrix-green glow-text-dim flex items-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 3v18M3 12h18"/></svg>
+            File Changes
+          </h2>
+          <span className="text-[10px] text-matrix-text-muted/40">{repo.fullName}</span>
+        </div>
+        <div className="flex items-center gap-3">
+          {diffs.length > 0 && (
+            <div className="flex gap-1.5 text-[9px]">
+              {addedCount > 0 && <span className="px-1.5 py-0.5 rounded-full border border-matrix-green/20 text-matrix-green/60 bg-matrix-green/5">{addedCount} added</span>}
+              {modifiedCount > 0 && <span className="px-1.5 py-0.5 rounded-full border border-yellow-400/20 text-yellow-400/60 bg-yellow-400/5">{modifiedCount} modified</span>}
+              {deletedCount > 0 && <span className="px-1.5 py-0.5 rounded-full border border-red-400/20 text-red-400/60 bg-red-400/5">{deletedCount} deleted</span>}
+            </div>
+          )}
+          {gitDiffText && (
+            <button
+              onClick={() => setShowGitDiff(!showGitDiff)}
+              className={`text-[9px] px-2 py-1 rounded-full border transition-all ${showGitDiff ? 'border-matrix-green/40 text-matrix-green bg-matrix-green/10 font-bold' : 'border-matrix-border/30 text-matrix-text-muted/40 hover:text-matrix-text-dim'}`}
+              title="Toggle between AI-tracked changes and live git diff"
+            >
+              {showGitDiff ? 'Showing: Git Diff' : 'Showing: AI Changes'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -163,32 +185,26 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <span className="w-5 h-5 border-2 border-matrix-green/30 border-t-matrix-green rounded-full animate-spin inline-block" />
-            <p className="text-xs text-matrix-text-muted/40 mt-2">Loading diffs...</p>
+            <p className="text-xs text-matrix-text-muted/40 mt-2">Loading changes...</p>
           </div>
         </div>
       ) : diffs.length === 0 && !gitDiffText ? (
         <div className="flex-1 flex items-center justify-center">
-          <div className="text-center">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="mx-auto text-matrix-text-muted/20 mb-3"><path d="M12 3v18M3 12h18"/></svg>
-            <p className="text-xs text-matrix-text-muted/30">No diffs recorded yet</p>
-            <p className="text-[10px] text-matrix-text-muted/20 mt-1">File changes from AI tasks will appear here</p>
+          <div className="text-center max-w-sm">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="mx-auto text-matrix-text-muted/15 mb-3"><path d="M12 3v18M3 12h18"/></svg>
+            <p className="text-sm text-matrix-text-muted/40 font-bold mb-1">No changes yet</p>
+            <p className="text-[10px] text-matrix-text-muted/25 leading-relaxed">
+              When the AI writes or edits files, the before/after diff appears here.
+              You can also toggle the live git diff to see uncommitted changes.
+            </p>
           </div>
         </div>
       ) : (
         <div className="flex-1 flex overflow-hidden">
-          {/* File List */}
+          {/* File List Sidebar */}
           <div className="w-64 border-r border-matrix-border overflow-y-auto">
-            <div className="p-2 text-[10px] text-matrix-text-muted/40 uppercase tracking-wider flex items-center justify-between">
-              <span>Changed Files ({diffs.length})</span>
-              {gitDiffText && (
-                <button
-                  onClick={() => setShowGitDiff(!showGitDiff)}
-                  className={`text-[8px] px-1.5 py-0.5 rounded border transition-colors ${showGitDiff ? 'border-matrix-green/50 text-matrix-green bg-matrix-green/10' : 'border-matrix-border/20 text-matrix-text-muted/40'}`}
-                  title="Toggle live git diff view"
-                >
-                  Git Diff
-                </button>
-              )}
+            <div className="p-2 text-[10px] text-matrix-text-muted/40 uppercase tracking-wider">
+              Changed Files ({diffs.length})
             </div>
             {diffs.map(diff => {
               const isNew = !diff.old_content;
@@ -196,19 +212,22 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
               return (
                 <button
                   key={diff.id}
-                  onClick={() => setSelectedFile(diff.file_path)}
-                  className={`w-full px-3 py-2 text-left text-xs transition-all border-b border-matrix-border/20 ${
-                    selectedFile === diff.file_path ? 'bg-matrix-green/5 border-l-2 border-l-matrix-green' : 'hover:bg-matrix-bg-hover'
+                  onClick={() => { setSelectedFile(diff.file_path); setShowGitDiff(false); }}
+                  className={`w-full px-3 py-2.5 text-left text-xs transition-all border-b border-matrix-border/10 ${
+                    selectedFile === diff.file_path && !showGitDiff ? 'bg-matrix-green/5 border-l-2 border-l-matrix-green' : 'hover:bg-matrix-bg-hover border-l-2 border-l-transparent'
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-matrix-text-dim truncate">{diff.file_path}</span>
-                    <span className={`badge text-[8px] ${
-                      isDel ? 'badge-blocked' : isNew ? 'badge-done' : 'badge-planned'
+                    <span className="text-matrix-text-dim truncate flex-1 font-mono text-[11px]">{diff.file_path}</span>
+                    <span className={`text-[8px] px-1.5 py-0.5 rounded-full border ml-2 ${
+                      isDel ? 'border-red-400/20 text-red-400/60 bg-red-400/5' :
+                      isNew ? 'border-matrix-green/20 text-matrix-green/60 bg-matrix-green/5' :
+                      'border-yellow-400/20 text-yellow-400/60 bg-yellow-400/5'
                     }`}>{isDel ? 'deleted' : isNew ? 'created' : 'modified'}</span>
                   </div>
-                  <div className="text-[10px] text-matrix-text-muted/30 mt-0.5">
-                    {new Date(diff.created_at).toLocaleTimeString()}
+                  <div className="text-[9px] text-matrix-text-muted/25 mt-0.5 flex items-center gap-1.5">
+                    <span className="inline-block w-1 h-1 rounded-full bg-blue-400/30" />
+                    AI change &middot; {relativeTime(diff.created_at)}
                   </div>
                 </button>
               );
@@ -220,8 +239,9 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
             {showGitDiff && gitDiffText ? (
               /* Sprint 15.2: Raw git diff view */
               <div className="p-1">
-                <div className="px-3 py-1 text-matrix-info/50 bg-matrix-info/5 text-[10px]">
-                  Live Git Diff (working tree)
+                <div className="px-3 py-1.5 text-matrix-info/60 bg-matrix-info/5 text-[10px] flex items-center gap-2 border-b border-matrix-info/10">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-matrix-info/40" />
+                  Live Git Diff (working tree) &mdash; shows all uncommitted changes
                 </div>
                 {gitDiffText.split('\n').map((line, li) => (
                   <div key={li} className={`px-3 py-0.5 ${
@@ -237,8 +257,9 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
               </div>
             ) : selectedDiff ? (
               <div className="p-1">
-                <div className="px-3 py-1 text-matrix-info/50 bg-matrix-info/5 text-[10px]">
-                  {selectedDiff.file_path}
+                <div className="px-3 py-1.5 text-matrix-info/60 bg-matrix-info/5 text-[10px] flex items-center gap-2 border-b border-matrix-info/10">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400/40" />
+                  {selectedDiff.file_path} &mdash; AI-tracked change
                 </div>
                 {computeDiffLines(selectedDiff).map((line, li) => (
                   <div key={li} className={`px-3 py-0.5 flex ${
@@ -250,8 +271,8 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
                 ))}
               </div>
             ) : (
-              <div className="h-full flex items-center justify-center text-matrix-text-muted/30 text-xs">
-                Select a file to view diff
+              <div className="h-full flex items-center justify-center text-matrix-text-muted/25 text-xs">
+                Select a file to view its diff
               </div>
             )}
           </div>

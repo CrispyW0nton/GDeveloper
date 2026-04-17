@@ -19,6 +19,8 @@ import { executeParallelSearch, type ParallelSearchInput } from './parallelSearc
 import { executeParallelRead, type ParallelReadInput } from './parallelRead';
 import { executeSummarizeLargeDocument, type SummarizeInput } from './summarizeLargeDocument';
 import { executeTaskPlan, getActivePlan, type TaskPlanInput } from './taskPlan';
+import * as compareEngine from '../compare';
+import type { CompareFilters, HunkAction, SyncDirection } from '../compare';
 
 // ─── Workspace State ───
 
@@ -309,7 +311,87 @@ export const LOCAL_TOOL_DEFINITIONS: LocalToolDef[] = [
       },
       required: ['action']
     }
-  }
+  },
+  // ─── Sprint 27: Compare Agent Tools ───
+  {
+    name: 'compare_file',
+    description: 'Compare two files deterministically. Returns a compact structured summary with session ID, hunk counts, added/removed lines, risk flags, and preview of first N hunks. Token-efficient: full hunk details are available on demand via compare_hunk_detail. Supports word-level diff, moved-block detection, and apply-left/right hunk actions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        left: { type: 'string', description: 'Path to left file (relative to workspace or absolute)' },
+        right: { type: 'string', description: 'Path to right file (relative to workspace or absolute)' },
+        ignore_whitespace: { type: 'boolean', description: 'Ignore whitespace differences (default: false)' },
+        context_lines: { type: 'number', description: 'Lines of context around each hunk (default: 3)' },
+      },
+      required: ['left', 'right']
+    }
+  },
+  {
+    name: 'compare_folder',
+    description: 'Compare two directories recursively. Returns compact summary with file state counts (identical, different, left-only, right-only), top changed files, and risk flags. Token-efficient: only summary and first N entries are included; detailed diffs for individual files available on demand. Supports include/exclude filters.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        left: { type: 'string', description: 'Path to left directory' },
+        right: { type: 'string', description: 'Path to right directory' },
+        recursive: { type: 'boolean', description: 'Recurse into subdirectories (default: true)' },
+        include: { type: 'string', description: 'Comma-separated include patterns (e.g. "*.ts,*.tsx")' },
+        exclude: { type: 'string', description: 'Comma-separated exclude patterns (e.g. "node_modules,dist")' },
+      },
+      required: ['left', 'right']
+    }
+  },
+  {
+    name: 'merge_3way',
+    description: 'Perform a 3-way merge with a common base file. Returns compact summary with conflict count, auto-merged hunks, and resolution status. Use this to detect and resolve merge conflicts between two file versions that share a common ancestor. Actions: apply-left, apply-right, apply-base for each conflicting hunk.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        left: { type: 'string', description: 'Path to left (ours) file' },
+        right: { type: 'string', description: 'Path to right (theirs) file' },
+        base: { type: 'string', description: 'Path to base (ancestor) file' },
+      },
+      required: ['left', 'right', 'base']
+    }
+  },
+  {
+    name: 'compare_hunk_detail',
+    description: 'Fetch full detail for a specific hunk in an existing compare session. Use this after compare_file or merge_3way to get line-by-line diff data for a specific hunk index. This is the token-efficient on-demand fetch pattern — only request hunks the user asks about.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Compare session ID from a previous compare_file or merge_3way result' },
+        hunk_index: { type: 'number', description: 'Zero-based hunk index to fetch' },
+      },
+      required: ['session_id', 'hunk_index']
+    }
+  },
+  {
+    name: 'compare_apply_hunk',
+    description: 'Apply an action to a specific hunk in a compare session. Actions: apply-left (keep left/ours version), apply-right (keep right/theirs version), apply-base (keep base version for 3-way), none (reset). Returns updated session status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Compare session ID' },
+        hunk_index: { type: 'number', description: 'Zero-based hunk index' },
+        action: { type: 'string', enum: ['apply-left', 'apply-right', 'apply-base', 'none'], description: 'Action to apply to this hunk' },
+      },
+      required: ['session_id', 'hunk_index', 'action']
+    }
+  },
+  {
+    name: 'sync_preview',
+    description: 'Generate a sync preview for a folder comparison session. Shows what files would be copied, overwritten, or deleted to synchronize the left and right directories. Includes danger flags for destructive operations. Does NOT apply changes — use this to review before syncing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Folder compare session ID from a previous compare_folder result' },
+        direction: { type: 'string', enum: ['left-to-right', 'right-to-left'], description: 'Sync direction' },
+      },
+      required: ['session_id', 'direction']
+    }
+  },
 ];
 
 // ─── Tool Executor ───
@@ -387,6 +469,64 @@ export async function executeLocalTool(
       case 'task_plan': {
         const tpResult = executeTaskPlan(args as unknown as TaskPlanInput);
         result = JSON.stringify(tpResult);
+        break;
+      }
+      // ─── Sprint 27: Compare Agent Tools ───
+      case 'compare_file': {
+        const leftPath = resolveSafe(ws, String(args.left || ''));
+        const rightPath = resolveSafe(ws, String(args.right || ''));
+        const filters: CompareFilters = {};
+        if (args.ignore_whitespace) filters.ignoreWhitespace = true;
+        if (args.context_lines) filters.contextLines = Number(args.context_lines);
+        const cmpSession = compareEngine.compareFiles(leftPath, rightPath, filters);
+        const compact = compareEngine.getCompactOutput(cmpSession.id);
+        result = JSON.stringify({ compareSession: compact });
+        break;
+      }
+      case 'compare_folder': {
+        const leftDir = resolveSafe(ws, String(args.left || ''));
+        const rightDir = resolveSafe(ws, String(args.right || ''));
+        const fFilters: CompareFilters = { recursive: args.recursive !== false };
+        if (args.include) fFilters.includePatterns = String(args.include).split(',').map(s => s.trim());
+        if (args.exclude) fFilters.excludePatterns = String(args.exclude).split(',').map(s => s.trim());
+        const fSession = compareEngine.compareFolders(leftDir, rightDir, fFilters);
+        const fCompact = compareEngine.getCompactOutput(fSession.id);
+        result = JSON.stringify({ compareSession: fCompact });
+        break;
+      }
+      case 'merge_3way': {
+        const mLeft = resolveSafe(ws, String(args.left || ''));
+        const mRight = resolveSafe(ws, String(args.right || ''));
+        const mBase = resolveSafe(ws, String(args.base || ''));
+        const mSession = compareEngine.merge3Way(mLeft, mRight, mBase);
+        const mCompact = compareEngine.getCompactOutput(mSession.id);
+        result = JSON.stringify({ compareSession: mCompact });
+        break;
+      }
+      case 'compare_hunk_detail': {
+        const hunk = compareEngine.getHunkDetail(String(args.session_id || ''), Number(args.hunk_index || 0));
+        if (!hunk) throw new Error(`Hunk not found: session=${args.session_id}, index=${args.hunk_index}`);
+        result = JSON.stringify(hunk);
+        break;
+      }
+      case 'compare_apply_hunk': {
+        const ok = compareEngine.applyHunkAction(
+          String(args.session_id || ''),
+          Number(args.hunk_index || 0),
+          String(args.action || 'none') as HunkAction
+        );
+        if (!ok) throw new Error(`Failed to apply action: session=${args.session_id}, hunk=${args.hunk_index}`);
+        const updated = compareEngine.getCompactOutput(String(args.session_id || ''));
+        result = JSON.stringify({ success: true, compareSession: updated });
+        break;
+      }
+      case 'sync_preview': {
+        const spResult = compareEngine.syncPreview(
+          String(args.session_id || ''),
+          String(args.direction || 'left-to-right') as SyncDirection
+        );
+        if (!spResult) throw new Error(`Sync preview failed: session=${args.session_id} not found or not a folder comparison`);
+        result = JSON.stringify(spResult);
         break;
       }
       default:

@@ -162,6 +162,12 @@ export interface ThemePreset {
   matrixRainEnabled: boolean;
   /** Whether CRT scanline overlay is enabled */
   crtOverlayEnabled: boolean;
+  /**
+   * Sprint 20: Matrix rain character color (hex).
+   * Default '#00ff41'. Persisted per-preset. Built-in Matrix preset uses default green.
+   * Legacy presets without this field fall back to '#00ff41'.
+   */
+  matrixRainHue: string;
   /** Timestamps */
   createdAt: string;
   updatedAt: string;

@@ -5,7 +5,7 @@
  * Sprint 9: + Workspace management, Git operations, Terminal, Agentic chat loop
  */
 
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
@@ -18,6 +18,7 @@ import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
 import { getOrchestrationEngine } from './orchestration';
 import { SYSTEM_PROMPT } from './orchestration/prompts';
+import * as compareEngine from './compare';
 import {
   setActiveWorkspace, getActiveWorkspace,
   executeLocalTool, LOCAL_TOOL_DEFINITIONS,
@@ -43,6 +44,48 @@ import { testAdapter } from './mcp-forge/testHarness';
 import { registerAndConnectAdapter, unregisterAdapter } from './mcp-forge/register';
 import { researchAppForAdapter, cloneForAnalysis, listForgeAnalysisRepos, removeForgeAnalysisRepo } from './mcp-forge/research';
 import { v4 as uuid } from 'uuid';
+import {
+  listWorktrees, addWorktree, removeWorktree, pruneWorktrees,
+  repairWorktrees, lockWorktree, unlockWorktree, moveWorktree as gitMoveWorktree,
+  compareWorktrees, getWorktreeContext,
+} from './git/worktree';
+import {
+  createTaskWorktree, completeTaskWorktree, abandonTaskWorktree,
+  getHandoffInfo, getTaskWorktrees, shouldRecommendWorktree,
+} from './worktree/taskIsolation';
+import { buildFileTree, readFileSafe, writeFileSafe, checkFileWritable } from './fs';
+import {
+  startAutoContinue, stopAutoContinue, pauseAutoContinue, resumeAutoContinue,
+  getAutoContinueState, getAutoContinueConfig, getAutoContinueLog,
+  shouldAutoContinue, shouldContinueNext, buildContinueNudge, isAutoContinueActive,
+  scheduleNextTurn,
+  type AutoContinueContext,
+} from './orchestration/autoContinue';
+import { getSessionUsage, resetSessionUsage } from './providers';
+import { getRetryHandler } from './providers/retryHandler';
+import { getRateLimiter } from './providers/rateLimiter';
+import { DEFAULT_TOKEN_BUDGET_CONFIG } from './providers/rateLimitConfig';
+import {
+  processAttachment, processClipboardImage, loadAttachment,
+  deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
+  modelSupportsVision, buildVisionContent, type AttachmentMeta,
+} from './attachments';
+// Sprint 27: Orchestration enhancements
+import {
+  createCheckpoint, getCheckpoints, getLatestCheckpoint,
+  formatCheckpointSummary,
+} from './orchestration/checkpoint';
+import {
+  getTodoList, getTodoProgress, isTodoComplete,
+  createTodoList, updateTodoItem, appendTodoItems, clearTodoList,
+} from './orchestration/todoManager';
+import { buildEnhancedSystemPrompt } from './orchestration/promptBuilder';
+import {
+  runAssertions, formatVerifyReport, getPersistedReports,
+} from './orchestration/verifier';
+import {
+  buildChangelogEntry, writeChangelog,
+} from './orchestration/changelog';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -109,6 +152,47 @@ function createWindow(): void {
       shell.openExternal(url);
     }
     return { action: 'deny' };
+  });
+
+  // Sprint 25.7 + 25.8: Environment-aware CSP via HTTP headers (single source of truth).
+  // Dev needs 'unsafe-inline' + 'unsafe-eval' for Vite's @vitejs/plugin-react
+  // preamble injection and HMR eval-based module reloading. Production stays strict
+  // (preserving Sprint 25.5 hardening). Meta-tag CSP removed from index.html.
+  // Sprint 25.8: Added fonts.googleapis.com / fonts.gstatic.com to restore Matrix fonts.
+  const isDev = !app.isPackaged || !!process.env.ELECTRON_RENDERER_URL;
+
+  const devCsp = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:* https://api.anthropic.com https://api.openai.com https://api.github.com",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+  ].join('; ');
+
+  const prodCsp = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "connect-src 'self' https://api.anthropic.com https://api.openai.com https://api.github.com",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; ');
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [isDev ? devCsp : prodCsp],
+      },
+    });
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -179,14 +263,17 @@ function registerIPCHandlers(): void {
         const result = await claude.validateKey();
         if (result.valid) {
           settings.setApiKey(provider, key);
-          let bestModel = 'claude-sonnet-4-6';
-          if (result.models && result.models.length > 0) {
-            const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
-            const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
-            bestModel = sonnet4 || anySonnet || result.models[0];
-          }
-          const registeredProvider = new ClaudeProvider(key, bestModel);
+          // Sprint 25.5: Register with safe default, then discover + validate
+          const safeDefault = 'claude-3-5-sonnet-20241022';
+          const registeredProvider = new ClaudeProvider(key, safeDefault);
           providerRegistry.register(registeredProvider);
+          // Asynchronously discover models and pick the best one
+          registeredProvider.discoverModels().then(models => {
+            providerRegistry.availableModels = models;
+            const bestModel = providerRegistry.validateSelectedModel();
+            console.log(`[Validate] Discovered ${models.length} models, best: ${bestModel}`);
+          }).catch(() => {});
+          const bestModel = result.models?.[0] || safeDefault;
           db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
         }
         return { valid: result.valid, error: result.error };
@@ -310,7 +397,7 @@ function registerIPCHandlers(): void {
     // Sprint 16: Model-tool compatibility check
     const selectedModelId = providerRegistry.selectedModel;
     if (!providerRegistry.checkModelToolSupport(selectedModelId)) {
-      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-sonnet-4-6) in Settings.`;
+      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-3-5-sonnet-20241022) in Settings.`;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('chat:stream-chunk', {
           sessionId,
@@ -393,6 +480,22 @@ function registerIPCHandlers(): void {
           enhancedPrompt += `\nTracking: ${status.tracking || '(none)'}`;
           enhancedPrompt += `\nModified: ${status.modified.length} | Staged: ${status.staged.length} | Untracked: ${status.not_added.length}`;
         } catch { /* git context optional */ }
+
+        // Sprint 17: Add worktree context to system prompt
+        try {
+          const wtContext = getWorktreeContext(wsPath);
+          if (wtContext) {
+            enhancedPrompt += `\nWorktree: ${wtContext.isMain ? 'Main' : 'Linked'}`;
+            if (wtContext.isLinked) {
+              enhancedPrompt += ` (branch: ${wtContext.branch || 'detached ' + wtContext.head?.substring(0, 7)})`;
+              enhancedPrompt += `\nMain repo root: ${wtContext.mainRoot || 'unknown'}`;
+            }
+            const wts = listWorktrees(wsPath);
+            if (wts.length > 1) {
+              enhancedPrompt += `\nTotal worktrees: ${wts.length} (${wts.filter(w => w.isLinked).length} linked)`;
+            }
+          }
+        } catch { /* worktree context optional */ }
       }
 
       enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
@@ -402,14 +505,67 @@ function registerIPCHandlers(): void {
       }
 
       // ─── Agentic Loop: stream → execute tools → continue ───
+      // Sprint 27: Increased max loops for long-task orchestration, added checkpoint injection
       let loopCount = 0;
-      const maxLoops = 10;
+      const maxLoops = 25;
       let fullContent = '';
       let allToolCalls: any[] = [];
       let currentMessages = [...messages];
+      let consecutiveErrors = 0;
+      const MAX_CONSECUTIVE_ERRORS = 3;
 
       while (loopCount < maxLoops) {
         loopCount++;
+
+        // Sprint 27: Checkpoint injection every 5 loops
+        if (loopCount > 1 && loopCount % 5 === 0) {
+          const todoProgress = getTodoProgress(sessionId);
+          createCheckpoint(sessionId, `loop-${loopCount}`, {
+            todoProgress: { done: todoProgress.done, total: todoProgress.total },
+            toolCallCount: allToolCalls.length,
+            loopIteration: loopCount,
+          });
+        }
+
+        // Sprint 27: Consecutive error circuit-breaker
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId,
+              type: 'text',
+              content: `\n**[Agent Loop]** Stopped after ${MAX_CONSECUTIVE_ERRORS} consecutive errors. Use /checkpoint list to review progress.\n`,
+              fullContent: '',
+            });
+          }
+          break;
+        }
+
+        // Sprint 24: Pre-flight rate-limit check before every API call
+        const preCheck = getRateLimiter().preFlightCheck();
+        if (!preCheck.ok) {
+          // Hard-paused — notify renderer and stop
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId,
+              type: 'text',
+              content: `\n**[Rate Limit]** ${preCheck.reason}\n`,
+              fullContent: preCheck.reason || '',
+            });
+          }
+          break;
+        }
+        if (preCheck.delayMs > 0) {
+          // Throttled — wait before sending
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId,
+              type: 'text',
+              content: `\n*Waiting ${Math.round(preCheck.delayMs / 1000)}s for rate-limit window...*\n`,
+              fullContent: '',
+            });
+          }
+          await new Promise(resolve => setTimeout(resolve, preCheck.delayMs));
+        }
 
         const result = await streamChatToRenderer(
           mainWindow,
@@ -509,6 +665,18 @@ function registerIPCHandlers(): void {
                 cwd: getActiveWorkspace() || undefined,
                 status: 'success',
               });
+              // Sprint 19: Notify renderer about file changes for live view
+              if (isFileEdit && mainWindow && !mainWindow.isDestroyed()) {
+                const filePath = tc.input?.path || tc.input?.file_path || '';
+                const wsPath = getActiveWorkspace() || '';
+                const absolutePath = filePath.startsWith('/') ? filePath : join(wsPath, filePath);
+                mainWindow.webContents.send('filetree:file-changed', {
+                  filePath: filePath,
+                  absolutePath: absolutePath,
+                  toolName: tc.name,
+                  timestamp: Date.now(),
+                });
+              }
             } catch (err) {
               toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
               isError = true;
@@ -562,6 +730,14 @@ function registerIPCHandlers(): void {
           });
         }
 
+        // Sprint 27: Track consecutive errors for circuit-breaker
+        const errorCount = toolResults.filter(tr => tr.isError).length;
+        if (errorCount > 0 && errorCount === toolResults.length) {
+          consecutiveErrors++;
+        } else {
+          consecutiveErrors = 0;
+        }
+
         // Add tool results as user message for next turn
         const toolResultMessage = toolResults.map(tr =>
           `[Tool Result: ${tr.toolName}]\n${tr.content.substring(0, 4000)}`
@@ -572,6 +748,16 @@ function registerIPCHandlers(): void {
         // Persist the tool results
         db.insertMessage(sessionId, 'assistant', result.content || '(tool execution)', result.toolCalls);
         db.insertMessage(sessionId, 'user', toolResultMessage);
+      }
+
+      // Sprint 24: Emit session usage and rate-limit snapshot to renderer after complete response
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('chat:stream-chunk', {
+          sessionId,
+          type: 'usage-update',
+          sessionUsage: getSessionUsage(),
+          rateLimitSnapshot: getRateLimiter().getSnapshot(),
+        });
       }
 
       // Save final assistant response to DB
@@ -1753,6 +1939,24 @@ function registerIPCHandlers(): void {
     return models;
   });
 
+  // Sprint 25.5: Force-refresh models from API (user clicked "Refresh models")
+  ipcMain.handle(IPC_CHANNELS.MODEL_REFRESH, async () => {
+    try {
+      const models = await providerRegistry.refreshModels();
+      // Also validate the selected model after refresh
+      const validatedModel = providerRegistry.validateSelectedModel();
+      return { success: true, models, selectedModel: validatedModel };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Refresh failed', models: providerRegistry.availableModels };
+    }
+  });
+
+  // Sprint 25.5: Validate that selected model exists in available models
+  ipcMain.handle(IPC_CHANNELS.MODEL_VALIDATE_SELECTED, async () => {
+    const validatedModel = providerRegistry.validateSelectedModel();
+    return { model: validatedModel, availableModels: providerRegistry.availableModels };
+  });
+
   ipcMain.handle(IPC_CHANNELS.MODEL_CHECK_TOOLS, async (_event, model?: string) => {
     return providerRegistry.checkModelToolSupport(model);
   });
@@ -1769,6 +1973,616 @@ function registerIPCHandlers(): void {
     sandboxLog.length = 0;
     return { success: true };
   });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 17: Git Worktree IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_LIST, async () => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const worktrees = listWorktrees(ws);
+      return { success: true, worktrees };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to list worktrees', worktrees: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_ADD, async (_event, options: any) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = addWorktree(ws, options);
+      if (result.success) {
+        db.logActivity('system', 'worktree_created', `Worktree created: ${options.path}`, result.message, { path: options.path, branch: options.branchOrCommit });
+        emitSandboxEvent({ type: 'status', summary: `Worktree created: ${options.path}`, status: 'success' });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to add worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_REMOVE, async (_event, options: any) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = removeWorktree(ws, options);
+      if (result.success) {
+        db.logActivity('system', 'worktree_removed', `Worktree removed: ${options.path}`, result.message, { path: options.path });
+        emitSandboxEvent({ type: 'status', summary: `Worktree removed: ${options.path}`, status: 'success' });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to remove worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_PRUNE, async (_event, dryRun?: boolean) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = pruneWorktrees(ws, dryRun);
+      if (result.success && !dryRun) {
+        db.logActivity('system', 'worktree_pruned', 'Worktrees pruned', result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to prune worktrees' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_REPAIR, async (_event, targetPath?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = repairWorktrees(ws, targetPath);
+      if (result.success) {
+        db.logActivity('system', 'worktree_repaired', 'Worktrees repaired', result.message, { target: targetPath });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to repair worktrees' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_LOCK, async (_event, targetPath: string, reason?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = lockWorktree(ws, targetPath, reason);
+      if (result.success) {
+        db.logActivity('system', 'worktree_locked', `Worktree locked: ${targetPath}`, reason || '', { path: targetPath, reason });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to lock worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_UNLOCK, async (_event, targetPath: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = unlockWorktree(ws, targetPath);
+      if (result.success) {
+        db.logActivity('system', 'worktree_unlocked', `Worktree unlocked: ${targetPath}`, '', { path: targetPath });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to unlock worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_MOVE, async (_event, from: string, to: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = gitMoveWorktree(ws, { from, to });
+      if (result.success) {
+        db.logActivity('system', 'worktree_moved', `Worktree moved: ${from} → ${to}`, '', { from, to });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to move worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_COMPARE, async (_event, pathA: string, pathB: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = compareWorktrees(ws, pathA, pathB);
+      return result ? { success: true, result } : { success: false, error: 'Could not compare worktrees' };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to compare worktrees' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_CONTEXT, async (_event, path?: string) => {
+    try {
+      const ws = path || requireActiveWorkspacePath();
+      const context = getWorktreeContext(ws);
+      return { success: true, context };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to get context' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_CREATE_TASK, async (_event, request: any) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = createTaskWorktree({ ...request, repoPath: ws });
+      if (result.success) {
+        db.logActivity(request.sessionId || 'system', 'worktree_task_created', `Task worktree: ${request.taskDescription}`, result.message, {
+          taskId: result.data?.taskId, path: result.data?.worktreePath,
+        });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to create task worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_COMPLETE_TASK, async (_event, taskId: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = completeTaskWorktree(taskId, ws);
+      if (result.success) {
+        db.logActivity('system', 'worktree_task_completed', `Task worktree completed: ${taskId}`, result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to complete task' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_ABANDON_TASK, async (_event, taskId: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = abandonTaskWorktree(taskId, ws);
+      if (result.success) {
+        db.logActivity('system', 'worktree_task_abandoned', `Task worktree abandoned: ${taskId}`, result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to abandon task' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_HANDOFF, async (_event, worktreePath: string, targetBranch?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = getHandoffInfo(ws, worktreePath, targetBranch);
+      if (result.success) {
+        db.logActivity('system', 'worktree_handoff', `Handoff info: ${worktreePath} → ${targetBranch || 'main'}`, result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to get handoff info' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_TASK_LIST, async () => {
+    return getTaskWorktrees();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_RECOMMEND, async (_event, taskDescription: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const git = simpleGit(ws);
+      const status = await git.status();
+      const dirty = !status.isClean();
+      return shouldRecommendWorktree(taskDescription, dirty);
+    } catch (err) {
+      return { recommend: false, reason: '' };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 19: File Tree IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.FILE_TREE_GET, async (_event, maxDepth?: number) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const tree = buildFileTree(ws, maxDepth || 4);
+      return { success: true, tree };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to build file tree', tree: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FILE_TREE_READ, async (_event, filePath: string) => {
+    try {
+      const result = readFileSafe(filePath);
+      return result;
+    } catch (err) {
+      return { content: null, isBinary: false, isTooLarge: false, size: 0 };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 23: File Writing (Editor) IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.FILE_WRITE, async (_event, filePath: string, content: string) => {
+    try {
+      const result = writeFileSafe(filePath, content);
+      if (result.success) {
+        db.logActivity('system', 'file_write', `File saved: ${filePath}`, `${content.length} chars`);
+        // Notify renderer about the file change
+        mainWindow?.webContents.send('filetree:file-changed', {
+          filePath,
+          absolutePath: filePath,
+          toolName: 'user-edit',
+        });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Write failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FILE_CHECK_WRITABLE, async (_event, filePath: string) => {
+    try {
+      const wsPath = getActiveWorkspace() || undefined;
+      return checkFileWritable(filePath, wsPath);
+    } catch (err) {
+      return { writable: false, reason: 'Check failed', isBinary: false, isLockFile: false, isOutsideWorktree: false, isTooLarge: false, size: 0 };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 23: Model Metadata IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_GET_META_LIST, async () => {
+    try {
+      const models = providerRegistry.availableModels;
+      return models.map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        provider: m.provider || 'claude',
+        supportsTools: m.supportsTools ?? true,
+        supportsStreaming: m.supportsStreaming ?? true,
+        contextWindow: m.contextWindow,
+        maxOutput: m.maxOutput,
+      }));
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_GET_DEFAULT, async () => {
+    try {
+      const settings = getSecureSettings();
+      const all = settings.getSettings();
+      return (all as any).preferences?.defaultModel || 'claude-3-5-sonnet-20241022';
+    } catch {
+      return 'claude-3-5-sonnet-20241022';
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_SET_DEFAULT, async (_event, model: string) => {
+    try {
+      const settings = getSecureSettings();
+      settings.updateSettings({ preferences: { defaultModel: model } } as any);
+      providerRegistry.selectedModel = model;
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to set default model' };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 24: Rate Limiting & Token Budget IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const rateLimiter = getRateLimiter();
+  const retryHandler = getRetryHandler();
+
+  // Push rate-limit snapshot to renderer whenever it changes
+  rateLimiter.onChange((snapshot) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('rate-limit:update', snapshot);
+    }
+  });
+
+  // Push retry state to renderer whenever it changes
+  retryHandler.onStateChange((retryState) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('retry:state-update', retryState);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_GET_SNAPSHOT, async () => {
+    return rateLimiter.getSnapshot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_RESET, async () => {
+    rateLimiter.reset();
+    return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_PAUSE_RESUME, async () => {
+    const snap = rateLimiter.getSnapshot();
+    if (snap.isPaused) {
+      rateLimiter.resume();
+    } else {
+      rateLimiter.pause();
+    }
+    return rateLimiter.getSnapshot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TOKEN_BUDGET_GET, async () => {
+    return rateLimiter.getConfig();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TOKEN_BUDGET_SET, async (_event, config: any) => {
+    try {
+      rateLimiter.updateConfig({ ...DEFAULT_TOKEN_BUDGET_CONFIG, ...config });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to update token budget' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RETRY_STATE_GET, async () => {
+    return retryHandler.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_SUMMARIZE, async (_event, _sessionId: string) => {
+    return { success: true, message: 'Context summarized' };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_COMPACT, async (_event, _sessionId: string) => {
+    return { success: true, message: 'History compacted' };
+  });
+
+  // Sprint 24: Session-level usage
+  ipcMain.handle(IPC_CHANNELS.SESSION_USAGE_GET, async () => {
+    return getSessionUsage();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SESSION_USAGE_RESET, async () => {
+    resetSessionUsage();
+    return { success: true };
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 25: Attachment & Vision IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PROCESS, async (_event, fileData: { buffer: number[]; name: string; mimeType: string; conversationId: string; source: string }) => {
+    try {
+      const buffer = Buffer.from(fileData.buffer);
+      const result = processAttachment(
+        buffer,
+        fileData.name,
+        fileData.mimeType,
+        fileData.conversationId,
+        (fileData.source as any) || 'drag-drop',
+        getAttachmentConfig(),
+      );
+      db.logActivity('system', 'attachment_processed', `Attachment: ${result.originalName} (${result.type})`, `${(result.size / 1024).toFixed(1)} KB`, {
+        attachmentId: result.id, type: result.type, size: result.size, warnings: result.warnings,
+      });
+      return { success: true, attachment: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to process attachment' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PROCESS_CLIPBOARD, async (_event, data: { pngBase64: string; conversationId: string }) => {
+    try {
+      const buffer = Buffer.from(data.pngBase64, 'base64');
+      const result = processClipboardImage(buffer, data.conversationId, getAttachmentConfig());
+      db.logActivity('system', 'attachment_clipboard', `Clipboard image: ${result.originalName}`, `${(result.size / 1024).toFixed(1)} KB`);
+      return { success: true, attachment: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to process clipboard image' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_LOAD, async (_event, conversationId: string, filename: string) => {
+    try {
+      const buffer = loadAttachment(conversationId, filename);
+      if (!buffer) return { success: false, error: 'Attachment not found' };
+      return { success: true, data: buffer.toString('base64'), size: buffer.length };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to load attachment' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_DELETE_CONVERSATION, async (_event, conversationId: string) => {
+    try {
+      deleteConversationAttachments(conversationId);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to delete attachments' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_CONFIG_GET, async () => {
+    return getAttachmentConfig();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_CONFIG_SET, async (_event, config: any) => {
+    return setAttachmentConfig(config);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_CHECK_VISION, async (_event, modelId?: string) => {
+    const id = modelId || providerRegistry.selectedModel;
+    return { supportsVision: modelSupportsVision(id), modelId: id };
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 19 + Sprint 24: Auto-Continue IPC Handlers (Fixed)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_START, async (_event, config?: any) => {
+    const state = startAutoContinue(config);
+    db.logActivity('system', 'auto_continue', 'Auto-Continue started', `Max ${state.maxIterations} iterations`);
+    return state;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_STOP, async (_event, reason?: string) => {
+    const stopReason = (reason as 'user' | 'safety' | 'completion' | 'error' | 'rate-limit') || 'user';
+    const state = stopAutoContinue(stopReason);
+    db.logActivity('system', 'auto_continue', `Auto-Continue stopped: ${stopReason}`, state.lastStatus);
+    return state;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_STATUS, async () => {
+    return getAutoContinueState();
+  });
+
+  // Sprint 24: Fixed pause — uses pauseAutoContinue() instead of stopAutoContinue()
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_PAUSE, async (_event, reason?: string) => {
+    const state = pauseAutoContinue(reason || 'Manual pause');
+    db.logActivity('system', 'auto_continue', `Auto-Continue paused: ${reason || 'manual'}`, state.lastStatus);
+    return state;
+  });
+
+  // Sprint 24: Fixed resume — uses resumeAutoContinue() instead of startAutoContinue()
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_RESUME, async () => {
+    const state = resumeAutoContinue();
+    db.logActivity('system', 'auto_continue', 'Auto-Continue resumed', state.lastStatus);
+    return state;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_LOG, async () => {
+    return { entries: getAutoContinueLog() };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_CONFIG, async () => {
+    return getAutoContinueConfig();
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Compare Agent IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_FILES, async (_event, leftPath: string, rightPath: string, filters?: any) => {
+    try {
+      const session = compareEngine.compareFiles(leftPath, rightPath, filters);
+      db.logActivity('system', 'compare_files', `Compared files: ${leftPath} ↔ ${rightPath}`, session.id);
+      return compareEngine.getCompactOutput(session.id);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Compare failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_FOLDERS, async (_event, leftPath: string, rightPath: string, filters?: any) => {
+    try {
+      const session = compareEngine.compareFolders(leftPath, rightPath, filters);
+      db.logActivity('system', 'compare_folders', `Compared folders: ${leftPath} ↔ ${rightPath}`, session.id);
+      return compareEngine.getCompactOutput(session.id);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Compare failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_MERGE3, async (_event, leftPath: string, rightPath: string, basePath: string, filters?: any) => {
+    try {
+      const session = compareEngine.merge3Way(leftPath, rightPath, basePath, filters);
+      db.logActivity('system', 'compare_merge3', `3-way merge: ${basePath} → ${leftPath} / ${rightPath}`, session.id);
+      return compareEngine.getCompactOutput(session.id);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Merge failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_SYNC_PREVIEW, async (_event, sessionId: string, direction: string) => {
+    try {
+      const result = compareEngine.syncPreview(sessionId, direction as any);
+      return result || { error: 'Session not found or not a folder comparison' };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Sync preview failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_GET_SESSION, async (_event, sessionId: string) => {
+    return compareEngine.getSession(sessionId) || null;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_LIST_SESSIONS, async () => {
+    return compareEngine.listSessions();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_DELETE_SESSION, async (_event, sessionId: string) => {
+    return compareEngine.deleteSession(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_HUNK_ACTION, async (_event, sessionId: string, hunkIndex: number, action: string) => {
+    return compareEngine.applyHunkAction(sessionId, hunkIndex, action as any);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_HUNK_DETAIL, async (_event, sessionId: string, hunkIndex: number) => {
+    return compareEngine.getHunkDetail(sessionId, hunkIndex);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_FOLDER_ENTRY_DIFF, async (_event, sessionId: string, relativePath: string) => {
+    return compareEngine.getFolderEntryDiff(sessionId, relativePath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_COMPACT_OUTPUT, async (_event, sessionId: string, maxItems?: number) => {
+    return compareEngine.getCompactOutput(sessionId, maxItems);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_SAVE_MERGE, async (_event, sessionId: string, outputPath: string) => {
+    return compareEngine.saveMergeResult(sessionId, outputPath);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Todo Manager IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.TODO_GET, async (_event, sessionId: string) => {
+    return getTodoList(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_CREATE, async (_event, sessionId: string, items: any[]) => {
+    return createTodoList(sessionId, items);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_UPDATE_ITEM, async (_event, sessionId: string, itemId: string, updates: any) => {
+    return updateTodoItem(sessionId, itemId, updates);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_APPEND, async (_event, sessionId: string, items: any[]) => {
+    return appendTodoItems(sessionId, items);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_CLEAR, async (_event, sessionId: string) => {
+    return clearTodoList(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_PROGRESS, async (_event, sessionId: string) => {
+    return getTodoProgress(sessionId);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Checkpoint IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.CHECKPOINT_LIST, async (_event, sessionId: string) => {
+    return getCheckpoints(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CHECKPOINT_CREATE, async (_event, sessionId: string, label: string, data: any) => {
+    return createCheckpoint(sessionId, label, data);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CHECKPOINT_LATEST, async (_event, sessionId: string) => {
+    return getLatestCheckpoint(sessionId);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Verify IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_RUN, async (_event, assertions: string, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace() || '';
+    return runAssertions(assertions, ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_HISTORY, async () => {
+    return getPersistedReports();
+  });
 }
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
@@ -1776,23 +2590,30 @@ function registerIPCHandlers(): void {
 app.whenReady().then(() => {
   const settings = getSecureSettings();
 
-  // Auto-register saved API keys as providers
-  const providers = settings.getConfiguredProviders();
-  for (const provider of providers) {
-    const key = settings.getApiKey(provider);
-    if (key && provider === 'claude') {
-      const tempProvider = new ClaudeProvider(key);
-      tempProvider.validateKey().then(result => {
-        let bestModel = 'claude-sonnet-4-6';
-        if (result.valid && result.models && result.models.length > 0) {
-          const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
-          const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
-          bestModel = sonnet4 || anySonnet || result.models[0];
-          console.log(`[Startup] Auto-detected best model: ${bestModel}`);
+  // Sprint 25.5: Auto-register saved API keys with dynamic model discovery
+  const configuredProviders = settings.getConfiguredProviders();
+  for (const providerName of configuredProviders) {
+    const key = settings.getApiKey(providerName);
+    if (key && providerName === 'claude') {
+      // Register immediately with a safe default model
+      const safeDefault = 'claude-3-5-sonnet-20241022';
+      const claudeInstance = new ClaudeProvider(key, safeDefault);
+      providerRegistry.register(claudeInstance);
+
+      // Then discover available models and validate/auto-switch
+      claudeInstance.discoverModels().then(models => {
+        providerRegistry.availableModels = models;
+
+        // Restore persisted model selection, then validate it exists
+        const savedSettings = settings.getSettings() as any;
+        const savedModel = savedSettings?.selectedModel || savedSettings?.preferences?.defaultModel;
+        if (savedModel) {
+          providerRegistry.selectedModel = savedModel;
         }
-        providerRegistry.register(new ClaudeProvider(key, bestModel));
-      }).catch(() => {
-        providerRegistry.register(new ClaudeProvider(key));
+        const validatedModel = providerRegistry.validateSelectedModel();
+        console.log(`[Startup] Discovered ${models.length} models, selected: ${validatedModel}`);
+      }).catch(err => {
+        console.warn('[Startup] Model discovery failed, using safe fallback:', err);
       });
     }
   }

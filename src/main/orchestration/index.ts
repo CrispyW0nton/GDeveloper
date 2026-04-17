@@ -12,6 +12,9 @@ import {
   VERIFIER_PROMPT, REPAIR_PROMPT, SUMMARIZER_PROMPT,
   COMPACTOR_PROMPT, buildPrompt
 } from './prompts';
+import { getContextManager, type ContextMessage } from '../providers/contextManager';
+import { getToolResultBudget } from '../providers/toolResultBudget';
+import { getRateLimiter } from '../providers/rateLimiter';
 
 // ─── State Machine Transitions ───
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -33,6 +36,10 @@ export interface BudgetConfig {
   maxRetries: number;          // 2-3
   tokenBudget: number;         // 500000
   timeoutMs: number;           // 600000 (10 min)
+  // Sprint 21 additions
+  maxParallelToolCalls: number; // concurrency cap
+  maxContextTokens: number;     // per-request context window cap
+  maxToolResultTokens: number;  // per-tool-result token cap
 }
 
 const DEFAULT_BUDGET: BudgetConfig = {
@@ -40,7 +47,11 @@ const DEFAULT_BUDGET: BudgetConfig = {
   maxToolCallsPerTurn: 10,
   maxRetries: 3,
   tokenBudget: 500000,
-  timeoutMs: 600000
+  timeoutMs: 600000,
+  // Sprint 21
+  maxParallelToolCalls: 2,
+  maxContextTokens: 80000,
+  maxToolResultTokens: 2500,
 };
 
 // ─── Loop Detection ───
@@ -155,7 +166,36 @@ export class OrchestrationEngine implements IOrchestrationEngine {
     if (task.retryCount >= this.budget.maxRetries) {
       return { withinBudget: false, reason: `Retry limit exceeded (${task.retryCount}/${this.budget.maxRetries})` };
     }
+    // Sprint 21: Check rate limiter before proceeding
+    const rateLimiter = getRateLimiter();
+    const snap = rateLimiter.getSnapshot();
+    if (snap.isPaused) {
+      return { withinBudget: false, reason: 'Rate limit pause active. Wait for usage to drop.' };
+    }
     return { withinBudget: true };
+  }
+
+  // ─── Sprint 21: Context-aware message building ───
+  buildContextMessages(
+    systemPrompt: string,
+    messages: ContextMessage[],
+    taskPlan?: string,
+    workspaceMeta?: string,
+  ) {
+    const ctxMgr = getContextManager();
+    return ctxMgr.buildContext(systemPrompt, messages, taskPlan, undefined, workspaceMeta);
+  }
+
+  // ─── Sprint 21: Tool result processing ───
+  processToolResult(toolName: string, rawResult: string, toolCallId?: string) {
+    const trb = getToolResultBudget();
+    return trb.processToolResult(toolName, rawResult, toolCallId);
+  }
+
+  // ─── Sprint 21: Plan parallel tool call batches ───
+  planToolBatches(pendingTools: Array<{ name: string; id: string; input: any }>) {
+    const trb = getToolResultBudget();
+    return trb.planToolCallBatches(pendingTools);
   }
 
   // ─── Task Lifecycle ───

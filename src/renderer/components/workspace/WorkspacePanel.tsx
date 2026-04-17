@@ -42,7 +42,9 @@ interface BranchInfo {
   remote: string[];
 }
 
-type SubView = 'list' | 'clone' | 'git' | 'commit' | 'scan' | 'environment' | 'manage';
+import WorktreePanel from '../worktree/WorktreePanel';
+
+type SubView = 'list' | 'clone' | 'git' | 'commit' | 'scan' | 'environment' | 'manage' | 'worktrees';
 
 export default function WorkspacePanel({
   activeWorkspace, workspaces, githubConnected, onWorkspaceActivated, onRefreshWorkspaces
@@ -278,6 +280,7 @@ export default function WorkspacePanel({
             {activeWorkspace && <TabBtn active={subView === 'git'} onClick={() => setSubView('git')}>Git</TabBtn>}
             {activeWorkspace && <TabBtn active={subView === 'commit'} onClick={() => setSubView('commit')}>Commit</TabBtn>}
             {activeWorkspace && <TabBtn active={subView === 'environment'} onClick={() => setSubView('environment')}>Env</TabBtn>}
+            {activeWorkspace && <TabBtn active={subView === 'worktrees'} onClick={() => setSubView('worktrees')}>🌳 Worktrees</TabBtn>}
             <TabBtn active={subView === 'manage'} onClick={() => setSubView('manage')}>Manage</TabBtn>
           </div>
         </div>
@@ -321,6 +324,23 @@ export default function WorkspacePanel({
         {subView === 'git' && renderGitToolbar()}
         {subView === 'commit' && renderCommitPanel()}
         {subView === 'environment' && renderEnvironmentView()}
+        {subView === 'worktrees' && activeWorkspace && (
+          <WorktreePanel
+            workspacePath={activeWorkspace.local_path}
+            sessionId={`session-ws-${activeWorkspace.id}`}
+            onSwitchWorktree={async (path) => {
+              try {
+                const result = await api.openLocalWorkspace(path, path.split('/').pop() || path.split('\\').pop() || 'worktree');
+                if (result.success) {
+                  const ws = await api.getWorkspace(result.id);
+                  if (ws) onWorkspaceActivated(ws);
+                }
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Failed to open worktree');
+              }
+            }}
+          />
+        )}
         {subView === 'manage' && renderManageView()}
       </div>
     </div>

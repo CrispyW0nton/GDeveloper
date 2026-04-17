@@ -9,6 +9,81 @@
 import { ILLMProvider, LLMResponse, LLMStreamChunk } from '../domain/interfaces';
 import { ToolDefinition } from '../domain/entities';
 import { BrowserWindow } from 'electron';
+import { getRateLimiter } from './rateLimiter';
+import { getRetryHandler, parseRateLimitHeaders } from './retryHandler';
+import { getToolResultBudget } from './toolResultBudget';
+import { getContextManager, estimateTokens, type ContextMessage } from './contextManager';
+
+// Sprint 24: Session-level cumulative token counters
+// Sprint 27: Added prompt-caching fields
+export interface SessionUsage {
+  cumulativeInputTokens: number;
+  cumulativeOutputTokens: number;
+  cumulativeRequests: number;
+  lastInputTokens: number;
+  lastOutputTokens: number;
+  contextWindowUsed: number;
+  contextWindowMax: number;
+  // Sprint 27: Prompt caching metrics
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  cacheHits: number;
+  cacheMisses: number;
+  estimatedSavings: number; // estimated tokens saved via caching
+  promptCachingEnabled: boolean;
+}
+
+let sessionUsage: SessionUsage = {
+  cumulativeInputTokens: 0,
+  cumulativeOutputTokens: 0,
+  cumulativeRequests: 0,
+  lastInputTokens: 0,
+  lastOutputTokens: 0,
+  contextWindowUsed: 0,
+  contextWindowMax: 200_000,
+  cacheCreationTokens: 0,
+  cacheReadTokens: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  estimatedSavings: 0,
+  promptCachingEnabled: true,
+};
+
+export function getSessionUsage(): SessionUsage { return { ...sessionUsage }; }
+export function resetSessionUsage(): void {
+  sessionUsage = { cumulativeInputTokens: 0, cumulativeOutputTokens: 0, cumulativeRequests: 0, lastInputTokens: 0, lastOutputTokens: 0, contextWindowUsed: 0, contextWindowMax: 200_000, cacheCreationTokens: 0, cacheReadTokens: 0, cacheHits: 0, cacheMisses: 0, estimatedSavings: 0, promptCachingEnabled: true };
+}
+export function setPromptCachingEnabled(enabled: boolean): void {
+  sessionUsage.promptCachingEnabled = enabled;
+}
+export function isPromptCachingEnabled(): boolean {
+  return sessionUsage.promptCachingEnabled;
+}
+
+function recordSessionUsage(input: number, output: number, contextMax?: number): void {
+  sessionUsage.lastInputTokens = input;
+  sessionUsage.lastOutputTokens = output;
+  sessionUsage.cumulativeInputTokens += input;
+  sessionUsage.cumulativeOutputTokens += output;
+  sessionUsage.cumulativeRequests += 1;
+  sessionUsage.contextWindowUsed = sessionUsage.cumulativeInputTokens;
+  if (contextMax) sessionUsage.contextWindowMax = contextMax;
+}
+
+/** Sprint 27: Record prompt caching metrics from Anthropic response usage */
+function recordCacheUsage(usage: any): void {
+  const cacheCreation = usage?.cache_creation_input_tokens || 0;
+  const cacheRead = usage?.cache_read_input_tokens || 0;
+  sessionUsage.cacheCreationTokens += cacheCreation;
+  sessionUsage.cacheReadTokens += cacheRead;
+  if (cacheRead > 0) {
+    sessionUsage.cacheHits++;
+    // Anthropic caches reduce cost: cache read tokens are 90% cheaper
+    sessionUsage.estimatedSavings += Math.round(cacheRead * 0.9);
+  } else if (cacheCreation > 0) {
+    sessionUsage.cacheMisses++;
+  }
+}
 
 // Sprint 16: Model metadata
 export interface ModelInfo {
@@ -21,11 +96,13 @@ export interface ModelInfo {
   maxOutput?: number;
 }
 
-// Known Anthropic models with tool support
-const KNOWN_CLAUDE_MODELS: ModelInfo[] = [
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 4096 },
-  { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 16384 },
-  { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 32768 },
+/**
+ * Sprint 25.5: Safe fallback model list.
+ * These IDs are known to exist on the Anthropic API as of 2025.
+ * The app dynamically fetches the real list from /v1/models on startup
+ * and caches it. This list is ONLY used if the API call fails.
+ */
+const SAFE_FALLBACK_MODELS: ModelInfo[] = [
   { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
   { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
   { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 4096 },
@@ -33,6 +110,60 @@ const KNOWN_CLAUDE_MODELS: ModelInfo[] = [
 
 // Models that DO NOT support tool use
 const NO_TOOL_SUPPORT = new Set(['claude-2.0', 'claude-2.1', 'claude-instant-1.2']);
+
+/**
+ * Sprint 25.5: Dynamic model cache with timestamp.
+ * Prevents repeated /v1/models calls. TTL = 30 minutes.
+ */
+interface ModelCache {
+  models: ModelInfo[];
+  fetchedAt: number;
+  apiKeyHash: string; // track which key was used
+}
+
+const MODEL_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+let _modelCache: ModelCache | null = null;
+
+function isModelCacheValid(apiKeyHash: string): boolean {
+  if (!_modelCache) return false;
+  if (_modelCache.apiKeyHash !== apiKeyHash) return false;
+  return (Date.now() - _modelCache.fetchedAt) < MODEL_CACHE_TTL_MS;
+}
+
+function setModelCache(models: ModelInfo[], apiKeyHash: string): void {
+  _modelCache = { models, fetchedAt: Date.now(), apiKeyHash };
+}
+
+function getModelCache(): ModelInfo[] | null {
+  return _modelCache?.models || null;
+}
+
+function invalidateModelCache(): void {
+  _modelCache = null;
+}
+
+/** Simple hash for cache keying (not cryptographic) */
+function hashKey(key: string): string {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) {
+    h = ((h << 5) - h + key.charCodeAt(i)) | 0;
+  }
+  return 'k' + Math.abs(h).toString(36);
+}
+
+/** Convert an API model ID to a human-friendly display name */
+function modelIdToDisplayName(id: string): string {
+  // e.g. "claude-3-5-sonnet-20241022" -> "Claude 3.5 Sonnet"
+  return id
+    .replace(/^claude-/, 'Claude ')
+    .replace(/-/g, ' ')
+    .replace(/(\d{8,})/, '') // strip date suffixes
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/claude (\d) (\d)/i, (_, a, b) => `Claude ${a}.${b}`)
+    .replace(/\b\w/g, c => c.toUpperCase())
+    || id;
+}
 
 // ─── Claude Provider (Real Anthropic API) ───
 export class ClaudeProvider implements ILLMProvider {
@@ -95,7 +226,9 @@ export class ClaudeProvider implements ILLMProvider {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Anthropic API error ${response.status}: ${errText}`);
+      const err: any = new Error(`Anthropic API error ${response.status}: ${errText}`);
+      err.status = response.status;
+      throw err;
     }
 
     const data = await response.json();
@@ -115,14 +248,27 @@ export class ClaudeProvider implements ILLMProvider {
       }
     }
 
+    // Sprint 21 + Sprint 24: Record usage in rate limiter + session counters
+    const inputTokens = data.usage?.input_tokens || 0;
+    const outputTokens = data.usage?.output_tokens || 0;
+    getRateLimiter().recordUsage(inputTokens, outputTokens);
+    recordSessionUsage(inputTokens, outputTokens);
+
+    // Sprint 24: Parse rate-limit headers from response for authoritative tracking
+    const responseHeaders: Record<string, string> = {};
+    if (response.headers) {
+      response.headers.forEach((value: string, key: string) => {
+        responseHeaders[key] = value;
+      });
+    }
+    const parsedHeaders = parseRateLimitHeaders(responseHeaders);
+
     return {
       content,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      usage: {
-        inputTokens: data.usage?.input_tokens || 0,
-        outputTokens: data.usage?.output_tokens || 0
-      },
-      stopReason: data.stop_reason || 'end_turn'
+      usage: { inputTokens, outputTokens },
+      stopReason: data.stop_reason || 'end_turn',
+      rateLimitHeaders: parsedHeaders,
     };
   }
 
@@ -173,7 +319,9 @@ export class ClaudeProvider implements ILLMProvider {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Anthropic API error ${response.status}: ${errText}`);
+      const err: any = new Error(`Anthropic API error ${response.status}: ${errText}`);
+      err.status = response.status;
+      throw err;
     }
 
     const reader = response.body?.getReader();
@@ -184,6 +332,7 @@ export class ClaudeProvider implements ILLMProvider {
     const decoder = new TextDecoder();
     let buffer = '';
     let currentToolCall: { id: string; name: string; inputJson: string } | null = null;
+    let fullStreamContent = '';
 
     try {
       while (true) {
@@ -212,6 +361,7 @@ export class ClaudeProvider implements ILLMProvider {
               }
             } else if (event.type === 'content_block_delta') {
               if (event.delta?.type === 'text_delta') {
+                fullStreamContent += event.delta.text || '';
                 yield { type: 'text', content: event.delta.text };
               } else if (event.delta?.type === 'input_json_delta' && currentToolCall) {
                 currentToolCall.inputJson += event.delta.partial_json || '';
@@ -233,7 +383,14 @@ export class ClaudeProvider implements ILLMProvider {
             } else if (event.type === 'message_stop') {
               // End
             } else if (event.type === 'message_delta') {
-              // Contains usage info
+              // Sprint 24: Capture actual usage from message_delta
+              if (event.usage) {
+                const streamInput = event.usage.input_tokens || 0;
+                const streamOutput = event.usage.output_tokens || 0;
+                if (streamInput > 0 || streamOutput > 0) {
+                  recordSessionUsage(streamInput, streamOutput);
+                }
+              }
             }
           } catch {
             // Skip unparseable lines
@@ -242,6 +399,20 @@ export class ClaudeProvider implements ILLMProvider {
       }
     } finally {
       reader.releaseLock();
+    }
+
+    // Sprint 24: Record streaming usage with estimates (message_delta may have recorded actuals)
+    const streamInputTokens = estimateTokens(filteredMessages.map(m => m.content).join(' '));
+    const streamOutputTokens = estimateTokens(fullStreamContent || '');
+    getRateLimiter().recordUsage(streamInputTokens, streamOutputTokens);
+    recordSessionUsage(streamInputTokens, streamOutputTokens);
+
+    // Sprint 24: Parse rate-limit headers from streaming response
+    const streamRespHeaders: Record<string, string> = {};
+    if (response.headers) {
+      response.headers.forEach((value: string, key: string) => {
+        streamRespHeaders[key] = value;
+      });
     }
 
     yield { type: 'done' };
@@ -262,10 +433,23 @@ export class ClaudeProvider implements ILLMProvider {
   }
 
   /**
-   * Sprint 16: Discover available models from the API.
-   * Falls back to known models if the API call fails.
+   * Sprint 25.5: Discover available models from the API with caching.
+   * Uses cache if fresh; fetches from /v1/models otherwise.
+   * Falls back to SAFE_FALLBACK_MODELS only if the API call fails.
+   * @param forceRefresh - bypass cache (e.g. user clicked "Refresh models")
    */
-  async discoverModels(): Promise<ModelInfo[]> {
+  async discoverModels(forceRefresh = false): Promise<ModelInfo[]> {
+    const keyHash = hashKey(this.apiKey);
+
+    // Return cache if valid and not forcing refresh
+    if (!forceRefresh && isModelCacheValid(keyHash)) {
+      const cached = getModelCache();
+      if (cached && cached.length > 0) {
+        console.log(`[ClaudeProvider] Returning ${cached.length} cached models`);
+        return cached;
+      }
+    }
+
     try {
       const response = await fetch(`${this.baseUrl}/v1/models`, {
         method: 'GET',
@@ -278,23 +462,36 @@ export class ClaudeProvider implements ILLMProvider {
       if (response.ok) {
         const data = await response.json();
         const apiModels: ModelInfo[] = (data.data || []).map((m: any) => {
-          const known = KNOWN_CLAUDE_MODELS.find(k => k.id === m.id);
-          return known || {
+          const fallback = SAFE_FALLBACK_MODELS.find(k => k.id === m.id);
+          return {
             id: m.id as string,
-            name: (m.display_name || m.id) as string,
+            name: (m.display_name || fallback?.name || modelIdToDisplayName(m.id)) as string,
             provider: 'claude',
             supportsTools: !NO_TOOL_SUPPORT.has(m.id),
             supportsStreaming: true,
-            contextWindow: m.context_window || undefined,
-            maxOutput: m.max_output || undefined,
+            contextWindow: m.context_window || fallback?.contextWindow || undefined,
+            maxOutput: m.max_output || fallback?.maxOutput || undefined,
           };
         });
-        return apiModels.length > 0 ? apiModels : KNOWN_CLAUDE_MODELS;
+
+        if (apiModels.length > 0) {
+          setModelCache(apiModels, keyHash);
+          console.log(`[ClaudeProvider] Discovered ${apiModels.length} models from API, cached`);
+          return apiModels;
+        }
       }
-    } catch {
-      // Fall back to known models
+    } catch (err) {
+      console.warn('[ClaudeProvider] Model discovery failed, using fallback:', err);
     }
-    return KNOWN_CLAUDE_MODELS;
+
+    // Use cached models if available (even if expired) before falling back
+    const staleCache = getModelCache();
+    if (staleCache && staleCache.length > 0) {
+      console.log('[ClaudeProvider] Using stale cache as fallback');
+      return staleCache;
+    }
+
+    return SAFE_FALLBACK_MODELS;
   }
 
   /**
@@ -302,7 +499,9 @@ export class ClaudeProvider implements ILLMProvider {
    */
   static modelSupportsTools(modelId: string): boolean {
     if (NO_TOOL_SUPPORT.has(modelId)) return false;
-    const known = KNOWN_CLAUDE_MODELS.find(m => m.id === modelId);
+    // Check cache first, then fallback list
+    const cached = getModelCache();
+    const known = cached?.find(m => m.id === modelId) || SAFE_FALLBACK_MODELS.find(m => m.id === modelId);
     if (known) return known.supportsTools;
     // Assume newer models support tools
     return true;
@@ -361,11 +560,11 @@ export class ClaudeProvider implements ILLMProvider {
   }
 }
 
-// ─── Provider Registry (Sprint 16: model state) ───
+// ─── Provider Registry (Sprint 16 + Sprint 25.5: dynamic model state) ───
 class ProviderRegistry {
   private providers: Map<string, ILLMProvider> = new Map();
-  private _selectedModel: string = 'claude-sonnet-4-6';
-  private _availableModels: ModelInfo[] = KNOWN_CLAUDE_MODELS;
+  private _selectedModel: string = 'claude-3-5-sonnet-20241022';
+  private _availableModels: ModelInfo[] = SAFE_FALLBACK_MODELS;
   private _modelDiscovered: boolean = false;
 
   register(provider: ILLMProvider): void {
@@ -388,7 +587,7 @@ class ProviderRegistry {
     this.providers.delete(name);
   }
 
-  // Sprint 16: Model selection
+  // Sprint 16 + Sprint 25.5: Model selection with validation
   get selectedModel(): string { return this._selectedModel; }
   set selectedModel(model: string) {
     this._selectedModel = model;
@@ -404,13 +603,50 @@ class ProviderRegistry {
 
   get modelDiscovered(): boolean { return this._modelDiscovered; }
 
-  async discoverModels(): Promise<ModelInfo[]> {
+  /**
+   * Sprint 25.5: Discover models with caching and refresh support.
+   * @param forceRefresh - bypass cache (user clicked "Refresh models")
+   */
+  async discoverModels(forceRefresh = false): Promise<ModelInfo[]> {
     const provider = this.getDefault() as ClaudeProvider | undefined;
     if (provider && typeof provider.discoverModels === 'function') {
-      this._availableModels = await provider.discoverModels();
+      this._availableModels = await provider.discoverModels(forceRefresh);
       this._modelDiscovered = true;
     }
     return this._availableModels;
+  }
+
+  /**
+   * Sprint 25.5: Force-refresh the model cache (e.g. from "Refresh" button).
+   */
+  async refreshModels(): Promise<ModelInfo[]> {
+    invalidateModelCache();
+    return this.discoverModels(true);
+  }
+
+  /**
+   * Sprint 25.5: Validate that the selected model exists in available models.
+   * If not, auto-switch to the best available model.
+   * Returns the validated model ID.
+   */
+  validateSelectedModel(): string {
+    const current = this._selectedModel;
+    const isValid = this._availableModels.some(m => m.id === current);
+    if (isValid) return current;
+
+    // Auto-switch: prefer sonnet, then haiku, then first available
+    const sonnet = this._availableModels.find(m => m.id.includes('sonnet'));
+    const haiku = this._availableModels.find(m => m.id.includes('haiku'));
+    const best = sonnet || haiku || this._availableModels[0];
+
+    if (best) {
+      console.warn(`[ProviderRegistry] Model "${current}" not available. Auto-switching to "${best.id}".`);
+      this.selectedModel = best.id;
+      return best.id;
+    }
+
+    console.warn(`[ProviderRegistry] No available models. Keeping "${current}".`);
+    return current;
   }
 
   checkModelToolSupport(modelId?: string): boolean {

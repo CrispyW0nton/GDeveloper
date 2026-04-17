@@ -176,6 +176,8 @@ const electronAPI = {
   getSelectedModel: () => ipcRenderer.invoke('model:get-selected'),
   setSelectedModel: (model: string) => ipcRenderer.invoke('model:set-selected', model),
   discoverModels: () => ipcRenderer.invoke('model:discover'),
+  refreshModels: () => ipcRenderer.invoke('model:refresh'),                     // Sprint 25.5
+  validateSelectedModel: () => ipcRenderer.invoke('model:validate-selected'),   // Sprint 25.5
   checkModelToolSupport: (model?: string) => ipcRenderer.invoke('model:check-tools', model),
 
   // ─── Sprint 16: Sandbox Monitor ───────────────────
@@ -186,6 +188,117 @@ const electronAPI = {
     ipcRenderer.on('sandbox:event', handler);
     return () => ipcRenderer.removeListener('sandbox:event', handler);
   },
+
+  // ─── Sprint 17: Git Worktrees ──────────────────────
+  worktreeList: () => ipcRenderer.invoke('worktree:list'),
+  worktreeAdd: (options: any) => ipcRenderer.invoke('worktree:add', options),
+  worktreeRemove: (options: any) => ipcRenderer.invoke('worktree:remove', options),
+  worktreePrune: (dryRun?: boolean) => ipcRenderer.invoke('worktree:prune', dryRun),
+  worktreeRepair: (targetPath?: string) => ipcRenderer.invoke('worktree:repair', targetPath),
+  worktreeLock: (targetPath: string, reason?: string) => ipcRenderer.invoke('worktree:lock', targetPath, reason),
+  worktreeUnlock: (targetPath: string) => ipcRenderer.invoke('worktree:unlock', targetPath),
+  worktreeMove: (from: string, to: string) => ipcRenderer.invoke('worktree:move', from, to),
+  worktreeCompare: (pathA: string, pathB: string) => ipcRenderer.invoke('worktree:compare', pathA, pathB),
+  worktreeContext: (path?: string) => ipcRenderer.invoke('worktree:context', path),
+  worktreeCreateTask: (request: any) => ipcRenderer.invoke('worktree:create-task', request),
+  worktreeCompleteTask: (taskId: string) => ipcRenderer.invoke('worktree:complete-task', taskId),
+  worktreeAbandonTask: (taskId: string) => ipcRenderer.invoke('worktree:abandon-task', taskId),
+  worktreeHandoff: (worktreePath: string, targetBranch?: string) => ipcRenderer.invoke('worktree:handoff', worktreePath, targetBranch),
+  worktreeTaskList: () => ipcRenderer.invoke('worktree:task-list'),
+  worktreeRecommend: (taskDescription: string) => ipcRenderer.invoke('worktree:recommend', taskDescription),
+
+  // ─── Sprint 19: File Tree ─────────────────────────
+  getFileTree: (maxDepth?: number) => ipcRenderer.invoke('filetree:get', maxDepth),
+  readFileContent: (filePath: string) => ipcRenderer.invoke('filetree:read-file', filePath),
+
+  // ─── Sprint 23: File Writing (Editor) ─────────────
+  writeFileContent: (filePath: string, content: string) => ipcRenderer.invoke('filetree:write-file', filePath, content),
+  checkFileWritable: (filePath: string) => ipcRenderer.invoke('filetree:check-writable', filePath),
+
+  // ─── Sprint 23: Model Metadata ────────────────────
+  getDefaultModel: () => ipcRenderer.invoke('model:get-default'),
+  setDefaultModel: (model: string) => ipcRenderer.invoke('model:set-default', model),
+  getModelMetaList: () => ipcRenderer.invoke('model:get-meta-list'),
+
+  // ─── Sprint 19 + Sprint 22: Auto-Continue ───────────
+  autoContinueStart: (config?: any) => ipcRenderer.invoke('auto-continue:start', config),
+  autoContinueStop: (reason?: string) => ipcRenderer.invoke('auto-continue:stop', reason),
+  autoContinueStatus: () => ipcRenderer.invoke('auto-continue:status'),
+  autoContinuePause: (reason?: string) => ipcRenderer.invoke('auto-continue:pause', reason),
+  autoContinueResume: () => ipcRenderer.invoke('auto-continue:resume'),
+  autoContinueLog: () => ipcRenderer.invoke('auto-continue:log'),
+  autoContinueConfig: () => ipcRenderer.invoke('auto-continue:config'),
+
+  // ─── Sprint 19: Live Code View events ──────────────
+  onFileChanged: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('filetree:file-changed', handler);
+    return () => ipcRenderer.removeListener('filetree:file-changed', handler);
+  },
+
+  // ─── Sprint 21 + Sprint 24: Rate Limiting & Token Budget ───────
+  getRateLimitSnapshot: () => ipcRenderer.invoke('rate-limit:get-snapshot'),
+  resetRateLimit: () => ipcRenderer.invoke('rate-limit:reset'),
+  pauseResumeRateLimit: () => ipcRenderer.invoke('rate-limit:pause-resume'),
+  getTokenBudget: () => ipcRenderer.invoke('token-budget:get'),
+  setTokenBudget: (config: any) => ipcRenderer.invoke('token-budget:set', config),
+  getRetryState: () => ipcRenderer.invoke('retry:get-state'),
+  summarizeContext: (sessionId: string) => ipcRenderer.invoke('context:summarize', sessionId),
+  compactHistory: (sessionId: string) => ipcRenderer.invoke('context:compact', sessionId),
+
+  // ─── Sprint 24: Session Usage ───
+  getSessionUsage: () => ipcRenderer.invoke('session-usage:get'),
+  resetSessionUsage: () => ipcRenderer.invoke('session-usage:reset'),
+  onRateLimitUpdate: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('rate-limit:update', handler);
+    return () => ipcRenderer.removeListener('rate-limit:update', handler);
+  },
+  onRetryStateUpdate: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('retry:state-update', handler);
+    return () => ipcRenderer.removeListener('retry:state-update', handler);
+  },
+
+  // ─── Sprint 25: Attachments & Vision ────────────────
+  processAttachment: (fileData: any) => ipcRenderer.invoke('attachment:process', fileData),
+  processClipboardImage: (data: any) => ipcRenderer.invoke('attachment:process-clipboard', data),
+  loadAttachment: (conversationId: string, filename: string) => ipcRenderer.invoke('attachment:load', conversationId, filename),
+  deleteConversationAttachments: (conversationId: string) => ipcRenderer.invoke('attachment:delete-conversation', conversationId),
+  getAttachmentConfig: () => ipcRenderer.invoke('attachment:config-get'),
+  setAttachmentConfig: (config: any) => ipcRenderer.invoke('attachment:config-set', config),
+  checkVisionSupport: (modelId?: string) => ipcRenderer.invoke('attachment:check-vision', modelId),
+
+  // ─── Sprint 27: Compare Agent ───────────────────────
+  compareFiles: (left: string, right: string, filters?: any) => ipcRenderer.invoke('compare:files', left, right, filters),
+  compareFolders: (left: string, right: string, filters?: any) => ipcRenderer.invoke('compare:folders', left, right, filters),
+  compareMerge3: (left: string, right: string, base: string, filters?: any) => ipcRenderer.invoke('compare:merge3', left, right, base, filters),
+  compareSyncPreview: (sessionId: string, direction: string) => ipcRenderer.invoke('compare:sync-preview', sessionId, direction),
+  compareGetSession: (sessionId: string) => ipcRenderer.invoke('compare:get-session', sessionId),
+  compareListSessions: () => ipcRenderer.invoke('compare:list-sessions'),
+  compareDeleteSession: (sessionId: string) => ipcRenderer.invoke('compare:delete-session', sessionId),
+  compareHunkAction: (sessionId: string, hunkIndex: number, action: string) => ipcRenderer.invoke('compare:hunk-action', sessionId, hunkIndex, action),
+  compareHunkDetail: (sessionId: string, hunkIndex: number) => ipcRenderer.invoke('compare:hunk-detail', sessionId, hunkIndex),
+  compareFolderEntryDiff: (sessionId: string, relativePath: string) => ipcRenderer.invoke('compare:folder-entry-diff', sessionId, relativePath),
+  compareCompactOutput: (sessionId: string, maxItems?: number) => ipcRenderer.invoke('compare:compact-output', sessionId, maxItems),
+  compareSaveMerge: (sessionId: string, outputPath: string) => ipcRenderer.invoke('compare:save-merge', sessionId, outputPath),
+
+  // ─── Sprint 27: Todo Manager ─────────────────────────
+  getTodoList: (sessionId: string) => ipcRenderer.invoke('todo:get', sessionId),
+  createTodoList: (sessionId: string, items: any[]) => ipcRenderer.invoke('todo:create', sessionId, items),
+  updateTodoItem: (sessionId: string, itemId: string, updates: any) => ipcRenderer.invoke('todo:update-item', sessionId, itemId, updates),
+  appendTodoItems: (sessionId: string, items: any[]) => ipcRenderer.invoke('todo:append', sessionId, items),
+  clearTodoList: (sessionId: string) => ipcRenderer.invoke('todo:clear', sessionId),
+  getTodoProgress: (sessionId: string) => ipcRenderer.invoke('todo:progress', sessionId),
+
+  // ─── Sprint 27: Checkpoints ─────────────────────────
+  getCheckpoints: (sessionId: string) => ipcRenderer.invoke('checkpoint:list', sessionId),
+  createCheckpoint: (sessionId: string, label: string, data: any) => ipcRenderer.invoke('checkpoint:create', sessionId, label, data),
+  getLatestCheckpoint: (sessionId: string) => ipcRenderer.invoke('checkpoint:latest', sessionId),
+
+  // ─── Sprint 27: Verify ──────────────────────────────
+  runVerifyAssertions: (assertions: string, workspacePath?: string) => ipcRenderer.invoke('verify:run', assertions, workspacePath),
+  getVerifyHistory: () => ipcRenderer.invoke('verify:history'),
 
   // ─── Platform Info ─────────────────────────────────
   platform: process.platform as string,

@@ -2,6 +2,12 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 
+// Sprint 25.9: When building with --mode test, keep React in dev mode
+// so runtime warnings (setState loops, render-phase setState) are preserved.
+// Production builds (default mode) continue to use react.production.min.js.
+const isTestMode = process.env.ELECTRON_VITE_MODE === 'test' ||
+  process.argv.includes('--mode') && process.argv[process.argv.indexOf('--mode') + 1] === 'test';
+
 export default defineConfig({
   main: {
     plugins: [
@@ -63,6 +69,8 @@ export default defineConfig({
       }
     },
     plugins: [react()],
+    // Sprint 25.9: In test mode, keep React in development mode for dev warnings
+    ...(isTestMode ? { define: { 'process.env.NODE_ENV': JSON.stringify('development') } } : {}),
     css: {
       postcss: resolve(__dirname, 'postcss.config.js')
     }

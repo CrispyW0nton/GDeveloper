@@ -8,6 +8,7 @@
  */
 
 import React, { useState } from 'react';
+import CompareToolCard from '../compare/CompareToolCard';
 
 interface ToolCallCardProps {
   name: string;
@@ -15,6 +16,7 @@ interface ToolCallCardProps {
   result?: any;
   status: 'running' | 'success' | 'error';
   timestamp?: string;
+  onOpenCompareWorkspace?: (sessionId: string) => void;
 }
 
 // Icon map for tool types
@@ -36,11 +38,33 @@ const TOOL_ICONS: Record<string, string> = {
   git_log: '\uD83D\uDCDC',
   git_commit: '\u2714\uFE0F',
   git_create_branch: '\uD83C\uDF3F',
+  // Sprint 27: Compare Agent
+  compare_file: '\u00B1',
+  compare_folder: '\uD83D\uDCC1',
+  merge_3way: '\uD83D\uDD00',
+  sync_preview: '\uD83D\uDD04',
+  compare_hunk_detail: '\uD83D\uDD0D',
+  compare_apply_hunk: '\u2714\uFE0F',
 };
 
-export default function ToolCallCard({ name, input, result, status }: ToolCallCardProps) {
+// Sprint 27: Names that trigger the Compare tool card
+const COMPARE_TOOL_NAMES = new Set(['compare_file', 'compare_folder', 'merge_3way', 'sync_preview', 'compare_hunk_detail', 'compare_apply_hunk']);
+
+export default function ToolCallCard({ name, input, result, status, onOpenCompareWorkspace }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(status === 'error');
   const icon = TOOL_ICONS[name] || '\uD83D\uDD27';
+
+  // Sprint 27: Render Compare tool card for compare operations
+  if (COMPARE_TOOL_NAMES.has(name) && result) {
+    let parsedResult = result;
+    if (typeof result === 'string') {
+      try { parsedResult = JSON.parse(result); } catch { /* keep as-is */ }
+    }
+    const sessionData = parsedResult?.compareSession || parsedResult;
+    if (sessionData?.sessionId) {
+      return <CompareToolCard sessionData={sessionData} onOpenWorkspace={onOpenCompareWorkspace} />;
+    }
+  }
 
   const statusColors = {
     running: 'border-matrix-warning/30 bg-matrix-warning/5',
@@ -113,6 +137,13 @@ function renderToolBody(name: string, input: any, result: any, status: string) {
       return <SummarizeBody input={input} result={result} />;
     case 'task_plan':
       return <TaskPlanBody input={input} result={result} />;
+    case 'compare_file':
+    case 'compare_folder':
+    case 'merge_3way':
+    case 'sync_preview':
+    case 'compare_hunk_detail':
+    case 'compare_apply_hunk':
+      return <GenericToolBody input={input} result={result} />;
     default:
       return <GenericToolBody input={input} result={result} />;
   }
@@ -159,6 +190,19 @@ function renderToolSummary(name: string, input: any, result: any): string {
         return input?.message ? input.message.substring(0, 60) : 'commit';
       case 'git_create_branch':
         return input?.name || 'new branch';
+      // Sprint 27: Compare Agent summaries
+      case 'compare_file':
+        return `${input?.left || '?'} \u2194 ${input?.right || '?'}`;
+      case 'compare_folder':
+        return `${input?.left || '?'} \u2194 ${input?.right || '?'} (folder)`;
+      case 'merge_3way':
+        return `3-way merge: ${input?.base || '?'}`;
+      case 'sync_preview':
+        return `sync ${input?.direction || 'preview'}`;
+      case 'compare_hunk_detail':
+        return `hunk #${input?.hunk_index ?? '?'} of ${input?.session_id?.substring(0, 12) || '?'}`;
+      case 'compare_apply_hunk':
+        return `${input?.action || '?'} hunk #${input?.hunk_index ?? '?'}`;
       default: {
         if (typeof result === 'string' && result.length > 0) return result.substring(0, 100);
         if (input) {

@@ -72,6 +72,12 @@ const NAV_ITEMS: NavItem[] = [
     togglesPanel: true,
   },
   {
+    id: 'compare' as TabId,
+    label: 'Compare',
+    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 3v18M3 12h18M8 8l-4 4 4 4M16 8l4 4-4 4"/></svg>,
+    requiresWorkspace: true
+  },
+  {
     id: 'mcp',
     label: 'MCP Servers',
     icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="15" width="20" height="6" rx="1"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>,
@@ -239,7 +245,7 @@ export default function Sidebar({
       <div className="relative z-10 p-3 border-t border-matrix-border">
         {!collapsed && (
           <div className="text-[9px] text-matrix-text-muted/30 text-center tracking-widest">
-            SPRINT 16A // v6.1
+            SPRINT 27 // v7.0
           </div>
         )}
         <button

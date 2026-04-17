@@ -9,6 +9,11 @@ interface MatrixRainCanvasProps {
   color?: string;
   /** Target interval between frames in ms (~22 fps). Default 45 */
   speed?: number;
+  /**
+   * Sprint 20: Override rain hue color. When provided, takes precedence
+   * over the `color` prop for the main rain characters.
+   */
+  rainHue?: string;
 }
 
 // Characters used for the rain effect (katakana + latin + digits + symbols)
@@ -32,7 +37,10 @@ export default function MatrixRainCanvas({
   fontSize = 14,
   color = '#00ff41',
   speed = 45,
+  rainHue,
 }: MatrixRainCanvasProps) {
+  // Sprint 20: Use rainHue if provided, otherwise fall back to color
+  const effectiveColor = rainHue || color;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dropsRef = useRef<number[]>([]);
   const lastFrameRef = useRef<number>(0);
@@ -110,8 +118,8 @@ export default function MatrixRainCanvas({
           } else {
             // Normal trail character with subtle glow
             ctx.shadowBlur = 6;
-            ctx.shadowColor = color;
-            ctx.fillStyle = color;
+            ctx.shadowColor = effectiveColor;
+            ctx.fillStyle = effectiveColor;
           }
 
           ctx.fillText(char, x, y);
@@ -136,7 +144,7 @@ export default function MatrixRainCanvas({
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener('resize', resize);
     };
-  }, [fontSize, color, speed, initDrops]);
+  }, [fontSize, effectiveColor, speed, initDrops]);
 
   return (
     <canvas

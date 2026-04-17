@@ -142,6 +142,8 @@ export const IPC_CHANNELS = {
   MODEL_SET_SELECTED: 'model:set-selected',
   MODEL_DISCOVER: 'model:discover',
   MODEL_CHECK_TOOLS: 'model:check-tools',
+  MODEL_REFRESH: 'model:refresh',        // Sprint 25.5: force-refresh model list
+  MODEL_VALIDATE_SELECTED: 'model:validate-selected', // Sprint 25.5: validate + auto-switch
   SANDBOX_GET_LOG: 'sandbox:get-log',
   SANDBOX_CLEAR_LOG: 'sandbox:clear-log',
 
@@ -164,6 +166,100 @@ export const IPC_CHANNELS = {
   FORGE_APP_RECORD_SAVE: 'forge:app-record-save',
   FORGE_APP_RECORD_REMOVE: 'forge:app-record-remove',
   FORGE_APP_TOGGLE_FAVORITE: 'forge:app-toggle-favorite',
+
+  // ─── Sprint 17: Git Worktrees ───
+  WORKTREE_LIST: 'worktree:list',
+  WORKTREE_ADD: 'worktree:add',
+  WORKTREE_REMOVE: 'worktree:remove',
+  WORKTREE_PRUNE: 'worktree:prune',
+  WORKTREE_REPAIR: 'worktree:repair',
+  WORKTREE_LOCK: 'worktree:lock',
+  WORKTREE_UNLOCK: 'worktree:unlock',
+  WORKTREE_MOVE: 'worktree:move',
+  WORKTREE_COMPARE: 'worktree:compare',
+  WORKTREE_CONTEXT: 'worktree:context',
+  WORKTREE_CREATE_TASK: 'worktree:create-task',
+  WORKTREE_COMPLETE_TASK: 'worktree:complete-task',
+  WORKTREE_ABANDON_TASK: 'worktree:abandon-task',
+  WORKTREE_HANDOFF: 'worktree:handoff',
+  WORKTREE_TASK_LIST: 'worktree:task-list',
+  WORKTREE_RECOMMEND: 'worktree:recommend',
+
+  // ─── Sprint 19: File Tree ───
+  FILE_TREE_GET: 'filetree:get',
+  FILE_TREE_READ: 'filetree:read-file',
+
+  // ─── Sprint 19 + Sprint 22: Auto-Continue ───
+  AUTO_CONTINUE_START: 'auto-continue:start',
+  AUTO_CONTINUE_STOP: 'auto-continue:stop',
+  AUTO_CONTINUE_STATUS: 'auto-continue:status',
+  AUTO_CONTINUE_PAUSE: 'auto-continue:pause',
+  AUTO_CONTINUE_RESUME: 'auto-continue:resume',
+  AUTO_CONTINUE_LOG: 'auto-continue:log',
+  AUTO_CONTINUE_CONFIG: 'auto-continue:config',
+
+  // ─── Sprint 23: File Writing (Editor) ───
+  FILE_WRITE: 'filetree:write-file',
+  FILE_CHECK_WRITABLE: 'filetree:check-writable',
+
+  // ─── Sprint 23: Model Metadata ───
+  MODEL_GET_DEFAULT: 'model:get-default',
+  MODEL_SET_DEFAULT: 'model:set-default',
+  MODEL_GET_META_LIST: 'model:get-meta-list',
+
+  // ─── Sprint 21: Rate Limiting & Token Budget ───
+  RATE_LIMIT_GET_SNAPSHOT: 'rate-limit:get-snapshot',
+  RATE_LIMIT_RESET: 'rate-limit:reset',
+  RATE_LIMIT_PAUSE_RESUME: 'rate-limit:pause-resume',
+  TOKEN_BUDGET_GET: 'token-budget:get',
+  TOKEN_BUDGET_SET: 'token-budget:set',
+  RETRY_STATE_GET: 'retry:get-state',
+  CONTEXT_SUMMARIZE: 'context:summarize',
+  CONTEXT_COMPACT: 'context:compact',
+
+  // ─── Sprint 24: Session Usage ───
+  SESSION_USAGE_GET: 'session-usage:get',
+  SESSION_USAGE_RESET: 'session-usage:reset',
+
+  // ─── Sprint 25: Attachments & Vision ───
+  ATTACHMENT_PROCESS: 'attachment:process',
+  ATTACHMENT_PROCESS_CLIPBOARD: 'attachment:process-clipboard',
+  ATTACHMENT_LOAD: 'attachment:load',
+  ATTACHMENT_DELETE_CONVERSATION: 'attachment:delete-conversation',
+  ATTACHMENT_CONFIG_GET: 'attachment:config-get',
+  ATTACHMENT_CONFIG_SET: 'attachment:config-set',
+  ATTACHMENT_CHECK_VISION: 'attachment:check-vision',
+
+  // ─── Sprint 27: Compare Agent ───
+  COMPARE_FILES: 'compare:files',
+  COMPARE_FOLDERS: 'compare:folders',
+  COMPARE_MERGE3: 'compare:merge3',
+  COMPARE_SYNC_PREVIEW: 'compare:sync-preview',
+  COMPARE_GET_SESSION: 'compare:get-session',
+  COMPARE_LIST_SESSIONS: 'compare:list-sessions',
+  COMPARE_DELETE_SESSION: 'compare:delete-session',
+  COMPARE_HUNK_ACTION: 'compare:hunk-action',
+  COMPARE_HUNK_DETAIL: 'compare:hunk-detail',
+  COMPARE_FOLDER_ENTRY_DIFF: 'compare:folder-entry-diff',
+  COMPARE_COMPACT_OUTPUT: 'compare:compact-output',
+  COMPARE_SAVE_MERGE: 'compare:save-merge',
+
+  // ─── Sprint 27: Todo Manager ───
+  TODO_GET: 'todo:get',
+  TODO_CREATE: 'todo:create',
+  TODO_UPDATE_ITEM: 'todo:update-item',
+  TODO_APPEND: 'todo:append',
+  TODO_CLEAR: 'todo:clear',
+  TODO_PROGRESS: 'todo:progress',
+
+  // ─── Sprint 27: Checkpoints ───
+  CHECKPOINT_LIST: 'checkpoint:list',
+  CHECKPOINT_CREATE: 'checkpoint:create',
+  CHECKPOINT_LATEST: 'checkpoint:latest',
+
+  // ─── Sprint 27: Verify ───
+  VERIFY_RUN: 'verify:run',
+  VERIFY_HISTORY: 'verify:history',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];

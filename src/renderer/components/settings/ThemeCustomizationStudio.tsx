@@ -1,16 +1,18 @@
 /**
- * Theme Customization Studio — Sprint 16 Addendum
+ * Theme Customization Studio — Sprint 16 + Sprint 20 + Sprint 22 (Contrast Warning Addendum)
  *
- * Full-featured theme editor replacing the fixed theme selector.
- * Features:
- *  - Color pickers + hex inputs for all tokens
- *  - Opacity sliders where applicable
- *  - Live preview
- *  - Save / Reset / Cancel buttons
- *  - Named custom presets (CRUD)
- *  - Backdrop selector with Matrix rain toggle
- *  - Contrast validation warnings
- *  - Safe preview with recovery paths
+ * Sprint 22 enhancements:
+ *  - Enhanced WCAG contrast warnings as "helpful coach" — token pairs, ratios, severity badges
+ *  - One-click fixes (readable variant, lighten/darken, reset token, apply recommended)
+ *  - Acknowledge/snooze per warning, persisted with preset
+ *  - "Auto-improve readability" button with live preview, confirmation, undo
+ *  - Collapsible advanced details; default shows simple readability status
+ *  - Matrix preset refined for AA compliance while preserving neon-green aesthetic
+ *  - Constructive wording, calm colors (blue/teal, amber, red only for true fails)
+ *
+ * Sprint 20 enhancements preserved:
+ *  - Every token change instantly updates the entire app UI (no "Apply" button)
+ *  - Matrix rain hue control, cancel/discard restores prior snapshot
  */
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
@@ -18,9 +20,34 @@ import { useTheme } from '../../themes/ThemeContext';
 import {
   TOKEN_DEFINITIONS, TOKEN_CATEGORIES, BACKDROP_OPTIONS,
   type TokenCategory, type ThemePreset, type BackdropType,
-  checkContrast, validateHex, extractHexFromCss,
+  checkContrast, validateHex, extractHexFromCss, contrastRatio,
 } from '../../themes/tokens';
-import { applyTokenMap } from '../../themes';
+import { applyTokenMap, DEFAULT_MATRIX_RAIN_HUE } from '../../themes';
+import {
+  applySingleToken,
+  applyMatrixRainHue,
+  snapshotCurrentTokens,
+  restoreTokenSnapshot,
+  isValidColor,
+  type TokenSnapshot,
+} from '../../themes/applyTheme';
+import {
+  analyzeContrast,
+  autoImproveContrast,
+  loadAcknowledgments,
+  saveAcknowledgments,
+  acknowledgeWarning,
+  unacknowledgeWarning,
+  clearAllAcknowledgments,
+  severityColor,
+  severityLabel,
+  severityBgColor,
+  MATRIX_AA_REFINEMENTS,
+  type ContrastWarning,
+  type ContrastFix,
+  type AcknowledgmentState,
+  type AutoImproveResult,
+} from '../../themes/contrastHelpers';
 
 // ─── Component ───
 
@@ -28,6 +55,9 @@ export default function ThemeCustomizationStudio() {
   const {
     presets, activePreset, applyPresetById, savePreset,
     duplicatePreset, deletePreset, cancelPreview,
+    matrixRainHue, updateMatrixRainHue, resetMatrixRainHue,
+    updateTokenRealtime, updateBackdropRealtime,
+    takeSnapshot, restoreSnapshot,
   } = useTheme();
 
   // Local editing state (copy of active preset tokens)
@@ -38,6 +68,7 @@ export default function ThemeCustomizationStudio() {
   const [editBackdropIntensity, setEditBackdropIntensity] = useState(1.0);
   const [editMatrixRain, setEditMatrixRain] = useState(true);
   const [editCrtOverlay, setEditCrtOverlay] = useState(true);
+  const [editRainHue, setEditRainHue] = useState(DEFAULT_MATRIX_RAIN_HUE);
 
   const [activeCategory, setActiveCategory] = useState<TokenCategory>('background');
   const [dirty, setDirty] = useState(false);
@@ -45,6 +76,15 @@ export default function ThemeCustomizationStudio() {
   const [saveAsName, setSaveAsName] = useState('');
   const [showPresetManager, setShowPresetManager] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+
+  // Sprint 22: Contrast warning state
+  const [ackState, setAckState] = useState<AcknowledgmentState>(loadAcknowledgments);
+  const [showAdvancedWarnings, setShowAdvancedWarnings] = useState(false);
+  const [autoImprovePreview, setAutoImprovePreview] = useState<AutoImproveResult | null>(null);
+  const [preAutoImproveTokens, setPreAutoImproveTokens] = useState<Record<string, string> | null>(null);
+
+  // Sprint 20: Snapshot for cancel/discard
+  const snapshotRef = useRef<TokenSnapshot | null>(null);
 
   // Sync from active preset when it changes
   useEffect(() => {
@@ -56,11 +96,16 @@ export default function ThemeCustomizationStudio() {
       setEditBackdropIntensity(activePreset.backdropIntensity);
       setEditMatrixRain(activePreset.matrixRainEnabled);
       setEditCrtOverlay(activePreset.crtOverlayEnabled);
+      setEditRainHue(activePreset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE);
       setDirty(false);
+      setAutoImprovePreview(null);
+      setPreAutoImproveTokens(null);
+      // Take snapshot for cancel
+      snapshotRef.current = takeSnapshot();
     }
   }, [activePreset?.id]);
 
-  // Live preview: apply tokens as CSS vars when editTokens changes
+  // Sprint 20: Real-time live preview — apply tokens as CSS vars immediately when editTokens changes
   useEffect(() => {
     if (dirty) {
       applyTokenMap(editTokens, 'preview');
@@ -73,36 +118,144 @@ export default function ThemeCustomizationStudio() {
     [activeCategory]
   );
 
-  // Contrast warnings
+  // Sprint 22: Enhanced contrast analysis
   const contrastWarnings = useMemo(() => {
-    const warnings: { label: string; level: 'warn' | 'fail' }[] = [];
-    const checks: [string, string, string][] = [
-      ['Primary Text on App BG', 'textPrimary', 'appBg'],
-      ['Secondary Text on App BG', 'textSecondary', 'appBg'],
-      ['Primary Text on Panel BG', 'textPrimary', 'panelBg'],
-      ['Accent on App BG', 'accent', 'appBg'],
-      ['Input Text on Input BG', 'inputText', 'inputBg'],
-      ['Button Text on Button BG', 'btnText', 'btnBg'],
-    ];
-    for (const [label, fg, bg] of checks) {
-      const fgVal = editTokens[fg];
-      const bgVal = editTokens[bg];
-      if (fgVal && bgVal) {
-        const result = checkContrast(fgVal, bgVal);
-        if (result !== 'pass') {
-          warnings.push({ label, level: result });
-        }
-      }
-    }
-    return warnings;
-  }, [editTokens]);
+    return analyzeContrast(editTokens, ackState);
+  }, [editTokens, ackState]);
+
+  const unacknowledgedWarnings = useMemo(
+    () => contrastWarnings.filter(w => !w.acknowledged),
+    [contrastWarnings]
+  );
+
+  const failingWarnings = useMemo(
+    () => contrastWarnings.filter(w => w.severity === 'fails-aa'),
+    [contrastWarnings]
+  );
+
+  const borderlineWarnings = useMemo(
+    () => contrastWarnings.filter(w => w.severity === 'borderline'),
+    [contrastWarnings]
+  );
+
+  // Overall readability status
+  const readabilityStatus = useMemo(() => {
+    if (failingWarnings.length > 0) return { label: 'Some text may be hard to read', color: 'var(--theme-warning, #facc15)', icon: '!' };
+    if (borderlineWarnings.length > 0) return { label: 'Readability is good, minor improvements possible', color: 'var(--theme-info, #60a5fa)', icon: 'i' };
+    return { label: 'Readability looks great', color: 'var(--theme-success, #4ade80)', icon: '\u2713' };
+  }, [failingWarnings, borderlineWarnings]);
 
   // ── Handlers ──
 
+  // Sprint 20: Real-time token update — updates CSS variable immediately
   const updateToken = useCallback((key: string, value: string) => {
     setEditTokens(prev => ({ ...prev, [key]: value }));
+    // Instant CSS update (no batch delay for direct user input)
+    updateTokenRealtime(key, value);
     setDirty(true);
+  }, [updateTokenRealtime]);
+
+  // Sprint 20: Real-time backdrop updates
+  const handleBackdropChange = useCallback((type: BackdropType) => {
+    setEditBackdrop(type);
+    updateBackdropRealtime({ backdropType: type });
+    setDirty(true);
+  }, [updateBackdropRealtime]);
+
+  const handleBackdropOpacityChange = useCallback((val: number) => {
+    setEditBackdropOpacity(val);
+    updateBackdropRealtime({ backdropOpacity: val });
+    setDirty(true);
+  }, [updateBackdropRealtime]);
+
+  const handleBackdropIntensityChange = useCallback((val: number) => {
+    setEditBackdropIntensity(val);
+    updateBackdropRealtime({ backdropIntensity: val });
+    setDirty(true);
+  }, [updateBackdropRealtime]);
+
+  const handleMatrixRainToggle = useCallback((checked: boolean) => {
+    setEditMatrixRain(checked);
+    updateBackdropRealtime({ matrixRainEnabled: checked });
+    setDirty(true);
+  }, [updateBackdropRealtime]);
+
+  const handleCrtOverlayToggle = useCallback((checked: boolean) => {
+    setEditCrtOverlay(checked);
+    updateBackdropRealtime({ crtOverlayEnabled: checked });
+    setDirty(true);
+  }, [updateBackdropRealtime]);
+
+  // Sprint 20: Matrix rain hue — real-time update
+  const handleRainHueChange = useCallback((hue: string) => {
+    setEditRainHue(hue);
+    if (isValidColor(hue)) {
+      updateMatrixRainHue(hue);
+    }
+    setDirty(true);
+  }, [updateMatrixRainHue]);
+
+  const handleRainHueReset = useCallback(() => {
+    setEditRainHue(DEFAULT_MATRIX_RAIN_HUE);
+    resetMatrixRainHue();
+    setDirty(true);
+  }, [resetMatrixRainHue]);
+
+  // Sprint 22: Contrast fix handlers
+  const handleApplyFix = useCallback((fix: ContrastFix) => {
+    updateToken(fix.tokenKey, fix.suggestedValue);
+    showStatus(`Applied fix: ${fix.label}`);
+  }, [updateToken]);
+
+  const handleAcknowledge = useCallback((fgToken: string, bgToken: string) => {
+    setAckState(prev => {
+      const next = acknowledgeWarning(prev, fgToken, bgToken);
+      saveAcknowledgments(next);
+      return next;
+    });
   }, []);
+
+  const handleUnacknowledge = useCallback((fgToken: string, bgToken: string) => {
+    setAckState(prev => {
+      const next = unacknowledgeWarning(prev, fgToken, bgToken);
+      saveAcknowledgments(next);
+      return next;
+    });
+  }, []);
+
+  // Sprint 22: Auto-improve readability
+  const handleAutoImprove = useCallback(() => {
+    const result = autoImproveContrast(editTokens, contrastWarnings);
+    if (Object.keys(result.changes).length === 0) {
+      showStatus('No automatic fixes available. Try adjusting colors manually.');
+      return;
+    }
+    // Store current tokens for undo
+    setPreAutoImproveTokens({ ...editTokens });
+    setAutoImprovePreview(result);
+    // Apply preview
+    const newTokens = { ...editTokens, ...result.changes };
+    setEditTokens(newTokens);
+    applyTokenMap(newTokens, 'preview');
+    setDirty(true);
+    showStatus(`Preview: ${result.summary.length} fix(es) applied. Confirm or undo below.`);
+  }, [editTokens, contrastWarnings]);
+
+  const handleConfirmAutoImprove = useCallback(() => {
+    setAutoImprovePreview(null);
+    setPreAutoImproveTokens(null);
+    showStatus('Readability improvements confirmed.');
+  }, []);
+
+  const handleUndoAutoImprove = useCallback(() => {
+    if (preAutoImproveTokens) {
+      setEditTokens(preAutoImproveTokens);
+      applyTokenMap(preAutoImproveTokens, 'preview');
+    }
+    setAutoImprovePreview(null);
+    setPreAutoImproveTokens(null);
+    showStatus('Readability changes undone.');
+  }, [preAutoImproveTokens]);
 
   const handleSave = useCallback(() => {
     if (!activePreset) return;
@@ -124,12 +277,14 @@ export default function ThemeCustomizationStudio() {
       backdropIntensity: editBackdropIntensity,
       matrixRainEnabled: editMatrixRain,
       crtOverlayEnabled: editCrtOverlay,
+      matrixRainHue: editRainHue,
     };
     savePreset(updated);
     applyPresetById(updated.id);
     setDirty(false);
+    snapshotRef.current = takeSnapshot();
     showStatus('Theme saved');
-  }, [activePreset, editTokens, editName, editBackdrop, editBackdropOpacity, editBackdropIntensity, editMatrixRain, editCrtOverlay, savePreset, applyPresetById]);
+  }, [activePreset, editTokens, editName, editBackdrop, editBackdropOpacity, editBackdropIntensity, editMatrixRain, editCrtOverlay, editRainHue, savePreset, applyPresetById, takeSnapshot]);
 
   const handleSaveAs = useCallback(() => {
     if (!saveAsName.trim()) return;
@@ -145,6 +300,7 @@ export default function ThemeCustomizationStudio() {
       backdropIntensity: editBackdropIntensity,
       matrixRainEnabled: editMatrixRain,
       crtOverlayEnabled: editCrtOverlay,
+      matrixRainHue: editRainHue,
       createdAt: now,
       updatedAt: now,
     };
@@ -154,8 +310,9 @@ export default function ThemeCustomizationStudio() {
     setShowSaveAs(false);
     setSaveAsName('');
     setDirty(false);
+    snapshotRef.current = takeSnapshot();
     showStatus(`Saved as "${newPreset.name}"`);
-  }, [saveAsName, editTokens, editBackdrop, editBackdropOpacity, editBackdropIntensity, editMatrixRain, editCrtOverlay, savePreset, applyPresetById]);
+  }, [saveAsName, editTokens, editBackdrop, editBackdropOpacity, editBackdropIntensity, editMatrixRain, editCrtOverlay, editRainHue, savePreset, applyPresetById, takeSnapshot]);
 
   const handleResetToCurrent = useCallback(() => {
     if (activePreset) {
@@ -165,6 +322,7 @@ export default function ThemeCustomizationStudio() {
       setEditBackdropIntensity(activePreset.backdropIntensity);
       setEditMatrixRain(activePreset.matrixRainEnabled);
       setEditCrtOverlay(activePreset.crtOverlayEnabled);
+      setEditRainHue(activePreset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE);
       applyPresetById(activePreset.id);
       setDirty(false);
       showStatus('Reset to current preset');
@@ -177,8 +335,13 @@ export default function ThemeCustomizationStudio() {
     showStatus('Reset to Matrix default');
   }, [applyPresetById]);
 
+  // Sprint 20: Cancel/Discard — restore snapshot
   const handleCancel = useCallback(() => {
-    cancelPreview();
+    if (snapshotRef.current) {
+      restoreSnapshot(snapshotRef.current);
+    } else {
+      cancelPreview();
+    }
     if (activePreset) {
       setEditTokens({ ...activePreset.tokens });
       setEditBackdrop(activePreset.backdrop);
@@ -186,9 +349,13 @@ export default function ThemeCustomizationStudio() {
       setEditBackdropIntensity(activePreset.backdropIntensity);
       setEditMatrixRain(activePreset.matrixRainEnabled);
       setEditCrtOverlay(activePreset.crtOverlayEnabled);
+      setEditRainHue(activePreset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE);
     }
     setDirty(false);
-  }, [activePreset, cancelPreview]);
+    setAutoImprovePreview(null);
+    setPreAutoImproveTokens(null);
+    showStatus('Changes discarded');
+  }, [activePreset, cancelPreview, restoreSnapshot]);
 
   const showStatus = (msg: string) => {
     setStatusMessage(msg);
@@ -245,8 +412,8 @@ export default function ThemeCustomizationStudio() {
       {/* ── Dirty Indicator + Action Bar ── */}
       <div className="flex items-center gap-2 flex-wrap">
         {dirty && (
-          <span className="text-[10px] px-2 py-0.5 rounded" style={{ color: 'var(--theme-warning)', border: '1px solid var(--theme-warning)', opacity: 0.8 }}>
-            Unsaved changes (live preview active)
+          <span className="text-[10px] px-2 py-0.5 rounded animate-pulse" style={{ color: 'var(--theme-warning)', border: '1px solid var(--theme-warning)', opacity: 0.9 }}>
+            Live preview active — changes shown in real-time
           </span>
         )}
         {statusMessage && (
@@ -256,10 +423,12 @@ export default function ThemeCustomizationStudio() {
         )}
         <div className="ml-auto flex gap-2">
           {dirty && (
-            <button onClick={handleCancel} className="matrix-btn text-[10px] px-3 py-1">Cancel</button>
+            <button onClick={handleCancel} className="matrix-btn text-[10px] px-3 py-1" title="Discard all unsaved changes and restore previous state">
+              Discard Changes
+            </button>
           )}
           <button onClick={handleResetToCurrent} className="matrix-btn text-[10px] px-3 py-1">
-            Reset to Current Defaults
+            Reset to Saved
           </button>
           <button onClick={handleResetToMatrix} className="matrix-btn text-[10px] px-3 py-1">
             Reset to Matrix Default
@@ -269,7 +438,7 @@ export default function ThemeCustomizationStudio() {
             className="matrix-btn matrix-btn-primary text-[10px] px-3 py-1"
             disabled={!dirty}
           >
-            Save Theme Configuration
+            Save Theme
           </button>
         </div>
       </div>
@@ -302,41 +471,139 @@ export default function ThemeCustomizationStudio() {
         </div>
       )}
 
-      {/* ── Contrast Warnings ── */}
-      {contrastWarnings.length > 0 && (
-        <div className="rounded p-3 space-y-1" style={{ background: 'var(--theme-warning)', opacity: 0.12, border: `1px solid var(--theme-warning)` }}>
-          <div style={{ opacity: 1 }}>
-            <h4 className="text-[10px] font-bold" style={{ color: 'var(--theme-warning)' }}>
-              Contrast Warnings
-            </h4>
-            {contrastWarnings.map((w, i) => (
-              <div key={i} className="text-[9px] flex items-center gap-1" style={{ color: w.level === 'fail' ? 'var(--theme-danger)' : 'var(--theme-warning)' }}>
-                <span>{w.level === 'fail' ? '!!' : '!'}</span>
-                <span>{w.label}: {w.level === 'fail' ? 'fails WCAG AA' : 'borderline (large text only)'}</span>
-              </div>
-            ))}
+      {/* ── Sprint 22: Enhanced Contrast Warnings ── */}
+      <ReadabilityPanel
+        readabilityStatus={readabilityStatus}
+        warnings={contrastWarnings}
+        unacknowledgedWarnings={unacknowledgedWarnings}
+        showAdvanced={showAdvancedWarnings}
+        onToggleAdvanced={() => setShowAdvancedWarnings(!showAdvancedWarnings)}
+        onApplyFix={handleApplyFix}
+        onAcknowledge={handleAcknowledge}
+        onUnacknowledge={handleUnacknowledge}
+        onAutoImprove={handleAutoImprove}
+        autoImprovePreview={autoImprovePreview}
+        onConfirmAutoImprove={handleConfirmAutoImprove}
+        onUndoAutoImprove={handleUndoAutoImprove}
+      />
+
+      {/* ── Sprint 20: Matrix Rain Hue Control ── */}
+      <div className="glass-panel p-4 space-y-3">
+        <h3 className="text-xs font-bold flex items-center gap-2" style={{ color: 'var(--theme-accent)' }}>
+          <span style={{ fontSize: '14px' }}>&#x2602;</span> Matrix Rain Color
+        </h3>
+        <p className="text-[9px]" style={{ color: 'var(--theme-text-muted)' }}>
+          Set the character color for the Matrix rain effect. Changes apply instantly.
+        </p>
+
+        <div className="flex items-center gap-4 flex-wrap">
+          {/* Color Picker */}
+          <div className="flex items-center gap-2">
+            <label className="text-[10px]" style={{ color: 'var(--theme-text-dim)' }}>Color</label>
+            <input
+              type="color"
+              value={extractHexFromCss(editRainHue)}
+              onChange={e => handleRainHueChange(e.target.value)}
+              className="w-10 h-8 rounded border cursor-pointer"
+              style={{ borderColor: 'var(--theme-border-bright)' }}
+              title="Pick rain character color"
+            />
           </div>
+
+          {/* Hex Input */}
+          <div className="flex items-center gap-2">
+            <label className="text-[10px]" style={{ color: 'var(--theme-text-dim)' }}>Hex</label>
+            <input
+              type="text"
+              value={editRainHue}
+              onChange={e => {
+                const raw = e.target.value;
+                setEditRainHue(raw);
+                const validated = validateHex(raw);
+                if (validated) {
+                  handleRainHueChange(validated);
+                }
+              }}
+              className="matrix-input w-24 text-[10px] font-mono"
+              placeholder="#00ff41"
+              maxLength={9}
+            />
+          </div>
+
+          {/* Preview Swatch */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px]" style={{ color: 'var(--theme-text-dim)' }}>Preview</span>
+            <div
+              className="w-16 h-8 rounded border flex items-center justify-center font-mono text-[11px] font-bold"
+              style={{
+                background: '#0a0a0a',
+                borderColor: editRainHue,
+                color: editRainHue,
+                textShadow: `0 0 6px ${editRainHue}, 0 0 12px ${editRainHue}`,
+              }}
+            >
+              A1
+            </div>
+          </div>
+
+          {/* Hue Slider */}
+          <div className="flex items-center gap-2 flex-1 min-w-[160px]">
+            <label className="text-[10px]" style={{ color: 'var(--theme-text-dim)' }}>Hue</label>
+            <input
+              type="range"
+              min="0" max="360" step="1"
+              value={hexToHue(editRainHue)}
+              onChange={e => {
+                const hue = parseInt(e.target.value);
+                const hex = hueToHex(hue);
+                handleRainHueChange(hex);
+              }}
+              className="flex-1"
+              style={{
+                accentColor: editRainHue,
+                background: 'linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)',
+                height: '6px',
+                borderRadius: '3px',
+              }}
+              title={`Hue: ${hexToHue(editRainHue)}deg`}
+            />
+          </div>
+
+          {/* Reset Button */}
+          <button
+            onClick={handleRainHueReset}
+            className="matrix-btn text-[9px] px-2 py-1"
+            title="Reset to default Matrix green (#00ff41)"
+            disabled={editRainHue === DEFAULT_MATRIX_RAIN_HUE}
+          >
+            Reset to Default
+          </button>
         </div>
-      )}
+
+        {editRainHue !== DEFAULT_MATRIX_RAIN_HUE && (
+          <p className="text-[9px]" style={{ color: 'var(--theme-text-muted)' }}>
+            Custom hue: {editRainHue} (default: {DEFAULT_MATRIX_RAIN_HUE})
+          </p>
+        )}
+      </div>
 
       {/* ── Backdrop System ── */}
       <div className="glass-panel p-4 space-y-3">
         <h3 className="text-xs font-bold flex items-center gap-2" style={{ color: 'var(--theme-accent)' }}>
-          <span>🖼</span> Backdrop System
+          <span style={{ fontSize: '14px' }}>&#x1F5BC;</span> Backdrop System
         </h3>
 
         <div className="grid grid-cols-3 gap-2">
           {BACKDROP_OPTIONS.map(opt => (
             <button
               key={opt.id}
-              onClick={() => { setEditBackdrop(opt.id); setDirty(true); }}
+              onClick={() => handleBackdropChange(opt.id)}
               className={`text-left p-2 rounded border text-[10px] transition-all ${
                 editBackdrop === opt.id ? 'ring-1' : ''
               }`}
               style={{
                 borderColor: editBackdrop === opt.id ? 'var(--theme-accent)' : 'var(--theme-border)',
-                background: editBackdrop === opt.id ? 'var(--theme-accent)' : 'transparent',
-                opacity: editBackdrop === opt.id ? 0.15 : 1,
+                background: editBackdrop === opt.id ? 'var(--theme-tab-active-bg)' : 'transparent',
                 color: 'var(--theme-text-primary)',
               }}
             >
@@ -354,7 +621,7 @@ export default function ThemeCustomizationStudio() {
             <input
               type="range" min="0" max="1" step="0.01"
               value={editBackdropOpacity}
-              onChange={e => { setEditBackdropOpacity(parseFloat(e.target.value)); setDirty(true); }}
+              onChange={e => handleBackdropOpacityChange(parseFloat(e.target.value))}
               className="w-full accent-current"
               style={{ accentColor: 'var(--theme-accent)' }}
             />
@@ -366,7 +633,7 @@ export default function ThemeCustomizationStudio() {
             <input
               type="range" min="0" max="1" step="0.01"
               value={editBackdropIntensity}
-              onChange={e => { setEditBackdropIntensity(parseFloat(e.target.value)); setDirty(true); }}
+              onChange={e => handleBackdropIntensityChange(parseFloat(e.target.value))}
               className="w-full"
               style={{ accentColor: 'var(--theme-accent)' }}
             />
@@ -378,7 +645,7 @@ export default function ThemeCustomizationStudio() {
             <input
               type="checkbox"
               checked={editMatrixRain}
-              onChange={e => { setEditMatrixRain(e.target.checked); setDirty(true); }}
+              onChange={e => handleMatrixRainToggle(e.target.checked)}
               style={{ accentColor: 'var(--theme-accent)' }}
             />
             Matrix Rain Overlay
@@ -387,7 +654,7 @@ export default function ThemeCustomizationStudio() {
             <input
               type="checkbox"
               checked={editCrtOverlay}
-              onChange={e => { setEditCrtOverlay(e.target.checked); setDirty(true); }}
+              onChange={e => handleCrtOverlayToggle(e.target.checked)}
               style={{ accentColor: 'var(--theme-accent)' }}
             />
             CRT Scanline Overlay
@@ -398,7 +665,10 @@ export default function ThemeCustomizationStudio() {
       {/* ── Token Editor ── */}
       <div className="glass-panel p-4 space-y-3">
         <h3 className="text-xs font-bold flex items-center gap-2" style={{ color: 'var(--theme-accent)' }}>
-          <span>🎨</span> Color Token Editor
+          <span style={{ fontSize: '14px' }}>&#x1F3A8;</span> Color Token Editor
+          <span className="text-[9px] font-normal" style={{ color: 'var(--theme-text-muted)' }}>
+            (changes apply instantly)
+          </span>
         </h3>
 
         {/* Category tabs */}
@@ -456,6 +726,263 @@ export default function ThemeCustomizationStudio() {
   );
 }
 
+// ─── Sprint 22: Readability Panel ───
+
+function ReadabilityPanel({
+  readabilityStatus,
+  warnings,
+  unacknowledgedWarnings,
+  showAdvanced,
+  onToggleAdvanced,
+  onApplyFix,
+  onAcknowledge,
+  onUnacknowledge,
+  onAutoImprove,
+  autoImprovePreview,
+  onConfirmAutoImprove,
+  onUndoAutoImprove,
+}: {
+  readabilityStatus: { label: string; color: string; icon: string };
+  warnings: ContrastWarning[];
+  unacknowledgedWarnings: ContrastWarning[];
+  showAdvanced: boolean;
+  onToggleAdvanced: () => void;
+  onApplyFix: (fix: ContrastFix) => void;
+  onAcknowledge: (fgToken: string, bgToken: string) => void;
+  onUnacknowledge: (fgToken: string, bgToken: string) => void;
+  onAutoImprove: () => void;
+  autoImprovePreview: AutoImproveResult | null;
+  onConfirmAutoImprove: () => void;
+  onUndoAutoImprove: () => void;
+}) {
+  return (
+    <div className="glass-panel p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-bold flex items-center gap-2" style={{ color: 'var(--theme-accent)' }}>
+          <span style={{ fontSize: '14px' }}>&#x1F441;</span> Readability
+        </h3>
+        <div className="flex items-center gap-2">
+          {/* Simple status indicator */}
+          <span className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded" style={{
+            color: readabilityStatus.color,
+            border: `1px solid ${readabilityStatus.color}`,
+            opacity: 0.8,
+          }}>
+            <span className="w-4 h-4 flex items-center justify-center rounded-full text-[9px] font-bold" style={{
+              background: readabilityStatus.color,
+              color: 'var(--theme-app-bg, #0a0a0a)',
+            }}>
+              {readabilityStatus.icon}
+            </span>
+            {readabilityStatus.label}
+          </span>
+        </div>
+      </div>
+
+      {/* Quick summary */}
+      {warnings.length === 0 ? (
+        <p className="text-[9px]" style={{ color: 'var(--theme-text-muted)' }}>
+          All checked text/background pairs meet WCAG AA standards. Nice work!
+        </p>
+      ) : (
+        <p className="text-[9px]" style={{ color: 'var(--theme-text-muted)' }}>
+          {unacknowledgedWarnings.length} readability suggestion{unacknowledgedWarnings.length !== 1 ? 's' : ''} found.
+          {warnings.length > unacknowledgedWarnings.length && ` (${warnings.length - unacknowledgedWarnings.length} acknowledged)`}
+          {' '}These won&apos;t block saving — they&apos;re here to help.
+        </p>
+      )}
+
+      {/* Auto-improve button */}
+      {unacknowledgedWarnings.length > 0 && !autoImprovePreview && (
+        <button
+          onClick={onAutoImprove}
+          className="matrix-btn text-[10px] px-3 py-1.5 flex items-center gap-1.5"
+          style={{ borderColor: 'var(--theme-info)', color: 'var(--theme-info)' }}
+          title="Automatically adjust colors to improve readability. Preview before confirming."
+        >
+          <span style={{ fontSize: '12px' }}>&#x2728;</span>
+          Auto-improve readability
+        </button>
+      )}
+
+      {/* Auto-improve preview confirmation */}
+      {autoImprovePreview && (
+        <div className="rounded p-3 space-y-2" style={{ background: 'rgba(96, 165, 250, 0.06)', border: '1px solid var(--theme-info)' }}>
+          <p className="text-[10px] font-bold" style={{ color: 'var(--theme-info)' }}>
+            Preview: {autoImprovePreview.summary.length} change{autoImprovePreview.summary.length !== 1 ? 's' : ''} applied
+          </p>
+          <ul className="text-[9px] space-y-0.5" style={{ color: 'var(--theme-text-dim)' }}>
+            {autoImprovePreview.summary.map((s, i) => <li key={i}>{s}</li>)}
+          </ul>
+          {autoImprovePreview.unfixed.length > 0 && (
+            <p className="text-[9px]" style={{ color: 'var(--theme-warning)' }}>
+              Could not auto-fix: {autoImprovePreview.unfixed.join(', ')}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button onClick={onConfirmAutoImprove} className="matrix-btn matrix-btn-primary text-[10px] px-3 py-1">
+              Confirm Changes
+            </button>
+            <button onClick={onUndoAutoImprove} className="matrix-btn text-[10px] px-3 py-1">
+              Undo
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Collapsible advanced warnings */}
+      {warnings.length > 0 && (
+        <button
+          onClick={onToggleAdvanced}
+          className="text-[9px] flex items-center gap-1 transition-colors"
+          style={{ color: 'var(--theme-text-muted)' }}
+        >
+          <span style={{ transform: showAdvanced ? 'rotate(90deg)' : 'rotate(0)', transition: 'transform 0.15s' }}>&#x25B6;</span>
+          {showAdvanced ? 'Hide' : 'Show'} detailed warnings ({warnings.length})
+        </button>
+      )}
+
+      {showAdvanced && warnings.length > 0 && (
+        <div className="space-y-2">
+          {warnings.map((w, i) => (
+            <ContrastWarningCard
+              key={`${w.fgToken}-${w.bgToken}`}
+              warning={w}
+              onApplyFix={onApplyFix}
+              onAcknowledge={() => onAcknowledge(w.fgToken, w.bgToken)}
+              onUnacknowledge={() => onUnacknowledge(w.fgToken, w.bgToken)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Contrast Warning Card ───
+
+function ContrastWarningCard({
+  warning,
+  onApplyFix,
+  onAcknowledge,
+  onUnacknowledge,
+}: {
+  warning: ContrastWarning;
+  onApplyFix: (fix: ContrastFix) => void;
+  onAcknowledge: () => void;
+  onUnacknowledge: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const severityClr = severityColor(warning.severity);
+  const severityBg = severityBgColor(warning.severity);
+  const severityLbl = severityLabel(warning.severity);
+
+  return (
+    <div
+      className={`rounded p-3 space-y-2 transition-opacity ${warning.acknowledged ? 'opacity-50' : ''}`}
+      style={{ background: severityBg, border: `1px solid ${severityClr}40` }}
+    >
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-2">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-2 text-left flex-1 min-w-0"
+        >
+          <span className="text-[9px] px-1.5 py-0.5 rounded font-bold flex-shrink-0" style={{
+            color: severityClr,
+            border: `1px solid ${severityClr}60`,
+            background: `${severityClr}15`,
+          }}>
+            {severityLbl}
+          </span>
+          <span className="text-[10px] font-bold truncate" style={{ color: 'var(--theme-text-dim)' }}>
+            {warning.label}
+          </span>
+          <span className="text-[9px] font-mono flex-shrink-0" style={{ color: severityClr }}>
+            {warning.ratio !== null ? `${warning.ratio.toFixed(2)}:1` : '?'}
+          </span>
+          <span className="text-[9px] flex-shrink-0" style={{ color: 'var(--theme-text-muted)' }}>
+            (target: {warning.targetRatio}:1)
+          </span>
+        </button>
+
+        {/* Acknowledge/snooze */}
+        {warning.acknowledged ? (
+          <button
+            onClick={onUnacknowledge}
+            className="text-[8px] px-1.5 py-0.5 rounded border flex-shrink-0"
+            style={{ borderColor: 'var(--theme-border)', color: 'var(--theme-text-muted)' }}
+            title="Remove acknowledgment"
+          >
+            Un-snooze
+          </button>
+        ) : (
+          <button
+            onClick={onAcknowledge}
+            className="text-[8px] px-1.5 py-0.5 rounded border flex-shrink-0"
+            style={{ borderColor: 'var(--theme-border)', color: 'var(--theme-text-muted)' }}
+            title="Acknowledge this warning — it will be dimmed but not hidden"
+          >
+            Snooze
+          </button>
+        )}
+      </div>
+
+      {/* Token pair display */}
+      <div className="flex items-center gap-2 text-[9px] font-mono" style={{ color: 'var(--theme-text-muted)' }}>
+        <span className="flex items-center gap-1">
+          <span className="w-3 h-3 rounded-sm border flex-shrink-0" style={{ background: warning.fgValue, borderColor: 'var(--theme-border)' }} />
+          {warning.fgCssVar}
+        </span>
+        <span>vs</span>
+        <span className="flex items-center gap-1">
+          <span className="w-3 h-3 rounded-sm border flex-shrink-0" style={{ background: warning.bgValue, borderColor: 'var(--theme-border)' }} />
+          {warning.bgCssVar}
+        </span>
+      </div>
+
+      {/* Expanded details */}
+      {expanded && (
+        <div className="space-y-2 pt-1">
+          {/* Explanation */}
+          <p className="text-[9px] leading-relaxed" style={{ color: 'var(--theme-text-dim)' }}>
+            {warning.explanation}
+          </p>
+
+          {/* Preview: how the text looks */}
+          <div className="flex gap-2">
+            <div className="rounded px-3 py-2 text-[11px] font-bold" style={{ background: warning.bgValue, color: warning.fgValue }}>
+              Sample text Abc 123
+            </div>
+          </div>
+
+          {/* Fixes */}
+          {warning.fixes.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[9px] font-bold" style={{ color: 'var(--theme-text-muted)' }}>
+                Quick fixes:
+              </p>
+              {warning.fixes.map(fix => (
+                <button
+                  key={fix.id}
+                  onClick={() => onApplyFix(fix)}
+                  className="flex items-center gap-2 w-full text-left text-[9px] px-2 py-1 rounded border transition-all hover:opacity-80"
+                  style={{ borderColor: `${severityClr}30`, color: 'var(--theme-text-dim)' }}
+                  title={fix.description}
+                >
+                  <span className="w-3 h-3 rounded-sm border flex-shrink-0" style={{ background: fix.suggestedValue, borderColor: 'var(--theme-border)' }} />
+                  <span className="font-bold" style={{ color: severityClr }}>{fix.label}</span>
+                  <span className="text-[8px]" style={{ color: 'var(--theme-text-muted)' }}>{fix.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Token Editor Row ───
 
 function TokenEditor({ definition, value, onChange }: {
@@ -493,6 +1020,26 @@ function TokenEditor({ definition, value, onChange }: {
     );
   }
 
+  if (definition.type === 'opacity') {
+    return (
+      <div className="flex items-center gap-3">
+        <div className="w-32 text-[10px] truncate" style={{ color: 'var(--theme-text-dim)' }} title={definition.label}>
+          {definition.label}
+        </div>
+        <input
+          type="range" min="0" max="1" step="0.01"
+          value={parseFloat(value) || 0}
+          onChange={e => onChange(e.target.value)}
+          className="flex-1"
+          style={{ accentColor: 'var(--theme-accent)' }}
+        />
+        <span className="text-[9px] font-mono w-10" style={{ color: 'var(--theme-text-muted)' }}>
+          {parseFloat(value)?.toFixed(2) || '0.00'}
+        </span>
+      </div>
+    );
+  }
+
   // Color type
   const handleHexChange = (raw: string) => {
     setHexInput(raw);
@@ -500,6 +1047,7 @@ function TokenEditor({ definition, value, onChange }: {
     if (validated) {
       onChange(validated);
     }
+    // Don't update if invalid — prevents flash-of-invisible UI
   };
 
   const handleColorPicker = (hex: string) => {
@@ -586,6 +1134,17 @@ function PresetManager({ presets, activePresetId, onApply, onDuplicate, onDelete
               <div className="w-3 h-3 rounded-full" style={{ background: p.tokens.appBg || '#000' }} />
               <div className="w-3 h-3 rounded-full" style={{ background: p.tokens.accent || '#0f0' }} />
               <div className="w-3 h-3 rounded-full" style={{ background: p.tokens.textPrimary || '#fff' }} />
+              {/* Sprint 20: Rain hue swatch */}
+              {p.matrixRainEnabled && (
+                <div
+                  className="w-3 h-3 rounded-full border"
+                  style={{
+                    background: p.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE,
+                    borderColor: 'var(--theme-border)',
+                  }}
+                  title={`Rain hue: ${p.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE}`}
+                />
+              )}
             </div>
 
             <span className="font-bold flex-1" style={{ color: 'var(--theme-text-primary)' }}>
@@ -636,4 +1195,42 @@ function PresetManager({ presets, activePresetId, onApply, onDuplicate, onDelete
       </div>
     </div>
   );
+}
+
+// ─── Color Utility Helpers ───
+
+function hexToHue(hex: string): number {
+  try {
+    const cleaned = hex.replace(/^#/, '');
+    if (cleaned.length < 6) return 120;
+    const r = parseInt(cleaned.slice(0, 2), 16) / 255;
+    const g = parseInt(cleaned.slice(2, 4), 16) / 255;
+    const b = parseInt(cleaned.slice(4, 6), 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const d = max - min;
+    if (d === 0) return 0;
+    let h: number;
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+    return Math.round(h * 360);
+  } catch {
+    return 120;
+  }
+}
+
+function hueToHex(hue: number): string {
+  const h = hue / 60;
+  const c = 1;
+  const x = 1 - Math.abs(h % 2 - 1);
+  let r = 0, g = 0, b = 0;
+  if (h >= 0 && h < 1) { r = c; g = x; }
+  else if (h >= 1 && h < 2) { r = x; g = c; }
+  else if (h >= 2 && h < 3) { g = c; b = x; }
+  else if (h >= 3 && h < 4) { g = x; b = c; }
+  else if (h >= 4 && h < 5) { r = x; b = c; }
+  else { r = c; b = x; }
+  const toHex = (n: number) => Math.round(n * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }

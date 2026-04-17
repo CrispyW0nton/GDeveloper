@@ -1,4 +1,11 @@
-import React, { useEffect } from 'react';
+/**
+ * App — Root application component
+ * Sprint 19: adds right-side FileTreePanel, Live Code View,
+ * and wires auto-continue + file highlight state.
+ * Sprint 20: Real-time theme editing, Matrix rain hue control.
+ */
+
+import React, { useEffect, useState, useCallback } from 'react';
 import { useAppState, TabId } from './store';
 import { ThemeProvider, useTheme } from './themes/ThemeContext';
 import Sidebar from './components/common/Sidebar';
@@ -16,6 +23,12 @@ import WorkspacePanel from './components/workspace/WorkspacePanel';
 import TerminalPanel from './components/terminal/TerminalPanel';
 import BottomPanel from './components/common/BottomPanel';
 import SandboxMonitor from './components/sandbox/SandboxMonitor';
+import FileTreePanel from './components/fileTree/FileTreePanel';
+import LiveCodeView, { type FileViewState } from './components/liveView/LiveCodeView';
+import CompareWorkspace from './components/compare/CompareWorkspace';
+import type { ModelMeta } from './store';
+
+const api = (window as any).electronAPI;
 
 export default function App() {
   return (
@@ -32,28 +45,228 @@ function AppInner() {
     clearStartupError, setExecutionMode, toggleTerminalPanel,
     setTerminalPanelHeight, setTerminalPanelOpen,
     setSelectedModel, toggleSandboxMonitor, setSandboxMonitorOpen,
+    refreshWorktreeContext,
+    // Sprint 19
+    setFileTreeOpen, setFileTreeWidth,
+    setAutoContinueEnabled,
+    setLiveViewOpen, setLiveViewAutoOpen,
+    setActiveFilePath, addHighlightedFile, clearHighlightedFiles,
+    // Sprint 21
+    setTokenBudget, setRateLimitSnapshot, setRetryState,
+    // Sprint 23
+    setModelMetaList, setDefaultModel: setDefaultModelAction,
+    setEditorDirtyFile, setEditorToast,
+    // Sprint 24
+    setSessionUsage,
+    // Sprint 25
+    setAttachmentConfig,
+    // Sprint 27
+    openCompareWorkspace, closeCompareWorkspace,
   } = useAppState();
   const {
     showMatrixRain, showCrtOverlay,
     backdropType, backdropOpacity, backdropIntensity, matrixRainEnabled, crtOverlayEnabled,
     activePreset,
+    matrixRainHue, // Sprint 20
   } = useTheme();
 
-  // Global Ctrl+` handler for toggling terminal
+  // Sprint 25: Vision support tracking
+  const [visionSupported, setVisionSupported] = useState<boolean>(true);
+
+  // Sprint 25.5: Model refresh state
+  const [isRefreshingModels, setIsRefreshingModels] = useState(false);
+  const handleRefreshModels = useCallback(async () => {
+    if (!api?.refreshModels) return;
+    setIsRefreshingModels(true);
+    try {
+      const result = await api.refreshModels();
+      if (result?.success && result.models) {
+        setModelMetaList(result.models);
+        if (result.selectedModel) {
+          setSelectedModel(result.selectedModel);
+        }
+      }
+    } catch (err) {
+      console.warn('[App] Model refresh failed:', err);
+    } finally {
+      setIsRefreshingModels(false);
+    }
+  }, [setModelMetaList, setSelectedModel]);
+
+  // Sprint 19: Live Code View state
+  const [liveFile, setLiveFile] = useState<FileViewState | null>(null);
+  const [recentLiveFiles, setRecentLiveFiles] = useState<FileViewState[]>([]);
+  const [editProgress, setEditProgress] = useState<string>('');
+
+  // Sprint 23 + Sprint 25.5: Load model metadata on startup via discovery API
+  useEffect(() => {
+    if (!api) return;
+    // Use discoverModels (dynamic) instead of getModelMetaList (static)
+    const loadModels = async () => {
+      try {
+        // First try dynamic discovery
+        if (api.discoverModels) {
+          const discovered = await api.discoverModels();
+          if (discovered && discovered.length > 0) {
+            setModelMetaList(discovered);
+          }
+        } else if (api.getModelMetaList) {
+          const models = await api.getModelMetaList();
+          if (models && models.length > 0) {
+            setModelMetaList(models);
+          }
+        }
+      } catch { /* fallback to empty */ }
+
+      // Also load and validate default model
+      try {
+        if (api.validateSelectedModel) {
+          const result = await api.validateSelectedModel();
+          if (result?.model) setSelectedModel(result.model);
+          if (result?.availableModels?.length > 0) setModelMetaList(result.availableModels);
+        } else if (api.getDefaultModel) {
+          const model = await api.getDefaultModel();
+          if (model) setDefaultModelAction(model);
+        }
+      } catch { /* ignore */ }
+    };
+
+    loadModels();
+  }, [state.apiKeyConfigured, state.apiKeyProvider, setModelMetaList, setDefaultModelAction, setSelectedModel]);
+
+  // Sprint 25: Check vision support when model changes
+  useEffect(() => {
+    if (!api?.checkVisionSupport) return;
+    api.checkVisionSupport(state.selectedModel).then((result: any) => {
+      setVisionSupported(result?.supportsVision ?? true);
+    }).catch(() => setVisionSupported(true));
+  }, [state.selectedModel]);
+
+  // Sprint 25: Load attachment config on startup
+  useEffect(() => {
+    if (!api?.getAttachmentConfig) return;
+    api.getAttachmentConfig().then((config: any) => {
+      if (config) setAttachmentConfig(config);
+    }).catch(() => {});
+  }, [setAttachmentConfig]);
+
+  // Sprint 21: Subscribe to rate-limit and retry-state updates from main process
+  useEffect(() => {
+    if (!api?.onRateLimitUpdate) return;
+    const unsubRL = api.onRateLimitUpdate((data: any) => setRateLimitSnapshot(data));
+    return () => { if (unsubRL) unsubRL(); };
+  }, [setRateLimitSnapshot]);
+
+  useEffect(() => {
+    if (!api?.onRetryStateUpdate) return;
+    const unsubRS = api.onRetryStateUpdate((data: any) => setRetryState(data));
+    return () => { if (unsubRS) unsubRS(); };
+  }, [setRetryState]);
+
+  // Sprint 17: Refresh worktree context when workspace changes
+  useEffect(() => {
+    if (state.activeWorkspace) {
+      refreshWorktreeContext();
+    }
+  }, [state.activeWorkspace?.id, refreshWorktreeContext]);
+
+  // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+` — toggle terminal
       if (e.key === '`' && e.ctrlKey) {
         e.preventDefault();
         toggleTerminalPanel();
       }
+      // Ctrl+B — toggle file tree
+      if (e.key === 'b' && e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        setFileTreeOpen(!state.fileTreeOpen);
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleTerminalPanel]);
+  }, [toggleTerminalPanel, state.fileTreeOpen, setFileTreeOpen]);
+
+  // Sprint 19: Listen for file-change events from main (live view updates)
+  useEffect(() => {
+    if (!api?.onFileChanged) return;
+    const unsubscribe = api.onFileChanged((data: any) => {
+      if (data.filePath) {
+        addHighlightedFile(data.filePath);
+        // Auto-open live view if configured
+        if (state.liveViewAutoOpen && !state.liveViewOpen) {
+          setLiveViewOpen(true);
+        }
+        // Load file content for live view
+        loadFileForLiveView(data.filePath, data.absolutePath, data.toolName);
+      }
+    });
+    return () => { if (unsubscribe) unsubscribe(); };
+  }, [state.liveViewAutoOpen, state.liveViewOpen, addHighlightedFile, setLiveViewOpen]);
+
+  // Sprint 19: Listen for sandbox events to detect file edits
+  useEffect(() => {
+    if (!api?.onSandboxEvent) return;
+    const unsubscribe = api.onSandboxEvent((data: any) => {
+      if (data.type === 'file_edit' && data.detail) {
+        // Extract file path from the sandbox event detail
+        try {
+          const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+          const pathMatch = detail.match(/(?:path|file_path)['":\s]+([^\s'"]+)/);
+          if (pathMatch) {
+            addHighlightedFile(pathMatch[1]);
+          }
+        } catch { /* ignore */ }
+      }
+    });
+    return () => { if (unsubscribe) unsubscribe(); };
+  }, [addHighlightedFile]);
+
+  // Load file content for live view
+  const loadFileForLiveView = useCallback(async (filePath: string, absolutePath: string, toolName?: string) => {
+    if (!api?.readFileContent) return;
+    try {
+      const result = await api.readFileContent(absolutePath || filePath);
+      const fileState: FileViewState = {
+        filePath,
+        absolutePath: absolutePath || filePath,
+        content: result.content,
+        isBinary: result.isBinary,
+        isTooLarge: result.isTooLarge,
+        size: result.size || 0,
+        lastTool: toolName,
+        isBeingEdited: true,
+        timestamp: Date.now(),
+      };
+      setLiveFile(fileState);
+      setActiveFilePath(filePath);
+      // Update recent files list
+      setRecentLiveFiles(prev => {
+        const filtered = prev.filter(f => f.filePath !== filePath);
+        return [fileState, ...filtered].slice(0, 10);
+      });
+    } catch { /* ignore read errors */ }
+  }, [setActiveFilePath]);
+
+  // Handle file selection from file tree
+  const handleFileTreeSelect = useCallback((filePath: string, absolutePath: string) => {
+    setActiveFilePath(filePath);
+    loadFileForLiveView(filePath, absolutePath);
+    setLiveViewOpen(true);
+  }, [setActiveFilePath, loadFileForLiveView, setLiveViewOpen]);
+
+  // Handle switching files in live view
+  const handleLiveFileSwitch = useCallback((filePath: string) => {
+    const recent = recentLiveFiles.find(f => f.filePath === filePath);
+    if (recent) {
+      setLiveFile(recent);
+      setActiveFilePath(filePath);
+    }
+  }, [recentLiveFiles, setActiveFilePath]);
 
   /**
    * Build repo display from activeWorkspace (preferred) or selectedRepo.
-   * Used by Chat, Diff, Activity which need a repo-like object.
    */
   const repoDisplay = state.activeWorkspace
     ? {
@@ -65,6 +278,13 @@ function AppInner() {
         isPrivate: false,
       }
     : state.selectedRepo;
+
+  // Worktree label for file tree
+  const worktreeLabel = state.worktreeContext
+    ? state.worktreeContext.isMain ? 'Main' : `Linked: ${state.worktreeContext.branch || 'detached'}`
+    : undefined;
+
+  const highlightedSet = new Set(state.highlightedFiles);
 
   const renderMainContent = () => {
     // If no API key, show settings first
@@ -82,13 +302,13 @@ function AppInner() {
             onWorkspaceActivated={(ws) => {
               setActiveWorkspace(ws);
               refreshWorkspaces();
+              clearHighlightedFiles();
             }}
             onRefreshWorkspaces={refreshWorkspaces}
           />
         );
 
       case 'chat':
-        // Chat needs a session and repo — both are auto-created from workspace
         if (state.currentSession && repoDisplay) {
           return (
             <ChatWorkspace
@@ -100,22 +320,52 @@ function AppInner() {
               selectedModel={state.selectedModel}
               availableModels={state.availableModels}
               onModelChange={setSelectedModel}
+              worktreeContext={state.worktreeContext}
+              autoContinueEnabled={state.autoContinueEnabled}
+              onAutoContinueToggle={() => setAutoContinueEnabled(!state.autoContinueEnabled)}
+              autoContinueMaxIterations={state.autoContinueMaxIterations}
+              rateLimitSnapshot={state.rateLimitSnapshot}
+              retryState={state.retryState}
+              softInputLimit={state.tokenBudget.softInputTokensPerMinute}
+              softOutputLimit={state.tokenBudget.softOutputTokensPerMinute}
+              softRequestLimit={state.tokenBudget.softRequestsPerMinute}
+              modelMetaList={state.modelMetaList}
+              defaultModel={state.defaultModel}
+              onSetDefaultModel={setDefaultModelAction}
+              apiKeyConfigured={state.apiKeyConfigured}
+              sessionUsage={state.sessionUsage}
+              onSessionUsageUpdate={setSessionUsage}
+              attachmentConfig={state.attachmentConfig}
+              visionSupported={visionSupported}
+              onRefreshModels={handleRefreshModels}
+              isRefreshingModels={isRefreshingModels}
+              onOpenCompareWorkspace={openCompareWorkspace}
             />
           );
         }
         return (
           <EmptyState
             icon="chat"
-            title="No workspace active"
-            subtitle="Activate a workspace to start chatting with the AI coding assistant."
-            actionLabel="Go to Workspaces"
+            title="Ready to code"
+            subtitle="Open a project to start chatting with Claude. It can read your files, write code, run commands, and commit changes."
+            actionLabel="Open a Project"
             onAction={() => setTab('workspace')}
+            hint="Tip: Clone a GitHub repo or open a local folder from the Workspaces tab."
           />
         );
 
       case 'terminal':
-        // Terminal tab now opens bottom panel instead — but keep fallback
         return <TerminalPanel activeWorkspace={state.activeWorkspace} />;
+
+      case 'compare':
+        if (state.compareSessionId) {
+          return <CompareWorkspace sessionId={state.compareSessionId} onClose={closeCompareWorkspace} />;
+        }
+        return (
+          <div className="h-full flex items-center justify-center text-matrix-text-muted/50 text-sm">
+            No active compare session. Use <code className="bg-matrix-bg-elevated px-1.5 py-0.5 rounded mx-1">/compare-file</code> or <code className="bg-matrix-bg-elevated px-1.5 py-0.5 rounded mx-1">/compare-folder</code> from chat.
+          </div>
+        );
 
       case 'github':
         return (
@@ -142,9 +392,10 @@ function AppInner() {
           <EmptyState
             icon="tasks"
             title="No tasks yet"
-            subtitle="Tasks are created automatically when you chat with the AI. Activate a workspace and start coding."
-            actionLabel="Go to Workspaces"
-            onAction={() => setTab('workspace')}
+            subtitle="Tasks are created automatically as you chat with the AI. Start a conversation and GDeveloper will break your requests into trackable tasks."
+            actionLabel="Start Chatting"
+            onAction={() => setTab(state.activeWorkspace ? 'chat' : 'workspace')}
+            hint="Tasks help you track what the AI is doing and what's been completed."
           />
         );
 
@@ -156,9 +407,10 @@ function AppInner() {
           <EmptyState
             icon="diff"
             title="No file changes yet"
-            subtitle="Diffs appear after the AI modifies files in your workspace."
-            actionLabel="Go to Workspaces"
-            onAction={() => setTab('workspace')}
+            subtitle="When the AI writes or edits files, the before/after diff shows up here. You can also toggle a live git diff view."
+            actionLabel="Start Building"
+            onAction={() => setTab(state.activeWorkspace ? 'chat' : 'workspace')}
+            hint='Try asking the AI to "add error handling" or "write tests" to see diffs appear.'
           />
         );
 
@@ -170,9 +422,10 @@ function AppInner() {
           <EmptyState
             icon="activity"
             title="No activity yet"
-            subtitle="Activity events are logged as you use the platform — chat, tools, git, MCP."
-            actionLabel="Go to Workspaces"
-            onAction={() => setTab('workspace')}
+            subtitle="Every action is logged here: chats, tool calls, git operations, MCP events. This is your audit trail."
+            actionLabel="Start Chatting"
+            onAction={() => setTab(state.activeWorkspace ? 'chat' : 'workspace')}
+            hint="Use /verify-last to cross-check the AI's claims against actual file changes."
           />
         );
 
@@ -183,6 +436,10 @@ function AppInner() {
             selectedModel={state.selectedModel}
             availableModels={state.availableModels}
             onModelChange={setSelectedModel}
+            tokenBudget={state.tokenBudget}
+            onTokenBudgetChange={setTokenBudget}
+            attachmentConfig={state.attachmentConfig}
+            onAttachmentConfigChange={setAttachmentConfig}
           />
         );
 
@@ -191,26 +448,26 @@ function AppInner() {
     }
   };
 
+  // Determine if file tree / live view should show (only when workspace is active)
+  const showRightPanel = state.activeWorkspace && (state.fileTreeOpen || state.liveViewOpen);
+
   return (
     <>
-      {/* Backdrop Renderer — Sprint 16 Addendum: supports matrix-rain, puddles, gradient, noise, none */}
       <BackdropRenderer
         type={backdropType}
         opacity={backdropOpacity}
         intensity={backdropIntensity}
         enabled={backdropType !== 'none'}
         accentColor={activePreset?.tokens?.accent || '#00ff41'}
+        matrixRainHue={matrixRainHue}
       />
 
-      {/* Legacy Matrix Rain — shown if backdrop is not matrix-rain but matrixRainEnabled is true */}
       {matrixRainEnabled && backdropType !== 'matrix-rain' && (
-        <MatrixRainCanvas opacity={0.2} fontSize={14} color={activePreset?.tokens?.accent || '#00ff41'} speed={33} />
+        <MatrixRainCanvas opacity={0.2} fontSize={14} color={activePreset?.tokens?.accent || '#00ff41'} speed={33} rainHue={matrixRainHue} />
       )}
 
-      {/* CRT Scanline Overlay */}
       {crtOverlayEnabled && <div className="crt-overlay" />}
 
-      {/* Startup Error Banner */}
       {state.startupError && (
         <div className="fixed top-0 left-0 right-0 z-50 px-4 py-2 text-xs flex items-center justify-between"
              style={{ background: 'rgba(127, 29, 29, 0.92)', color: '#fecaca' }}>
@@ -237,11 +494,55 @@ function AppInner() {
           executionMode={state.executionMode}
         />
 
-        {/* Main content area + bottom terminal panel */}
+        {/* Main content area + right panel + bottom terminal */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <main className="flex-1 overflow-hidden animate-fadeIn">
-            {renderMainContent()}
-          </main>
+          <div className="flex-1 flex overflow-hidden">
+            {/* Main content */}
+            <main className="flex-1 overflow-hidden animate-fadeIn">
+              {renderMainContent()}
+            </main>
+
+            {/* Sprint 19: Right-side panels (file tree + live view) */}
+            {showRightPanel && (
+              <div className="flex h-full flex-shrink-0">
+                {/* Live Code View (stacked above file tree when both open) */}
+                {state.liveViewOpen && liveFile && (
+                  <div
+                    className="border-l border-matrix-border/20 flex-shrink-0"
+                    style={{ width: Math.max(300, state.fileTreeWidth + 40) }}
+                  >
+                    <LiveCodeView
+                      visible={state.liveViewOpen}
+                      currentFile={liveFile}
+                      recentFiles={recentLiveFiles}
+                      onFileSwitch={handleLiveFileSwitch}
+                      onClose={() => setLiveViewOpen(false)}
+                      editProgress={editProgress}
+                      workspaceRoot={state.activeWorkspace?.local_path}
+                      onDirtyStateChange={(fp, dirty) => setEditorDirtyFile(fp, dirty)}
+                      toastMessage={state.editorToast}
+                      onToast={setEditorToast}
+                    />
+                  </div>
+                )}
+
+                {/* File Tree Panel */}
+                {state.fileTreeOpen && (
+                  <FileTreePanel
+                    visible={state.fileTreeOpen}
+                    workspaceName={state.activeWorkspace?.name}
+                    worktreeLabel={worktreeLabel}
+                    width={state.fileTreeWidth}
+                    onWidthChange={setFileTreeWidth}
+                    onClose={() => setFileTreeOpen(false)}
+                    onFileSelect={handleFileTreeSelect}
+                    highlightedFiles={highlightedSet}
+                    activeFilePath={state.activeFilePath}
+                  />
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Bottom Terminal Panel — persists across tab switches */}
           <BottomPanel
@@ -270,7 +571,7 @@ function AppInner() {
   );
 }
 
-// ─── TASK 5: Matrix-themed empty state component ───
+// ─── Matrix-themed empty state component ───
 
 const EMPTY_ICONS: Record<string, React.ReactNode> = {
   chat: (
@@ -306,12 +607,14 @@ function EmptyState({
   subtitle,
   actionLabel,
   onAction,
+  hint,
 }: {
   icon: string;
   title: string;
   subtitle: string;
   actionLabel?: string;
   onAction?: () => void;
+  hint?: string;
 }) {
   return (
     <div className="h-full flex items-center justify-center p-8">
@@ -325,6 +628,9 @@ function EmptyState({
           <button onClick={onAction} className="matrix-btn matrix-btn-primary text-xs">
             {actionLabel}
           </button>
+        )}
+        {hint && (
+          <p className="text-[10px] text-matrix-text-muted/30 mt-3 leading-relaxed">{hint}</p>
         )}
       </div>
     </div>

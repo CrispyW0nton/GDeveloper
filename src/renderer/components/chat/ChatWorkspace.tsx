@@ -1,22 +1,40 @@
 /**
- * ChatWorkspace — Sprint 12 + Sprint 15.2
+ * ChatWorkspace — Sprint 12 + Sprint 15.2 + Sprint 18 + Sprint 25
  * Full chat UI with streaming, tool-call display, history persistence.
  * Sprint 12 additions: slash command autocomplete, mode indicator,
  * suggestion cards on empty chat, follow-up action buttons.
  * Sprint 15.2: fix empty tool cards (pass full input/result),
  * prevent raw Anthropic tool_use JSON from rendering in chat,
  * improved tool result matching by toolCallId.
+ * Sprint 18: polished header context, clearer mode/worktree labels,
+ * improved error explanations, tool result readability, microcopy pass.
+ * Sprint 25: drag-drop, clipboard paste, vision, document extraction,
+ * attachment preview modal, security warnings.
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { SessionInfo, SelectedRepo, ExecutionMode } from '../../store';
+import { SessionInfo, SelectedRepo, ExecutionMode, type ModelMeta, type SessionUsage, type AttachmentMeta, type AttachmentConfig } from '../../store';
 import SlashCommandDropdown, { SlashCommandInfo } from './SlashCommandDropdown';
 import SuggestionCards from './SuggestionCards';
 import FollowupButtons from './FollowupButtons';
 import ToolCallCard from './ToolCallCard';
-import TaskPlanCard from './TaskPlanCard';
+import AutoContinueToggle, { type AutoContinueStatus, type AutoContinuePhase } from './AutoContinueToggle';
+import RateLimitIndicator, { type RateLimitSnapshot, type RetryState } from './RateLimitIndicator';
+import ModelPickerInline from './ModelPickerInline';
+import TokenCounter from './TokenCounter';
+import AttachmentChip from './AttachmentChip';
+import DropZoneOverlay from './DropZoneOverlay';
+import AttachmentPreviewModal from './AttachmentPreviewModal';
 
 const api = (window as any).electronAPI;
+
+interface WorktreeContextInfo {
+  isWorktree: boolean;
+  isMain: boolean;
+  isLinked: boolean;
+  branch: string | null;
+  head: string;
+}
 
 interface ChatWorkspaceProps {
   session: SessionInfo;
@@ -27,6 +45,33 @@ interface ChatWorkspaceProps {
   selectedModel?: string;
   availableModels?: string[];
   onModelChange?: (model: string) => void;
+  worktreeContext?: WorktreeContextInfo | null;
+  // Sprint 19: Auto-continue
+  autoContinueEnabled?: boolean;
+  onAutoContinueToggle?: () => void;
+  autoContinueMaxIterations?: number;
+  // Sprint 21: Rate limiting
+  rateLimitSnapshot?: RateLimitSnapshot | null;
+  retryState?: RetryState | null;
+  softInputLimit?: number;
+  softOutputLimit?: number;
+  softRequestLimit?: number;
+  // Sprint 23: Model picker metadata
+  modelMetaList?: ModelMeta[];
+  defaultModel?: string;
+  onSetDefaultModel?: (model: string) => void;
+  apiKeyConfigured?: boolean;
+  // Sprint 24: Token counter
+  sessionUsage?: SessionUsage | null;
+  onSessionUsageUpdate?: (usage: SessionUsage) => void;
+  // Sprint 25: Attachments
+  attachmentConfig?: AttachmentConfig;
+  visionSupported?: boolean;
+  // Sprint 25.5: Model refresh
+  onRefreshModels?: () => void;
+  isRefreshingModels?: boolean;
+  // Sprint 27: Compare workspace
+  onOpenCompareWorkspace?: (sessionId: string) => void;
 }
 
 interface ToolCallDisplay {
@@ -46,7 +91,7 @@ interface Message {
   streaming?: boolean;
 }
 
-export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange }: ChatWorkspaceProps) {
+export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange, worktreeContext, autoContinueEnabled, onAutoContinueToggle, autoContinueMaxIterations, rateLimitSnapshot, retryState, softInputLimit, softOutputLimit, softRequestLimit, modelMetaList, defaultModel, onSetDefaultModel, apiKeyConfigured, sessionUsage, onSessionUsageUpdate, attachmentConfig, visionSupported, onRefreshModels, isRefreshingModels, onOpenCompareWorkspace }: ChatWorkspaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -59,6 +104,27 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   // Slash command state
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [showSlashDropdown, setShowSlashDropdown] = useState(false);
+
+  // Sprint 25: Attachment state
+  const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [previewAttachment, setPreviewAttachment] = useState<AttachmentMeta | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string>('');
+  const dragCounterRef = useRef(0);
+
+  // Sprint 19 + 22: Auto-continue state
+  const [autoContinueStatus, setAutoContinueStatus] = useState<AutoContinueStatus>({
+    active: false,
+    phase: 'idle' as AutoContinuePhase,
+    currentIteration: 0,
+    maxIterations: autoContinueMaxIterations || 10,
+    lastStatus: 'idle',
+    pauseReason: null,
+    cancelledBy: null,
+    tasksCompleted: 0,
+    tasksTotal: 0,
+  });
+  const autoContinueDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -176,16 +242,21 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         setMessages(prev => [...prev, researchMsg]);
         setStreamingContent('');
         setIsLoading(false);
+      } else if (data.type === 'usage-update') {
+        // Sprint 24: Token counter update from main process
+        if (data.sessionUsage && onSessionUsageUpdate) {
+          onSessionUsageUpdate(data.sessionUsage);
+        }
       } else if (data.type === 'done') {
         setStreamingContent('');
       } else if (data.type === 'error') {
         setStreamingContent('');
-        // Show error in chat if it was a research error
+        // Show error in chat with a friendly explanation
         if (data.content) {
           const errMsg: Message = {
             id: `msg-err-${Date.now()}`,
             role: 'system',
-            content: data.content,
+            content: formatErrorMessage(data.content),
             timestamp: new Date().toISOString(),
           };
           setMessages(prev => [...prev, errMsg]);
@@ -240,7 +311,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       const errMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: 'system',
-        content: 'Slash commands not available in web preview mode.',
+        content: 'Slash commands are not available in web preview mode. Run the full Electron app to use commands.',
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, errMsg]);
@@ -280,42 +351,202 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       const errMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: 'system',
-        content: `Command error: ${err instanceof Error ? err.message : String(err)}`,
+        content: formatErrorMessage(err instanceof Error ? err.message : String(err)),
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, errMsg]);
     }
   }, [session.id, onModeChange]);
 
+  // Sprint 25: Process file for attachment
+  const processFile = useCallback(async (file: File, source: AttachmentMeta['source'] = 'drag-drop') => {
+    if (!api?.processAttachment) return;
+
+    const config = attachmentConfig;
+    const maxFiles = config?.maxFilesPerMessage || 10;
+    const maxTotalMB = config?.maxTotalSizeMB || 50;
+
+    if (attachments.length >= maxFiles) {
+      setAttachmentError(`Maximum ${maxFiles} files per message`);
+      setTimeout(() => setAttachmentError(''), 3000);
+      return;
+    }
+
+    // Check total size
+    const currentTotalBytes = attachments.reduce((s, a) => s + a.size, 0);
+    if ((currentTotalBytes + file.size) / (1024 * 1024) > maxTotalMB) {
+      setAttachmentError(`Total size exceeds ${maxTotalMB} MB limit`);
+      setTimeout(() => setAttachmentError(''), 3000);
+      return;
+    }
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const buffer = Array.from(new Uint8Array(arrayBuffer));
+      const result = await api.processAttachment({
+        buffer,
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        conversationId: session.id,
+        source,
+      });
+
+      if (result.success && result.attachment) {
+        setAttachments(prev => [...prev, result.attachment]);
+        setAttachmentError('');
+      } else {
+        setAttachmentError(result.error || 'Failed to process file');
+        setTimeout(() => setAttachmentError(''), 3000);
+      }
+    } catch (err) {
+      setAttachmentError(err instanceof Error ? err.message : 'Failed to process file');
+      setTimeout(() => setAttachmentError(''), 3000);
+    }
+  }, [attachments, attachmentConfig, session.id]);
+
+  // Sprint 25: Drag-drop handlers
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragOver(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    dragCounterRef.current = 0;
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    for (const file of files.slice(0, 10)) {
+      await processFile(file, 'drag-drop');
+    }
+  }, [processFile]);
+
+  // Sprint 25: Clipboard paste handler
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    if (!api?.processClipboardImage) return;
+
+    const items = Array.from(e.clipboardData.items);
+    const imageItem = items.find(item => item.type.startsWith('image/'));
+
+    if (imageItem) {
+      e.preventDefault();
+      const blob = imageItem.getAsFile();
+      if (!blob) return;
+
+      // Convert blob to base64 for IPC
+      const arrayBuffer = await blob.arrayBuffer();
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+      try {
+        const result = await api.processClipboardImage({
+          pngBase64: base64,
+          conversationId: session.id,
+        });
+
+        if (result.success && result.attachment) {
+          setAttachments(prev => [...prev, result.attachment]);
+        } else {
+          setAttachmentError(result.error || 'Failed to process clipboard image');
+          setTimeout(() => setAttachmentError(''), 3000);
+        }
+      } catch (err) {
+        setAttachmentError(err instanceof Error ? err.message : 'Clipboard paste failed');
+        setTimeout(() => setAttachmentError(''), 3000);
+      }
+    }
+    // Text paste: let default behavior handle it
+  }, [session.id]);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments(prev => prev.filter(a => a.id !== id));
+  }, []);
+
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    if ((!input.trim() && attachments.length === 0) || isLoading) return;
 
     const trimmed = input.trim();
 
-    // Check if it's a slash command
-    if (trimmed.startsWith('/')) {
+    // Check if it's a slash command (only text, no attachments)
+    if (trimmed.startsWith('/') && attachments.length === 0) {
       setInput('');
       setShowSlashDropdown(false);
       await executeSlashCommand(trimmed);
       return;
     }
 
+    // Sprint 25: Build message with attachments
+    const hasAttachments = attachments.length > 0;
+    const attachmentSummary = hasAttachments
+      ? `\n[${attachments.length} file${attachments.length !== 1 ? 's' : ''} attached: ${attachments.map(a => a.originalName).join(', ')}]`
+      : '';
+
+    // Sprint 25: Check vision warning
+    const hasImages = attachments.some(a => a.type === 'image');
+    if (hasImages && visionSupported === false) {
+      setAttachmentError('Current model does not support vision. Images will be sent as metadata only.');
+      setTimeout(() => setAttachmentError(''), 5000);
+    }
+
+    const displayContent = trimmed + attachmentSummary;
     const userMsg: Message = {
       id: `msg-${Date.now()}`,
       role: 'user',
-      content: trimmed,
+      content: displayContent,
       timestamp: new Date().toISOString(),
     };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
+    const sentAttachments = [...attachments];
+    setAttachments([]);
     setIsLoading(true);
     setStreamingContent('');
     setStreamingToolCalls([]);
     setShowSuggestions(false);
 
+    let lastResponseContent = '';
     try {
       if (api) {
-        const result = await api.sendMessage(session.id, trimmed);
+        // Sprint 25: Build content with attachments for the API
+        let messageContent = trimmed;
+        if (sentAttachments.length > 0) {
+          // Append document text for non-image attachments
+          const docTexts = sentAttachments
+            .filter(a => a.type !== 'image' && a.extractedText)
+            .map(a => `\n\n--- Attached file: ${a.originalName} (${(a.size / 1024).toFixed(1)} KB) ---\n${a.extractedText}\n--- End of ${a.originalName} ---`);
+          messageContent = trimmed + docTexts.join('');
+
+          // Add image descriptions for context
+          const imageDescs = sentAttachments
+            .filter(a => a.type === 'image')
+            .map(a => `[Image: ${a.originalName}${a.width && a.height ? ` ${a.width}x${a.height}` : ''}, ~${a.visionTokenEstimate || 'unknown'} tokens]`);
+          if (imageDescs.length > 0) {
+            messageContent = `${trimmed}\n\n${imageDescs.join('\n')}`;
+          }
+        }
+
+        const result = await api.sendMessage(session.id, messageContent);
+        lastResponseContent = result.content || '';
 
         const assistantMsg: Message = {
           id: result.id || `msg-${Date.now() + 1}`,
@@ -344,7 +575,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       const errMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : 'Failed to send message'}`,
+        content: formatErrorMessage(err instanceof Error ? err.message : 'Failed to send message'),
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, errMsg]);
@@ -353,7 +584,181 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     setIsLoading(false);
     setStreamingContent('');
     setStreamingToolCalls([]);
+
+    // Sprint 24: Auto-continue — send follow-up nudge if active
+    if (autoContinueStatus.active && autoContinueStatus.phase !== 'paused') {
+      scheduleAutoContinue(lastResponseContent);
+    }
   };
+
+  // Sprint 24: Fixed auto-continue scheduler — uses shouldAutoContinue IPC check
+  const scheduleAutoContinue = useCallback(async (lastContent: string) => {
+    if (!api?.autoContinueStatus) return;
+
+    // Cancel any existing scheduled turn
+    if (autoContinueDebounceRef.current) {
+      clearTimeout(autoContinueDebounceRef.current);
+      autoContinueDebounceRef.current = null;
+    }
+
+    // Don't schedule while user is typing
+    if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
+      return;
+    }
+
+    try {
+      const statusResult = await api.autoContinueStatus();
+      const status: AutoContinueStatus = statusResult;
+      setAutoContinueStatus(status);
+      if (!status.active || status.phase === 'paused') return;
+
+      // Debounce: wait 500ms before sending next nudge (configurable range 500-1500ms)
+      const debounceMs = 500;
+      autoContinueDebounceRef.current = setTimeout(async () => {
+        autoContinueDebounceRef.current = null;
+
+        // Re-check state (user might have cancelled during debounce)
+        const recheck = await api.autoContinueStatus();
+        setAutoContinueStatus(recheck);
+        if (!recheck.active || recheck.phase === 'paused') return;
+
+        // Don't auto-continue while user is typing
+        if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
+          return;
+        }
+
+        // Build and send the nudge
+        const iter = recheck.currentIteration + 1;
+        const max = recheck.maxIterations;
+        const taskInfo = recheck.tasksTotal > 0
+          ? ` (${recheck.tasksCompleted}/${recheck.tasksTotal} tasks complete)`
+          : '';
+        const nudge = `Continue with the current task (step ${iter}/${max})${taskInfo}. If all tasks are complete, say "All tasks are complete."`;
+
+        // Add auto-continue nudge as system indicator
+        const nudgeMsg: Message = {
+          id: `msg-nudge-${Date.now()}`,
+          role: 'system',
+          content: `Auto-Continue: step ${iter}/${max}${taskInfo}`,
+          timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, nudgeMsg]);
+
+        // Use direct send to avoid re-triggering input state
+        if (api?.sendMessage) {
+          setIsLoading(true);
+          setStreamingContent('');
+          setStreamingToolCalls([]);
+
+          try {
+            const result = await api.sendMessage(session.id, nudge);
+            const assistantMsg: Message = {
+              id: result.id || `msg-auto-${Date.now()}`,
+              role: 'assistant',
+              content: sanitizeContent(result.content),
+              toolCalls: result.toolCalls?.map((tc: any) => ({
+                name: tc.name,
+                description: `Called ${tc.name}`,
+                status: 'success' as const,
+                input: tc.input || undefined,
+                result: tc.result || undefined,
+              })),
+              timestamp: new Date().toISOString(),
+            };
+            setMessages(prev => [...prev, assistantMsg]);
+
+            setIsLoading(false);
+            setStreamingContent('');
+            setStreamingToolCalls([]);
+
+            // Check if we should continue again
+            const nextCheck = await api.autoContinueStatus();
+            setAutoContinueStatus(nextCheck);
+            if (nextCheck.active && nextCheck.phase !== 'paused') {
+              scheduleAutoContinue(result.content || '');
+            }
+          } catch (err) {
+            setIsLoading(false);
+            // Record error — auto-continue engine tracks consecutive errors
+            try {
+              const errStatus = await api.autoContinueStatus();
+              setAutoContinueStatus(errStatus);
+            } catch { /* ignore */ }
+          }
+        }
+      }, debounceMs);
+    } catch { /* ignore */ }
+  }, [session.id]);
+
+  // Sprint 22: Clean up debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (autoContinueDebounceRef.current) {
+        clearTimeout(autoContinueDebounceRef.current);
+      }
+    };
+  }, []);
+
+  // Sprint 24: Toggle auto-continue ON/OFF — calls start/stop IPC
+  useEffect(() => {
+    if (!api?.autoContinueStart || !api?.autoContinueStop) return;
+
+    const syncState = async () => {
+      if (autoContinueEnabled) {
+        // Start auto-continue engine in main process
+        const state = await api.autoContinueStart({
+          maxIterations: autoContinueMaxIterations || 20,
+          maxElapsedMs: 10 * 60 * 1000,
+          debounceMs: 500,
+        });
+        setAutoContinueStatus(state);
+      } else {
+        // Only stop if currently active
+        const currentStatus = await api.autoContinueStatus();
+        if (currentStatus.active) {
+          const state = await api.autoContinueStop('user');
+          setAutoContinueStatus(state);
+        }
+      }
+    };
+    syncState();
+  }, [autoContinueEnabled, autoContinueMaxIterations]);
+
+  // Sprint 19+22: Handle auto-continue cancel
+  const handleAutoContinueCancel = useCallback(async () => {
+    if (autoContinueDebounceRef.current) {
+      clearTimeout(autoContinueDebounceRef.current);
+      autoContinueDebounceRef.current = null;
+    }
+    if (api?.autoContinueStop) {
+      const result = await api.autoContinueStop('user');
+      setAutoContinueStatus(result);
+    }
+    if (onAutoContinueToggle) onAutoContinueToggle(); // toggle OFF in store
+  }, [onAutoContinueToggle]);
+
+  // Sprint 22: Resume handler
+  const handleAutoContinueResume = useCallback(async () => {
+    if (api?.autoContinueResume) {
+      const result = await api.autoContinueResume();
+      setAutoContinueStatus(result);
+      // Schedule next turn after resume
+      if (result.active) {
+        scheduleAutoContinue('');
+      }
+    }
+  }, [scheduleAutoContinue]);
+
+  // Sprint 19: Escape key cancels auto-continue
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && autoContinueStatus.active) {
+        handleAutoContinueCancel();
+      }
+    };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [autoContinueStatus.active, handleAutoContinueCancel]);
 
   const handleFollowupAction = useCallback((prompt: string) => {
     if (prompt.startsWith('/')) {
@@ -379,42 +784,114 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const hasUserMessages = messages.some(m => m.role === 'user' || m.role === 'assistant');
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
+    <div
+      className="h-full flex flex-col relative"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* Sprint 25: Drop zone overlay */}
+      <DropZoneOverlay active={isDragOver} />
+
+      {/* Sprint 25: Attachment preview modal */}
+      <AttachmentPreviewModal
+        attachment={previewAttachment}
+        attachments={attachments}
+        onClose={() => setPreviewAttachment(null)}
+        onRemove={(id) => { removeAttachment(id); if (attachments.length <= 1) setPreviewAttachment(null); }}
+      />
+      {/* Header — Sprint 18: polished context display */}
       <div className="px-4 py-3 border-b border-matrix-border flex items-center justify-between glass-panel-solid rounded-none border-x-0 border-t-0">
         <div className="flex items-center gap-3">
+          {/* Repo name + branch */}
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-matrix-green animate-pulseDot" />
             <span className="text-sm text-matrix-green font-bold">{repo.fullName}</span>
           </div>
-          <span className="text-[10px] text-matrix-text-muted/40">|</span>
-          <span className="text-[10px] text-matrix-text-dim">branch: {session.workingBranch}</span>
-        </div>
-        <div className="flex items-center gap-3">
-          {/* Mode indicator */}
-          <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold border ${
-            executionMode === 'plan'
-              ? 'border-yellow-500/30 text-yellow-400 bg-yellow-500/5'
-              : 'border-matrix-green/30 text-matrix-green bg-matrix-green/5'
-          }`}>
-            <span>{executionMode === 'plan' ? '\uD83D\uDD0D' : '\uD83D\uDD28'}</span>
-            <span>{executionMode === 'plan' ? 'PLAN MODE' : 'BUILD MODE'}</span>
-          </div>
-          {/* Model picker */}
-          {availableModels && availableModels.length > 0 && onModelChange && (
-            <select
-              value={selectedModel || ''}
-              onChange={e => onModelChange(e.target.value)}
-              className="text-[9px] bg-transparent border border-matrix-border rounded px-1.5 py-0.5 text-matrix-text-dim outline-none focus:border-matrix-green/50 max-w-[140px]"
-              title="Select AI model"
-            >
-              {availableModels.map(m => (
-                <option key={m} value={m} className="bg-matrix-bg text-matrix-text-dim">{m}</option>
-              ))}
-            </select>
+          <span className="text-[10px] text-matrix-text-muted/30">|</span>
+          <span className="text-[10px] text-matrix-text-dim font-mono">{session.workingBranch}</span>
+
+          {/* Sprint 17+18: Worktree context with clearer labels */}
+          {worktreeContext && (
+            <>
+              <span className="text-[10px] text-matrix-text-muted/30">|</span>
+              {worktreeContext.isMain ? (
+                <span className="text-[10px] font-mono text-matrix-green/60 flex items-center gap-1" title="This is the main worktree (your primary checkout)">
+                  <span className="w-1.5 h-1.5 rounded-full bg-matrix-green/40" />
+                  Main
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono text-blue-400/60 flex items-center gap-1" title={`Linked worktree${worktreeContext.branch ? ` on branch ${worktreeContext.branch}` : ' (detached HEAD)'}`}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400/40" />
+                  Linked{worktreeContext.branch ? `: ${worktreeContext.branch}` : ''}
+                  {!worktreeContext.branch && <span className="text-yellow-400/50 ml-1">detached {worktreeContext.head?.substring(0, 7)}</span>}
+                </span>
+              )}
+            </>
           )}
-          <span className={`badge ${isLoading ? 'badge-executing' : 'badge-connected'}`}>
-            {isLoading ? 'Streaming...' : 'Ready'}
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Sprint 24: Token Counter */}
+          <TokenCounter
+            sessionUsage={sessionUsage}
+            rateLimitSnapshot={rateLimitSnapshot}
+            maxContextTokens={80000}
+          />
+
+          {/* Sprint 21: Rate Limit Indicator */}
+          <RateLimitIndicator
+            snapshot={rateLimitSnapshot}
+            retryState={retryState}
+            softInputLimit={softInputLimit}
+            softOutputLimit={softOutputLimit}
+            softRequestLimit={softRequestLimit}
+            onPauseResume={() => api?.pauseResumeRateLimit?.()}
+            onReset={() => api?.resetRateLimit?.()}
+          />
+
+          {/* Sprint 19+22: Auto-Continue Toggle */}
+          {onAutoContinueToggle && (
+            <AutoContinueToggle
+              enabled={!!autoContinueEnabled}
+              status={autoContinueStatus}
+              onToggle={onAutoContinueToggle}
+              onCancel={handleAutoContinueCancel}
+              onResume={handleAutoContinueResume}
+            />
+          )}
+
+          {/* Mode indicator — Sprint 18: clearer labels */}
+          <button
+            onClick={() => onModeChange(executionMode === 'plan' ? 'build' : 'plan')}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border cursor-pointer transition-all duration-150 ${
+              executionMode === 'plan'
+                ? 'border-yellow-500/30 text-yellow-400 bg-yellow-500/5 hover:bg-yellow-500/10'
+                : 'border-matrix-green/30 text-matrix-green bg-matrix-green/5 hover:bg-matrix-green/10'
+            }`}
+            title={executionMode === 'plan'
+              ? 'Plan Mode: read-only research. Click to switch to Build mode.'
+              : 'Build Mode: full read/write access. Click to switch to Plan mode.'}
+          >
+            <span>{executionMode === 'plan' ? '\uD83D\uDD0D' : '\uD83D\uDD28'}</span>
+            <span>{executionMode === 'plan' ? 'PLAN' : 'BUILD'}</span>
+          </button>
+
+          {/* Sprint 23: Model chip in header (read-only badge — full picker is in composer) */}
+          {selectedModel && (
+            <span className="text-[9px] text-matrix-text-muted/30 font-mono max-w-[120px] truncate" title={`Active model: ${selectedModel}`}>
+              {modelMetaList?.find(m => m.id === selectedModel)?.name || selectedModel}
+            </span>
+          )}
+
+          {/* Status badge */}
+          <span className={`text-[10px] px-2 py-0.5 rounded-full border ${
+            isLoading
+              ? 'border-yellow-500/20 text-yellow-400/70 bg-yellow-500/5'
+              : 'border-matrix-green/20 text-matrix-green/60 bg-matrix-green/5'
+          }`}>
+            {isLoading ? 'Working...' : 'Ready'}
           </span>
         </div>
       </div>
@@ -436,6 +913,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                         ? 'glass-panel p-2 border-matrix-green/10 bg-matrix-green/5'
                         : 'glass-panel p-4'
                 }`}>
+                  {/* Sprint 18: clearer role labels */}
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className={`text-[10px] uppercase tracking-wider font-bold ${
                       msg.role === 'user' ? 'text-matrix-green'
@@ -454,9 +932,13 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                     {renderContent(msg.content)}
                   </div>
 
+                  {/* Sprint 18: improved tool call display */}
                   {msg.toolCalls && msg.toolCalls.length > 0 && (
                     <div className="mt-3 pt-2 border-t border-matrix-border/30 space-y-1.5">
-                      <p className="text-[9px] text-matrix-text-muted/40 mb-1.5 uppercase tracking-wider">Tool Calls</p>
+                      <p className="text-[9px] text-matrix-text-muted/50 mb-1.5 flex items-center gap-1.5">
+                        <span className="inline-block w-1 h-1 rounded-full bg-matrix-green/30" />
+                        <span className="uppercase tracking-wider">{msg.toolCalls.length} tool call{msg.toolCalls.length !== 1 ? 's' : ''}</span>
+                      </p>
                       {msg.toolCalls.map((tc, i) => (
                         <ToolCallCard
                           key={i}
@@ -464,6 +946,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                           input={tc.input}
                           result={tc.result}
                           status={tc.status}
+                          onOpenCompareWorkspace={onOpenCompareWorkspace}
                         />
                       ))}
                     </div>
@@ -484,7 +967,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           </>
         )}
 
-        {/* Streaming indicator */}
+        {/* Streaming indicator — Sprint 18: clearer progress display */}
         {isLoading && (
           <div className="animate-fadeIn">
             <div className="glass-panel p-4 max-w-[85%]">
@@ -502,6 +985,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                       input={tc.input}
                       result={tc.result}
                       status={tc.status}
+                      onOpenCompareWorkspace={onOpenCompareWorkspace}
                     />
                   ))}
                 </div>
@@ -514,7 +998,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-matrix-green">Thinking...</span>
+                  <span className="text-xs text-matrix-green/60">Thinking...</span>
                 </div>
               )}
             </div>
@@ -524,9 +1008,37 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         <div ref={scrollRef} />
       </div>
 
-      {/* Input */}
+      {/* Input — Sprint 18/23/25: friendlier placeholder, inline model picker, attachments */}
       <div className="p-4 border-t border-matrix-border">
-        <div className="flex gap-2">
+        {/* Sprint 25: Attachment chips */}
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-2">
+            {attachments.map(att => (
+              <AttachmentChip
+                key={att.id}
+                attachment={att}
+                onRemove={removeAttachment}
+                onPreview={setPreviewAttachment}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Sprint 25: Attachment error */}
+        {attachmentError && (
+          <div className="text-[10px] text-red-400/80 mb-1.5 flex items-center gap-1">
+            <span>!</span> {attachmentError}
+          </div>
+        )}
+
+        {/* Sprint 25: Vision warning */}
+        {attachments.some(a => a.type === 'image') && visionSupported === false && (
+          <div className="text-[9px] text-yellow-400/60 mb-1.5">
+            Current model may not support vision. Images will be described as text metadata.
+          </div>
+        )}
+
+        <div className="flex gap-2 items-end">
           <div className="flex-1 relative">
             {/* Slash Command Dropdown */}
             <SlashCommandDropdown
@@ -540,6 +1052,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
               ref={inputRef}
               value={input}
               onChange={handleInputChange}
+              onPaste={handlePaste}
               onKeyDown={e => {
                 // Don't handle Enter/ArrowUp/Down/Tab when dropdown is visible
                 if (showSlashDropdown && ['Enter', 'ArrowUp', 'ArrowDown', 'Tab', 'Escape'].includes(e.key)) {
@@ -550,26 +1063,78 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                   handleSend();
                 }
               }}
-              placeholder="Describe what you want to build... or type / for commands"
+              placeholder={executionMode === 'plan'
+                ? 'Ask a question about the codebase... (Plan mode: read-only)'
+                : attachments.length > 0
+                  ? 'Add a message about these files, or just hit Send...'
+                  : 'Describe what you want to build, fix, or explore...'}
               className="matrix-input resize-none h-10 pr-10"
               rows={1}
               disabled={isLoading}
             />
           </div>
+          {/* Sprint 23: Inline model picker next to send button */}
+          {onModelChange && (
+            <ModelPickerInline
+              selectedModel={selectedModel || ''}
+              availableModels={modelMetaList || []}
+              defaultModel={defaultModel || 'claude-3-5-sonnet-20241022'}
+              apiKeyConfigured={apiKeyConfigured !== false}
+              onModelChange={onModelChange}
+              onSetDefault={onSetDefaultModel || (() => {})}
+              onRefreshModels={onRefreshModels}
+              isRefreshingModels={isRefreshingModels}
+            />
+          )}
           <button
             onClick={handleSend}
-            disabled={!input.trim() || isLoading}
+            disabled={(!input.trim() && attachments.length === 0) || isLoading}
             className="matrix-btn matrix-btn-primary px-4"
+            title="Send message (Enter)"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
           </button>
         </div>
+        {/* Sprint 21: Conversation hygiene helpers */}
         <div className="flex items-center justify-between mt-1.5">
+          <div className="flex items-center gap-1">
+            <span className="text-[9px] text-matrix-text-muted/25">
+              <kbd className="px-1 py-0.5 rounded bg-matrix-bg-hover text-matrix-text-muted/30 font-mono text-[8px]">Shift+Enter</kbd> new line &middot;
+              <kbd className="px-1 py-0.5 rounded bg-matrix-bg-hover text-matrix-green/30 font-mono text-[8px] ml-1">/</kbd> commands &middot;
+              <kbd className="px-1 py-0.5 rounded bg-matrix-bg-hover text-matrix-text-muted/30 font-mono text-[8px] ml-1">Ctrl+V</kbd> paste image &middot;
+              <kbd className="px-1 py-0.5 rounded bg-matrix-bg-hover text-matrix-text-muted/30 font-mono text-[8px] ml-1">Ctrl+`</kbd> terminal
+            </span>
+            {hasUserMessages && (
+              <div className="flex items-center gap-1 ml-2">
+                <button
+                  onClick={() => { setMessages([]); setShowSuggestions(true); if (api?.clearChat) api.clearChat(session.id); }}
+                  className="text-[9px] px-1.5 py-0.5 rounded border border-matrix-border/20 text-matrix-text-muted/40 hover:text-matrix-text-dim hover:border-matrix-accent/30 transition-colors"
+                  title="Clear chat and start fresh"
+                >
+                  Fresh Chat
+                </button>
+                <button
+                  onClick={() => { if (api?.summarizeContext) api.summarizeContext(session.id); }}
+                  className="text-[9px] px-1.5 py-0.5 rounded border border-matrix-border/20 text-matrix-text-muted/40 hover:text-matrix-text-dim hover:border-matrix-accent/30 transition-colors"
+                  title="Summarize conversation to save tokens"
+                >
+                  Summarize
+                </button>
+                <button
+                  onClick={() => { if (api?.compactHistory) api.compactHistory(session.id); }}
+                  className="text-[9px] px-1.5 py-0.5 rounded border border-matrix-border/20 text-matrix-text-muted/40 hover:text-matrix-text-dim hover:border-matrix-accent/30 transition-colors"
+                  title="Compact older messages to reduce context size"
+                >
+                  Compact
+                </button>
+                <span className="text-[9px] text-matrix-text-muted/20 ml-1" title="Approximate token count for this conversation">
+                  ~{Math.round(messages.reduce((s, m) => s + (m.content?.length || 0) / 4, 0)).toLocaleString()} tokens
+                </span>
+              </div>
+            )}
+          </div>
           <span className="text-[9px] text-matrix-text-muted/20">
-            Shift+Enter for new line &middot; Type <code className="text-matrix-green/30">/</code> for commands
-          </span>
-          <span className="text-[9px] text-matrix-text-muted/20">
-            {providerKey ? `Provider: ${providerKey}` : 'No provider configured'}
+            {providerKey ? `${selectedModel || providerKey}` : 'No provider configured'}
           </span>
         </div>
       </div>
@@ -592,6 +1157,31 @@ function sanitizeContent(content: string): string {
     return '';
   }
   return cleaned;
+}
+
+/**
+ * Sprint 18: Format error messages with friendly explanations.
+ */
+function formatErrorMessage(raw: string): string {
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('api key') || lower.includes('authentication') || lower.includes('unauthorized')) {
+    return `**Authentication Error**\n\n${raw}\n\n**What to do:** Go to Settings and check your API key. Make sure it's valid and has sufficient credits.`;
+  }
+  if (lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests')) {
+    return `**Rate Limited**\n\n${raw}\n\n**What to do:** Wait a moment and try again. If this persists, check your API plan limits at console.anthropic.com.`;
+  }
+  if (lower.includes('network') || lower.includes('econnrefused') || lower.includes('fetch failed') || lower.includes('timeout')) {
+    return `**Connection Error**\n\n${raw}\n\n**What to do:** Check your internet connection. The AI API requires network access.`;
+  }
+  if (lower.includes('overloaded') || lower.includes('503') || lower.includes('capacity')) {
+    return `**Service Busy**\n\n${raw}\n\n**What to do:** The AI service is temporarily at capacity. Wait a few seconds and try again.`;
+  }
+  if (lower.includes('context length') || lower.includes('token') || lower.includes('too long')) {
+    return `**Message Too Long**\n\n${raw}\n\n**What to do:** Try a shorter prompt, or use \`/clear\` to start a fresh conversation.`;
+  }
+
+  return raw;
 }
 
 function renderContent(content: string): React.ReactNode {
