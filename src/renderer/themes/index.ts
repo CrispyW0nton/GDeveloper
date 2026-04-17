@@ -1,10 +1,15 @@
 /**
- * GDeveloper Theme System — Sprint 15
+ * GDeveloper Theme System — Sprint 15 + Sprint 16 Addendum (Theme Customization Studio)
  *
  * Central source of truth for all theme definitions.
  * Each theme provides CSS variable values that are injected onto <html>.
  * Components should consume these variables, NOT hard-coded colors.
+ *
+ * Sprint 16 Addendum: Adds preset conversion, custom token map application,
+ * and built-in preset factories for the Theme Customization Studio.
  */
+
+import { ThemePreset, TOKEN_DEFINITIONS, type BackdropType } from './tokens';
 
 // ─── Theme ID Enum ───
 
@@ -514,4 +519,69 @@ export function getCurrentTheme(): ThemeId {
   const attr = document.documentElement.getAttribute('data-theme');
   if (attr && THEME_IDS.includes(attr as ThemeId)) return attr as ThemeId;
   return 'matrix';
+}
+
+// ─── Sprint 16 Addendum: Preset Conversion & Custom Token Application ───
+
+/**
+ * Convert a ThemeTokens object + metadata into a ThemePreset.
+ */
+export function themeToPreset(
+  id: ThemeId,
+  tokens: ThemeTokens,
+  builtIn: boolean = true,
+): ThemePreset {
+  const tokenMap: Record<string, string> = {};
+  for (const def of TOKEN_DEFINITIONS) {
+    const value = (tokens as any)[def.key];
+    if (value !== undefined) {
+      tokenMap[def.key] = String(value);
+    }
+  }
+
+  const meta = THEME_META[id];
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    name: meta?.name || id,
+    builtIn,
+    tokens: tokenMap,
+    backdrop: tokens.showMatrixRain ? 'matrix-rain' : 'none',
+    backdropOpacity: tokens.showMatrixRain ? 0.38 : 0,
+    backdropIntensity: 1.0,
+    matrixRainEnabled: tokens.showMatrixRain,
+    crtOverlayEnabled: tokens.showCrtOverlay,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/** All built-in presets, derived from the existing theme definitions. */
+export function getBuiltInPresets(): ThemePreset[] {
+  return THEME_IDS.map(id => themeToPreset(id, THEMES[id], true));
+}
+
+/**
+ * Apply a token map (key→CSS value) directly to the document root.
+ * Used for live preview and custom presets.
+ */
+export function applyTokenMap(tokenMap: Record<string, string>, presetName?: string): void {
+  const root = document.documentElement;
+  if (presetName) {
+    root.setAttribute('data-theme', presetName);
+  }
+  for (const def of TOKEN_DEFINITIONS) {
+    const value = tokenMap[def.key];
+    if (value !== undefined) {
+      root.style.setProperty(def.cssVar, value);
+    }
+  }
+}
+
+/**
+ * Apply a ThemePreset (full preset object) to the document.
+ */
+export function applyPreset(preset: ThemePreset): void {
+  applyTokenMap(preset.tokens, preset.id);
 }

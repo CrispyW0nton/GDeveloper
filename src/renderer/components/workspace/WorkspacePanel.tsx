@@ -659,42 +659,45 @@ export default function WorkspacePanel({
 
   function renderScanView() {
   const doScan = async () => {
-    if (!scanPath || !api?.scanForRepos) return;
+    if (!scanPath.trim()) { setError('Please enter a directory path to scan'); return; }
+    if (!api?.scanForRepos) { setError('Scan API not available — running in web preview mode'); return; }
     setScanning(true);
     setError('');
     setScanResults([]);
     setScanSelected(new Set());
     try {
-      const result = await api.scanForRepos(scanPath);
-      if (result.success) {
-        setScanResults(result.repos || []);
-        setMessage(`Found ${result.repos?.length || 0} repositories`);
+      const result = await api.scanForRepos(scanPath.trim(), 5);
+      if (result && result.success) {
+        const repos = Array.isArray(result.repos) ? result.repos : [];
+        setScanResults(repos);
+        setMessage(`Found ${repos.length} repositories`);
       } else {
-        setError(result.error || 'Scan failed');
+        setError(result?.error || 'Scan returned an unexpected result');
       }
     } catch (err: any) {
-      setError(err.message || 'Scan failed');
+      const msg = err?.message || String(err) || 'Scan failed — unknown error';
+      setError(msg.length > 300 ? msg.substring(0, 300) + '...' : msg);
     }
     setScanning(false);
   };
 
   const doImport = async () => {
-    if (!api?.importDiscoveredRepos) return;
+    if (!api?.importDiscoveredRepos) { setError('Import API not available'); return; }
     const selectedRepos = scanResults.filter((_: any, i: number) => scanSelected.has(i));
     if (selectedRepos.length === 0) { setError('Select at least one repository'); return; }
     setLoading(true);
     try {
       const result = await api.importDiscoveredRepos(selectedRepos);
-      if (result.success) {
-        setMessage(`Imported ${result.imported} workspace(s), skipped ${result.skipped} duplicate(s)`);
+      if (result && result.success) {
+        setMessage(`Imported ${result.imported ?? 0} workspace(s), skipped ${result.skipped ?? 0} duplicate(s)`);
         onRefreshWorkspaces();
         setScanResults([]);
         setScanSelected(new Set());
       } else {
-        setError(result.error || 'Import failed');
+        setError(result?.error || 'Import failed');
       }
     } catch (err: any) {
-      setError(err.message || 'Import failed');
+      setError(err?.message || 'Import failed');
     }
     setLoading(false);
   };
@@ -722,7 +725,7 @@ export default function WorkspacePanel({
         <div>
           <label className="text-[10px] text-matrix-text-muted/50 block mb-1">Root directory to scan</label>
           <input value={scanPath} onChange={e => setScanPath(e.target.value)}
-            placeholder={process.env.HOME || 'C:\\Users\\you\\Dev'}
+            placeholder="~/Dev or C:\\Users\\you\\Dev"
             className="matrix-input text-xs" />
         </div>
         <button onClick={doScan} disabled={scanning || !scanPath}

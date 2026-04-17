@@ -1,4 +1,10 @@
-import React, { useState, useEffect } from 'react';
+/**
+ * DiffViewer — Sprint 15.2
+ * Shows file changes from agent tool calls AND live git diff.
+ * Tracks write_file, patch_file, multi_edit, and run_command edits.
+ * Falls back to live git diff when DB diffs are empty but git status shows changes.
+ */
+import React, { useState, useEffect, useCallback } from 'react';
 import { SelectedRepo } from '../../store';
 
 const api = (window as any).electronAPI;
@@ -19,6 +25,18 @@ interface DiffRecord {
   created_at: string;
 }
 
+/** Live git diff entry (from git:diff IPC) */
+interface GitDiffEntry {
+  id: string;
+  file_path: string;
+  old_content: string;
+  new_content: string;
+  status: string;
+  created_at: string;
+  session_id: string;
+  task_id: null;
+}
+
 interface DiffLine {
   type: 'add' | 'del' | 'context';
   lineNumber: number;
@@ -27,28 +45,69 @@ interface DiffLine {
 
 export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
   const [diffs, setDiffs] = useState<DiffRecord[]>([]);
+  const [gitDiffText, setGitDiffText] = useState<string>('');
   const [selectedFile, setSelectedFile] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [showGitDiff, setShowGitDiff] = useState(false);
 
-  const loadDiffs = async () => {
+  const loadDiffs = useCallback(async () => {
     if (!api) { setLoading(false); return; }
     try {
+      // Load DB-recorded diffs (from session AND from 'system' session)
       const result = await api.getDiffs(sessionId);
-      setDiffs(result || []);
-      if (result && result.length > 0 && !selectedFile) {
-        setSelectedFile(result[0].file_path);
+      let allDiffs = result || [];
+
+      // Also load system-session diffs (tools use 'system' as session_id)
+      if (sessionId && sessionId !== 'system') {
+        try {
+          const systemDiffs = await api.getDiffs('system');
+          if (systemDiffs && systemDiffs.length > 0) {
+            // Merge, dedup by id
+            const ids = new Set(allDiffs.map((d: DiffRecord) => d.id));
+            for (const sd of systemDiffs) {
+              if (!ids.has(sd.id)) {
+                allDiffs.push(sd);
+                ids.add(sd.id);
+              }
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Sort by created_at descending
+      allDiffs.sort((a: DiffRecord, b: DiffRecord) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      setDiffs(allDiffs);
+      if (allDiffs.length > 0 && !selectedFile) {
+        setSelectedFile(allDiffs[0].file_path);
+      }
+
+      // Sprint 15.2: Also fetch live git diff to fill in gaps
+      if (api.gitDiff) {
+        try {
+          const gitResult = await api.gitDiff(false);
+          if (gitResult.success && gitResult.diff && gitResult.diff !== '(no changes)') {
+            setGitDiffText(gitResult.diff);
+            // If DB diffs are empty but git shows changes, auto-show git diff
+            if (allDiffs.length === 0) {
+              setShowGitDiff(true);
+            }
+          } else {
+            setGitDiffText('');
+          }
+        } catch { /* ignore */ }
       }
     } catch (err) {
       console.error('Failed to load diffs:', err);
     }
     setLoading(false);
-  };
+  }, [sessionId, selectedFile]);
 
   useEffect(() => {
     loadDiffs();
     const interval = setInterval(loadDiffs, 5000);
     return () => clearInterval(interval);
-  }, [sessionId]);
+  }, [sessionId, loadDiffs]);
 
   const selectedDiff = diffs.find(d => d.file_path === selectedFile);
 
@@ -107,7 +166,7 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
             <p className="text-xs text-matrix-text-muted/40 mt-2">Loading diffs...</p>
           </div>
         </div>
-      ) : diffs.length === 0 ? (
+      ) : diffs.length === 0 && !gitDiffText ? (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" className="mx-auto text-matrix-text-muted/20 mb-3"><path d="M12 3v18M3 12h18"/></svg>
@@ -119,8 +178,17 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
         <div className="flex-1 flex overflow-hidden">
           {/* File List */}
           <div className="w-64 border-r border-matrix-border overflow-y-auto">
-            <div className="p-2 text-[10px] text-matrix-text-muted/40 uppercase tracking-wider">
-              Changed Files ({diffs.length})
+            <div className="p-2 text-[10px] text-matrix-text-muted/40 uppercase tracking-wider flex items-center justify-between">
+              <span>Changed Files ({diffs.length})</span>
+              {gitDiffText && (
+                <button
+                  onClick={() => setShowGitDiff(!showGitDiff)}
+                  className={`text-[8px] px-1.5 py-0.5 rounded border transition-colors ${showGitDiff ? 'border-matrix-green/50 text-matrix-green bg-matrix-green/10' : 'border-matrix-border/20 text-matrix-text-muted/40'}`}
+                  title="Toggle live git diff view"
+                >
+                  Git Diff
+                </button>
+              )}
             </div>
             {diffs.map(diff => {
               const isNew = !diff.old_content;
@@ -149,7 +217,25 @@ export default function DiffViewer({ repo, sessionId }: DiffViewerProps) {
 
           {/* Diff Content */}
           <div className="flex-1 overflow-auto font-mono text-xs">
-            {selectedDiff ? (
+            {showGitDiff && gitDiffText ? (
+              /* Sprint 15.2: Raw git diff view */
+              <div className="p-1">
+                <div className="px-3 py-1 text-matrix-info/50 bg-matrix-info/5 text-[10px]">
+                  Live Git Diff (working tree)
+                </div>
+                {gitDiffText.split('\n').map((line, li) => (
+                  <div key={li} className={`px-3 py-0.5 ${
+                    line.startsWith('+') && !line.startsWith('+++') ? 'diff-add' :
+                    line.startsWith('-') && !line.startsWith('---') ? 'diff-del' :
+                    line.startsWith('@@') ? 'text-matrix-info/70 bg-matrix-info/5' :
+                    line.startsWith('diff ') || line.startsWith('index ') ? 'text-matrix-text-muted/50 font-bold' :
+                    'diff-context'
+                  }`}>
+                    {line}
+                  </div>
+                ))}
+              </div>
+            ) : selectedDiff ? (
               <div className="p-1">
                 <div className="px-3 py-1 text-matrix-info/50 bg-matrix-info/5 text-[10px]">
                   {selectedDiff.file_path}

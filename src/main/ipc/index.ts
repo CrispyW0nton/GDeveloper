@@ -136,6 +136,15 @@ export const IPC_CHANNELS = {
   // Task lifecycle verification (Sprint 13)
   TASK_VERIFY: 'task:verify',
 
+  // ─── Sprint 16: Model Selection, Sandbox Monitor ───
+  MODEL_LIST: 'model:list',
+  MODEL_GET_SELECTED: 'model:get-selected',
+  MODEL_SET_SELECTED: 'model:set-selected',
+  MODEL_DISCOVER: 'model:discover',
+  MODEL_CHECK_TOOLS: 'model:check-tools',
+  SANDBOX_GET_LOG: 'sandbox:get-log',
+  SANDBOX_CLEAR_LOG: 'sandbox:clear-log',
+
   // ─── Sprint 14: MCP Forge / App Adapter Studio ───
   FORGE_SCAN: 'forge:scan',
   FORGE_GENERATE: 'forge:generate',
