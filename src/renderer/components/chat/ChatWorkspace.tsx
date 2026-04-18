@@ -19,6 +19,7 @@ import SuggestionCards from './SuggestionCards';
 import FollowupButtons from './FollowupButtons';
 import ToolCallCard from './ToolCallCard';
 import AutoContinueToggle, { type AutoContinueStatus, type AutoContinuePhase } from './AutoContinueToggle';
+import TaskQueuePanel, { type TodoItem } from './TaskQueuePanel';
 import RateLimitIndicator, { type RateLimitSnapshot, type RetryState } from './RateLimitIndicator';
 import ModelPickerInline from './ModelPickerInline';
 import TokenCounter from './TokenCounter';
@@ -125,6 +126,10 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     tasksTotal: 0,
   });
   const autoContinueDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sprint 27.2: Task Queue Panel state
+  const [todoTasks, setTodoTasks] = useState<TodoItem[]>([]);
+  const [taskPanelCollapsed, setTaskPanelCollapsed] = useState(false);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -272,6 +277,30 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     });
 
     return () => { if (unsubscribe) unsubscribe(); };
+  }, [session.id]);
+
+  // Sprint 27.2: Load initial todo list and subscribe to live updates
+  useEffect(() => {
+    // Fetch initial todo list
+    if (api?.getTodoList && session.id) {
+      api.getTodoList(session.id).then((list: any) => {
+        if (list && list.items) {
+          setTodoTasks(list.items);
+        }
+      }).catch(() => { /* ignore — no todo list yet */ });
+    }
+
+    // Subscribe to live todo:changed events
+    if (!api?.onTodoChanged) return;
+    const unsub = api.onTodoChanged((data: any) => {
+      if (data.sessionId && data.sessionId !== session.id) return;
+      if (data.items && Array.isArray(data.items)) {
+        setTodoTasks(data.items);
+      } else if (data.event === 'cleared') {
+        setTodoTasks([]);
+      }
+    });
+    return () => { if (unsub) unsub(); };
   }, [session.id]);
 
   // Handle slash command input detection
@@ -1011,6 +1040,16 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
               </div>
             ))}
           </>
+        )}
+
+        {/* Sprint 27.2: Task Queue Panel — shown when todo list is active */}
+        {todoTasks.length > 0 && (
+          <TaskQueuePanel
+            tasks={todoTasks}
+            collapsed={taskPanelCollapsed}
+            onToggleCollapse={() => setTaskPanelCollapsed(prev => !prev)}
+            sessionId={session.id}
+          />
         )}
 
         {/* Streaming indicator — Sprint 18: clearer progress display */}

@@ -1,0 +1,317 @@
+/**
+ * TaskQueuePanel.css — Sprint 27.2
+ * Matrix-theme styles for the collapsible task-queue panel.
+ * Uses the existing matrix design tokens from the project.
+ */
+
+/* ─── Container ─── */
+.tqp-container {
+  border: 1px solid rgba(0, 255, 65, 0.15);
+  border-radius: 8px;
+  background: rgba(0, 10, 2, 0.6);
+  backdrop-filter: blur(8px);
+  margin: 8px 0;
+  overflow: hidden;
+  animation: tqp-fadeIn 0.3s ease-out;
+}
+
+@keyframes tqp-fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Header (clickable) ─── */
+.tqp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: rgba(0, 255, 65, 0.03);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.tqp-header:hover {
+  background: rgba(0, 255, 65, 0.06);
+}
+
+.tqp-header:focus-visible {
+  outline: 1px solid rgba(0, 255, 65, 0.4);
+  outline-offset: -1px;
+}
+
+.tqp-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tqp-chevron {
+  font-size: 8px;
+  color: rgba(0, 255, 65, 0.4);
+  transition: transform 0.2s ease;
+  width: 12px;
+  text-align: center;
+}
+
+.tqp-header-icon {
+  font-size: 12px;
+}
+
+.tqp-header-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(0, 255, 65, 0.9);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tqp-header-divider {
+  font-size: 10px;
+  color: rgba(0, 255, 65, 0.15);
+}
+
+.tqp-header-count {
+  font-size: 10px;
+  color: rgba(0, 255, 65, 0.5);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.tqp-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ─── Badges ─── */
+.tqp-badge {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  white-space: nowrap;
+}
+
+.tqp-badge--active {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.tqp-badge--blocked {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.tqp-badge--progress {
+  color: rgba(0, 255, 65, 0.7);
+  background: rgba(0, 255, 65, 0.05);
+  border: 1px solid rgba(0, 255, 65, 0.15);
+}
+
+/* ─── Subheader ─── */
+.tqp-subheader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 12px 4px;
+}
+
+.tqp-remaining {
+  font-size: 9px;
+  color: rgba(0, 255, 65, 0.35);
+  font-style: italic;
+}
+
+.tqp-pct {
+  font-size: 9px;
+  color: rgba(0, 255, 65, 0.3);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ─── Progress Bar ─── */
+.tqp-progress-track {
+  height: 3px;
+  background: rgba(0, 255, 65, 0.06);
+  margin: 0 12px 6px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.tqp-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(0, 255, 65, 0.5), rgba(0, 255, 65, 0.8));
+  border-radius: 2px;
+  transition: width 0.5s ease-out;
+}
+
+/* ─── Task List ─── */
+.tqp-list {
+  padding: 2px 8px 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.tqp-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.tqp-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tqp-list::-webkit-scrollbar-thumb {
+  background: rgba(0, 255, 65, 0.15);
+  border-radius: 2px;
+}
+
+/* ─── Task Row ─── */
+.tqp-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.tqp-task:hover {
+  background: rgba(0, 255, 65, 0.03);
+}
+
+.tqp-task--active-row {
+  background: rgba(245, 158, 11, 0.04);
+  border-left: 2px solid rgba(245, 158, 11, 0.4);
+  padding-left: 4px;
+}
+
+/* ─── Status Indicators ─── */
+.tqp-indicator {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  margin-top: 1px;
+}
+
+.tqp-indicator--active {
+  color: #f59e0b;
+  animation: tqp-pulse 2s ease-in-out infinite;
+}
+
+@keyframes tqp-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.tqp-indicator--pending {
+  color: rgba(0, 255, 65, 0.3);
+}
+
+.tqp-indicator--done {
+  color: rgba(0, 255, 65, 0.7);
+}
+
+.tqp-indicator--skipped {
+  color: rgba(0, 255, 65, 0.2);
+}
+
+.tqp-indicator--blocked {
+  color: #ef4444;
+}
+
+/* ─── Task Text ─── */
+.tqp-task-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tqp-task-text {
+  font-size: 10px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.tqp-task-text--active {
+  color: #f59e0b;
+  font-weight: 600;
+}
+
+.tqp-task-text--pending {
+  color: rgba(200, 220, 200, 0.6);
+}
+
+.tqp-task-text--done {
+  color: rgba(0, 255, 65, 0.35);
+  text-decoration: line-through;
+}
+
+.tqp-task-text--skipped {
+  color: rgba(200, 220, 200, 0.2);
+  font-style: italic;
+  text-decoration: line-through;
+}
+
+.tqp-task-text--blocked {
+  color: #ef4444;
+}
+
+.tqp-task-notes {
+  font-size: 9px;
+  color: rgba(200, 220, 200, 0.25);
+  font-style: italic;
+}
+
+/* ─── Priority Badge ─── */
+.tqp-priority {
+  flex-shrink: 0;
+  font-size: 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-top: 2px;
+}
+
+.tqp-priority--high {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.tqp-priority--medium {
+  color: rgba(200, 220, 200, 0.3);
+}
+
+.tqp-priority--low {
+  color: rgba(200, 220, 200, 0.15);
+}
+
+/* ─── Footer ─── */
+.tqp-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px 6px;
+  border-top: 1px solid rgba(0, 255, 65, 0.06);
+}
+
+.tqp-footer-status {
+  font-size: 8px;
+  color: rgba(245, 158, 11, 0.5);
+  font-style: italic;
+}
+
+.tqp-footer-pct {
+  font-size: 8px;
+  color: rgba(0, 255, 65, 0.25);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}

@@ -33,7 +33,7 @@ import {
   resumeByUser as resumeStateMachine,
   recordTurn,
   shouldFireNudge,
-  getSnapshot as getStateMachineSnapshot,
+  getSnapshot as getStateMachineSnapshotDirect,
   resetMachine as resetStateMachine,
   updateProgress as updateStateMachineProgress,
 } from './orchestration/autoContinueState';
@@ -90,6 +90,7 @@ import {
 import {
   getTodoList, getTodoProgress, isTodoComplete,
   createTodoList, updateTodoItem, appendTodoItems, clearTodoList,
+  setTodoBroadcast,
 } from './orchestration/todoManager';
 import { buildEnhancedSystemPrompt } from './orchestration/promptBuilder';
 import {
@@ -2631,6 +2632,13 @@ function registerIPCHandlers(): void {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Sprint 27: Todo Manager IPC
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // Sprint 27.2: Wire broadcast so todoManager mutations push to renderer
+  setTodoBroadcast((sessionId, items, event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.TODO_CHANGED, { sessionId, items, event });
+    }
+  });
 
   ipcMain.handle(IPC_CHANNELS.TODO_GET, async (_event, sessionId: string) => {
     return getTodoList(sessionId);

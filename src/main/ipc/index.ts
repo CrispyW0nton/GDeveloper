@@ -251,6 +251,8 @@ export const IPC_CHANNELS = {
   TODO_APPEND: 'todo:append',
   TODO_CLEAR: 'todo:clear',
   TODO_PROGRESS: 'todo:progress',
+  // Sprint 27.2: Live push channel for Task Queue Panel
+  TODO_CHANGED: 'todo:changed',
 
   // ─── Sprint 27: Checkpoints ───
   CHECKPOINT_LIST: 'checkpoint:list',

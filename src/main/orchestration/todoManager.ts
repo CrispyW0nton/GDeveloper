@@ -29,6 +29,24 @@ export interface TodoList {
 // ─── In-memory store keyed by sessionId ───
 const todoLists = new Map<string, TodoList>();
 
+/**
+ * Sprint 27.2: Broadcast callback for live UI updates.
+ * When set, every mutation (create/update/append/clear) will call this
+ * function so the main process can push events to the renderer via IPC.
+ */
+type TodoBroadcastFn = (sessionId: string, items: TodoItem[], event: string) => void;
+let _broadcastFn: TodoBroadcastFn | null = null;
+
+export function setTodoBroadcast(fn: TodoBroadcastFn): void {
+  _broadcastFn = fn;
+}
+
+function broadcast(sessionId: string, event: string): void {
+  if (!_broadcastFn) return;
+  const list = todoLists.get(sessionId);
+  _broadcastFn(sessionId, list ? list.items : [], event);
+}
+
 function generateId(): string {
   return `todo-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
 }
@@ -57,6 +75,7 @@ export function createTodoList(sessionId: string, items: Array<Partial<TodoItem>
     updatedAt: now,
   };
   todoLists.set(sessionId, list);
+  broadcast(sessionId, 'created');
   return list;
 }
 
@@ -73,6 +92,7 @@ export function updateTodoItem(
 
   Object.assign(item, updates, { updatedAt: new Date().toISOString() });
   list.updatedAt = new Date().toISOString();
+  broadcast(sessionId, 'updated');
   return item;
 }
 
@@ -97,11 +117,14 @@ export function appendTodoItems(sessionId: string, items: Array<Partial<TodoItem
     });
   }
   list.updatedAt = now;
+  broadcast(sessionId, 'appended');
   return list;
 }
 
 export function clearTodoList(sessionId: string): boolean {
-  return todoLists.delete(sessionId);
+  const deleted = todoLists.delete(sessionId);
+  if (deleted) broadcast(sessionId, 'cleared');
+  return deleted;
 }
 
 /**

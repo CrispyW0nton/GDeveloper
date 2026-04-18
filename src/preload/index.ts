@@ -295,6 +295,12 @@ const electronAPI = {
   appendTodoItems: (sessionId: string, items: any[]) => ipcRenderer.invoke('todo:append', sessionId, items),
   clearTodoList: (sessionId: string) => ipcRenderer.invoke('todo:clear', sessionId),
   getTodoProgress: (sessionId: string) => ipcRenderer.invoke('todo:progress', sessionId),
+  // Sprint 27.2: Live push subscription for Task Queue Panel
+  onTodoChanged: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('todo:changed', handler);
+    return () => ipcRenderer.removeListener('todo:changed', handler);
+  },
 
   // ─── Sprint 27: Checkpoints ─────────────────────────
   getCheckpoints: (sessionId: string) => ipcRenderer.invoke('checkpoint:list', sessionId),
