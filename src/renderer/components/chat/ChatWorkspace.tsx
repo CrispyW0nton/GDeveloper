@@ -248,7 +248,14 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           onSessionUsageUpdate(data.sessionUsage);
         }
       } else if (data.type === 'done') {
-        setStreamingContent('');
+        // Sprint 27.2 Bug C fix: If done arrives with fullContent but the
+        // sendMessage() promise hasn't resolved yet, ensure the streaming
+        // content is preserved so the assistant message isn't empty.
+        if (data.fullContent && data.fullContent.trim()) {
+          setStreamingContent(data.fullContent);
+        } else {
+          setStreamingContent('');
+        }
       } else if (data.type === 'error') {
         setStreamingContent('');
         // Show error in chat with a friendly explanation
@@ -548,10 +555,17 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         const result = await api.sendMessage(session.id, messageContent);
         lastResponseContent = result.content || '';
 
+        // Sprint 27.2 Bug C fix: Ensure final assistant text is always visible.
+        // If the API returned content, show it. If empty but tool calls exist,
+        // show "(tool execution)" as fallback so the message isn't swallowed.
+        const sanitized = sanitizeContent(result.content);
+        const hasTools = result.toolCalls && result.toolCalls.length > 0;
+        const displayContent = sanitized || (hasTools ? '(tool execution)' : result.content || '');
+
         const assistantMsg: Message = {
           id: result.id || `msg-${Date.now() + 1}`,
           role: 'assistant',
-          content: sanitizeContent(result.content),
+          content: displayContent,
           toolCalls: result.toolCalls?.map((tc: any) => ({
             name: tc.name,
             description: `Called ${tc.name}`,
