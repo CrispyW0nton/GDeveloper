@@ -220,14 +220,7 @@ const electronAPI = {
   setDefaultModel: (model: string) => ipcRenderer.invoke('model:set-default', model),
   getModelMetaList: () => ipcRenderer.invoke('model:get-meta-list'),
 
-  // ─── Sprint 19 + Sprint 22: Auto-Continue ───────────
-  autoContinueStart: (config?: any) => ipcRenderer.invoke('auto-continue:start', config),
-  autoContinueStop: (reason?: string) => ipcRenderer.invoke('auto-continue:stop', reason),
-  autoContinueStatus: () => ipcRenderer.invoke('auto-continue:status'),
-  autoContinuePause: (reason?: string) => ipcRenderer.invoke('auto-continue:pause', reason),
-  autoContinueResume: () => ipcRenderer.invoke('auto-continue:resume'),
-  autoContinueLog: () => ipcRenderer.invoke('auto-continue:log'),
-  autoContinueConfig: () => ipcRenderer.invoke('auto-continue:config'),
+  // ─── Sprint 27.5: Todo live subscription (see onTodoChanged below) ───────────
 
   // ─── Sprint 19: Live Code View events ──────────────
   onFileChanged: (callback: (data: any) => void) => {
@@ -283,13 +276,17 @@ const electronAPI = {
   compareCompactOutput: (sessionId: string, maxItems?: number) => ipcRenderer.invoke('compare:compact-output', sessionId, maxItems),
   compareSaveMerge: (sessionId: string, outputPath: string) => ipcRenderer.invoke('compare:save-merge', sessionId, outputPath),
 
-  // ─── Sprint 27: Todo Manager ─────────────────────────
+  // ─── Sprint 27.5: Todo Manager + live subscription ────
   getTodoList: (sessionId: string) => ipcRenderer.invoke('todo:get', sessionId),
   createTodoList: (sessionId: string, items: any[]) => ipcRenderer.invoke('todo:create', sessionId, items),
   updateTodoItem: (sessionId: string, itemId: string, updates: any) => ipcRenderer.invoke('todo:update-item', sessionId, itemId, updates),
   appendTodoItems: (sessionId: string, items: any[]) => ipcRenderer.invoke('todo:append', sessionId, items),
   clearTodoList: (sessionId: string) => ipcRenderer.invoke('todo:clear', sessionId),
   getTodoProgress: (sessionId: string) => ipcRenderer.invoke('todo:progress', sessionId),
+  onTodoChanged: (callback: (...args: any[]) => void) => {
+    ipcRenderer.on('todo:changed', callback);
+    return () => ipcRenderer.removeListener('todo:changed', callback);
+  },
 
   // ─── Sprint 27: Checkpoints ─────────────────────────
   getCheckpoints: (sessionId: string) => ipcRenderer.invoke('checkpoint:list', sessionId),

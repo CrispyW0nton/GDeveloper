@@ -31,6 +31,8 @@ export interface LLMStreamChunk {
   type: 'text' | 'tool_call' | 'done';
   content?: string;
   toolCall?: { id: string; name: string; input: Record<string, unknown> };
+  /** Sprint 27.5: stop_reason from message_delta — the sole termination signal */
+  stopReason?: string;
 }
 
 // ─── GitHub Gateway ───

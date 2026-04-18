@@ -700,72 +700,33 @@ export default function SettingsPanel({ onApiKeySet, selectedModel, availableMod
         </div>
 
         {/* ━━━ SECTION 7: CHAT BEHAVIOR ━━━ */}
-        <SectionHeader title="Chat Behavior" description="Auto-continue, conversation hygiene, and interaction preferences." icon={<ChatIcon />} />
+        <SectionHeader title="Chat Behavior" description="Agent loop, conversation hygiene, and interaction preferences." icon={<ChatIcon />} />
 
         <div className="glass-panel p-5 space-y-4">
           <div>
-            <label className="text-xs text-matrix-text-dim block mb-1">Auto-Continue (Auto Mode)</label>
-            <p className="text-[9px] text-matrix-text-muted/30 mb-2">When enabled from the chat header, the AI keeps working through multi-step tasks until completion, safety limit, user stop, or error. Cancellable at any time with Esc.</p>
+            <label className="text-xs text-matrix-text-dim block mb-1">Agent Loop (Sprint 27.5)</label>
+            <p className="text-[9px] text-matrix-text-muted/30 mb-2">The AI uses a canonical stop_reason-driven loop. It continues calling tools until the model signals end_turn. Max 25 turns per request. No manual timers or nudges.</p>
           </div>
 
-          {/* Sprint 22: Configurable auto-continue limits */}
           <fieldset className="space-y-3">
-            <legend className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider font-bold">Auto-Continue Limits</legend>
+            <legend className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider font-bold">Agent Loop Settings</legend>
             <div className="grid grid-cols-2 gap-3">
               <NumberField
-                label="Max Auto Turns per Task"
-                value={10}
+                label="Max Turns per Request"
+                value={25}
                 onChange={() => {}}
                 min={1} max={50} step={1}
-                hint="Max consecutive auto-continue iterations. Default 10."
+                hint="Safety cap on agent loop iterations. Default 25."
               />
               <NumberField
-                label="Max Auto Time (minutes)"
-                value={10}
+                label="Tool Timeout (seconds)"
+                value={60}
                 onChange={() => {}}
-                min={1} max={60} step={1}
-                hint="Auto-stop after this many minutes. Default 10."
-              />
-              <NumberField
-                label="Max Consecutive Retries"
-                value={2}
-                onChange={() => {}}
-                min={1} max={5} step={1}
-                hint="Stop after this many consecutive errors. Default 2."
-              />
-              <NumberField
-                label="Debounce Delay (ms)"
-                value={300}
-                onChange={() => {}}
-                min={100} max={1000} step={50}
-                hint="Delay between auto-continue turns. Default 300ms."
+                min={5} max={300} step={5}
+                hint="Default timeout for tool execution. Default 60s."
               />
             </div>
           </fieldset>
-
-          {/* Sprint 22: Auto-continue safety toggles */}
-          <fieldset className="space-y-2">
-            <legend className="text-[10px] text-matrix-text-muted/50 uppercase tracking-wider font-bold">Safety Controls</legend>
-            <label className="flex items-start gap-3 text-xs cursor-pointer">
-              <input type="checkbox" defaultChecked className="accent-matrix-green mt-0.5" />
-              <div>
-                <span className="text-matrix-text-dim font-bold">Pause on high-risk tools</span>
-                <p className="text-[9px] text-matrix-text-muted/30 mt-0.5">Pause auto-continue when a destructive or risky tool requires approval.</p>
-              </div>
-            </label>
-            <label className="flex items-start gap-3 text-xs cursor-pointer">
-              <input type="checkbox" defaultChecked className="accent-matrix-green mt-0.5" />
-              <div>
-                <span className="text-matrix-text-dim font-bold">Stop on rate limit</span>
-                <p className="text-[9px] text-matrix-text-muted/30 mt-0.5">Stop auto-continue when the API rate limit is hit.</p>
-              </div>
-            </label>
-          </fieldset>
-
-          <div className="text-[9px] text-matrix-text-muted/25 flex items-center gap-2 pt-2 border-t border-matrix-border/10">
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-blue-400/20 text-blue-400/50 bg-blue-400/5">tip</span>
-            <span>Auto mode pauses automatically for confirmations, user input, and rate-limit backoffs. It resumes when the condition clears.</span>
-          </div>
 
           <div className="border-t border-matrix-border/10 pt-3">
             <label className="text-xs text-matrix-text-dim block mb-1">Conversation Hygiene</label>

@@ -189,14 +189,8 @@ export const IPC_CHANNELS = {
   FILE_TREE_GET: 'filetree:get',
   FILE_TREE_READ: 'filetree:read-file',
 
-  // ─── Sprint 19 + Sprint 22: Auto-Continue ───
-  AUTO_CONTINUE_START: 'auto-continue:start',
-  AUTO_CONTINUE_STOP: 'auto-continue:stop',
-  AUTO_CONTINUE_STATUS: 'auto-continue:status',
-  AUTO_CONTINUE_PAUSE: 'auto-continue:pause',
-  AUTO_CONTINUE_RESUME: 'auto-continue:resume',
-  AUTO_CONTINUE_LOG: 'auto-continue:log',
-  AUTO_CONTINUE_CONFIG: 'auto-continue:config',
+  // ─── Sprint 27.5: Todo (replaces deprecated auto-mode) ───
+  // (auto-mode IPC channels removed in Sprint 27.5)
 
   // ─── Sprint 23: File Writing (Editor) ───
   FILE_WRITE: 'filetree:write-file',

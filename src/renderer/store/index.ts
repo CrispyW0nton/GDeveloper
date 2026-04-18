@@ -172,17 +172,9 @@ export interface AppState {
   sandboxMonitorOpen: boolean;
   // Sprint 17: Worktree awareness
   worktreeContext: WorktreeContextInfo | null;
-  // Sprint 19: File tree, auto-continue, live view
+  // Sprint 19: File tree, live view
   fileTreeOpen: boolean;
   fileTreeWidth: number;
-  autoContinueEnabled: boolean;
-  autoContinueMaxIterations: number;
-  autoContinueMaxMinutes: number;
-  // Sprint 22: Auto-continue enhancements
-  autoContinueDebounceMs: number;
-  autoContinuePauseOnRisk: boolean;
-  autoContinueStopOnRateLimit: boolean;
-  autoContinueMaxRetries: number;
   liveViewOpen: boolean;
   liveViewAutoOpen: boolean;
   activeFilePath: string | null;
@@ -324,14 +316,6 @@ export const INITIAL_STATE: AppState = {
   // Sprint 19
   fileTreeOpen: true,
   fileTreeWidth: 260,
-  autoContinueEnabled: false,
-  autoContinueMaxIterations: 10,
-  autoContinueMaxMinutes: 10,
-  // Sprint 22
-  autoContinueDebounceMs: 300,
-  autoContinuePauseOnRisk: true,
-  autoContinueStopOnRateLimit: true,
-  autoContinueMaxRetries: 2,
   liveViewOpen: false,
   liveViewAutoOpen: true,
   activeFilePath: null,
@@ -663,19 +647,6 @@ export function useAppState() {
     setState(prev => ({ ...prev, fileTreeWidth: Math.max(180, Math.min(600, width)) }));
   }, []);
 
-  // Sprint 19: Auto-continue
-  const setAutoContinueEnabled = useCallback((enabled: boolean) => {
-    setState(prev => ({ ...prev, autoContinueEnabled: enabled }));
-  }, []);
-
-  const setAutoContinueMaxIterations = useCallback((n: number) => {
-    setState(prev => ({ ...prev, autoContinueMaxIterations: Math.max(1, Math.min(50, n)) }));
-  }, []);
-
-  const setAutoContinueMaxMinutes = useCallback((n: number) => {
-    setState(prev => ({ ...prev, autoContinueMaxMinutes: Math.max(1, Math.min(60, n)) }));
-  }, []);
-
   // Sprint 19: Live view
   const setLiveViewOpen = useCallback((open: boolean) => {
     setState(prev => ({ ...prev, liveViewOpen: open }));
@@ -789,9 +760,6 @@ export function useAppState() {
     // Sprint 19
     setFileTreeOpen,
     setFileTreeWidth,
-    setAutoContinueEnabled,
-    setAutoContinueMaxIterations,
-    setAutoContinueMaxMinutes,
     setLiveViewOpen,
     setLiveViewAutoOpen,
     setActiveFilePath,

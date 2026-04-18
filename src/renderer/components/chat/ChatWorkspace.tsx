@@ -18,7 +18,8 @@ import SlashCommandDropdown, { SlashCommandInfo } from './SlashCommandDropdown';
 import SuggestionCards from './SuggestionCards';
 import FollowupButtons from './FollowupButtons';
 import ToolCallCard from './ToolCallCard';
-import AutoContinueToggle, { type AutoContinueStatus, type AutoContinuePhase } from './AutoContinueToggle';
+import ToolCallBlock from './ToolCallBlock';
+import TaskQueuePanel from './TaskQueuePanel';
 import RateLimitIndicator, { type RateLimitSnapshot, type RetryState } from './RateLimitIndicator';
 import ModelPickerInline from './ModelPickerInline';
 import TokenCounter from './TokenCounter';
@@ -46,10 +47,6 @@ interface ChatWorkspaceProps {
   availableModels?: string[];
   onModelChange?: (model: string) => void;
   worktreeContext?: WorktreeContextInfo | null;
-  // Sprint 19: Auto-continue
-  autoContinueEnabled?: boolean;
-  onAutoContinueToggle?: () => void;
-  autoContinueMaxIterations?: number;
   // Sprint 21: Rate limiting
   rateLimitSnapshot?: RateLimitSnapshot | null;
   retryState?: RetryState | null;
@@ -91,7 +88,7 @@ interface Message {
   streaming?: boolean;
 }
 
-export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange, worktreeContext, autoContinueEnabled, onAutoContinueToggle, autoContinueMaxIterations, rateLimitSnapshot, retryState, softInputLimit, softOutputLimit, softRequestLimit, modelMetaList, defaultModel, onSetDefaultModel, apiKeyConfigured, sessionUsage, onSessionUsageUpdate, attachmentConfig, visionSupported, onRefreshModels, isRefreshingModels, onOpenCompareWorkspace }: ChatWorkspaceProps) {
+export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange, worktreeContext, rateLimitSnapshot, retryState, softInputLimit, softOutputLimit, softRequestLimit, modelMetaList, defaultModel, onSetDefaultModel, apiKeyConfigured, sessionUsage, onSessionUsageUpdate, attachmentConfig, visionSupported, onRefreshModels, isRefreshingModels, onOpenCompareWorkspace }: ChatWorkspaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -112,19 +109,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const [attachmentError, setAttachmentError] = useState<string>('');
   const dragCounterRef = useRef(0);
 
-  // Sprint 19 + 22: Auto-continue state
-  const [autoContinueStatus, setAutoContinueStatus] = useState<AutoContinueStatus>({
-    active: false,
-    phase: 'idle' as AutoContinuePhase,
-    currentIteration: 0,
-    maxIterations: autoContinueMaxIterations || 10,
-    lastStatus: 'idle',
-    pauseReason: null,
-    cancelledBy: null,
-    tasksCompleted: 0,
-    tasksTotal: 0,
-  });
-  const autoContinueDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Sprint 27.5: No auto-continue. Loop is governed by stop_reason only.
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -585,180 +570,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     setStreamingContent('');
     setStreamingToolCalls([]);
 
-    // Sprint 24: Auto-continue — send follow-up nudge if active
-    if (autoContinueStatus.active && autoContinueStatus.phase !== 'paused') {
-      scheduleAutoContinue(lastResponseContent);
-    }
+    // Sprint 27.5: No auto-continue. Loop termination is driven by stop_reason.
   };
-
-  // Sprint 24: Fixed auto-continue scheduler — uses shouldAutoContinue IPC check
-  const scheduleAutoContinue = useCallback(async (lastContent: string) => {
-    if (!api?.autoContinueStatus) return;
-
-    // Cancel any existing scheduled turn
-    if (autoContinueDebounceRef.current) {
-      clearTimeout(autoContinueDebounceRef.current);
-      autoContinueDebounceRef.current = null;
-    }
-
-    // Don't schedule while user is typing
-    if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
-      return;
-    }
-
-    try {
-      const statusResult = await api.autoContinueStatus();
-      const status: AutoContinueStatus = statusResult;
-      setAutoContinueStatus(status);
-      if (!status.active || status.phase === 'paused') return;
-
-      // Debounce: wait 500ms before sending next nudge (configurable range 500-1500ms)
-      const debounceMs = 500;
-      autoContinueDebounceRef.current = setTimeout(async () => {
-        autoContinueDebounceRef.current = null;
-
-        // Re-check state (user might have cancelled during debounce)
-        const recheck = await api.autoContinueStatus();
-        setAutoContinueStatus(recheck);
-        if (!recheck.active || recheck.phase === 'paused') return;
-
-        // Don't auto-continue while user is typing
-        if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
-          return;
-        }
-
-        // Build and send the nudge
-        const iter = recheck.currentIteration + 1;
-        const max = recheck.maxIterations;
-        const taskInfo = recheck.tasksTotal > 0
-          ? ` (${recheck.tasksCompleted}/${recheck.tasksTotal} tasks complete)`
-          : '';
-        const nudge = `Continue with the current task (step ${iter}/${max})${taskInfo}. If all tasks are complete, say "All tasks are complete."`;
-
-        // Add auto-continue nudge as system indicator
-        const nudgeMsg: Message = {
-          id: `msg-nudge-${Date.now()}`,
-          role: 'system',
-          content: `Auto-Continue: step ${iter}/${max}${taskInfo}`,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages(prev => [...prev, nudgeMsg]);
-
-        // Use direct send to avoid re-triggering input state
-        if (api?.sendMessage) {
-          setIsLoading(true);
-          setStreamingContent('');
-          setStreamingToolCalls([]);
-
-          try {
-            const result = await api.sendMessage(session.id, nudge);
-            const assistantMsg: Message = {
-              id: result.id || `msg-auto-${Date.now()}`,
-              role: 'assistant',
-              content: sanitizeContent(result.content),
-              toolCalls: result.toolCalls?.map((tc: any) => ({
-                name: tc.name,
-                description: `Called ${tc.name}`,
-                status: 'success' as const,
-                input: tc.input || undefined,
-                result: tc.result || undefined,
-              })),
-              timestamp: new Date().toISOString(),
-            };
-            setMessages(prev => [...prev, assistantMsg]);
-
-            setIsLoading(false);
-            setStreamingContent('');
-            setStreamingToolCalls([]);
-
-            // Check if we should continue again
-            const nextCheck = await api.autoContinueStatus();
-            setAutoContinueStatus(nextCheck);
-            if (nextCheck.active && nextCheck.phase !== 'paused') {
-              scheduleAutoContinue(result.content || '');
-            }
-          } catch (err) {
-            setIsLoading(false);
-            // Record error — auto-continue engine tracks consecutive errors
-            try {
-              const errStatus = await api.autoContinueStatus();
-              setAutoContinueStatus(errStatus);
-            } catch { /* ignore */ }
-          }
-        }
-      }, debounceMs);
-    } catch { /* ignore */ }
-  }, [session.id]);
-
-  // Sprint 22: Clean up debounce on unmount
-  useEffect(() => {
-    return () => {
-      if (autoContinueDebounceRef.current) {
-        clearTimeout(autoContinueDebounceRef.current);
-      }
-    };
-  }, []);
-
-  // Sprint 24: Toggle auto-continue ON/OFF — calls start/stop IPC
-  useEffect(() => {
-    if (!api?.autoContinueStart || !api?.autoContinueStop) return;
-
-    const syncState = async () => {
-      if (autoContinueEnabled) {
-        // Start auto-continue engine in main process
-        const state = await api.autoContinueStart({
-          maxIterations: autoContinueMaxIterations || 20,
-          maxElapsedMs: 10 * 60 * 1000,
-          debounceMs: 500,
-        });
-        setAutoContinueStatus(state);
-      } else {
-        // Only stop if currently active
-        const currentStatus = await api.autoContinueStatus();
-        if (currentStatus.active) {
-          const state = await api.autoContinueStop('user');
-          setAutoContinueStatus(state);
-        }
-      }
-    };
-    syncState();
-  }, [autoContinueEnabled, autoContinueMaxIterations]);
-
-  // Sprint 19+22: Handle auto-continue cancel
-  const handleAutoContinueCancel = useCallback(async () => {
-    if (autoContinueDebounceRef.current) {
-      clearTimeout(autoContinueDebounceRef.current);
-      autoContinueDebounceRef.current = null;
-    }
-    if (api?.autoContinueStop) {
-      const result = await api.autoContinueStop('user');
-      setAutoContinueStatus(result);
-    }
-    if (onAutoContinueToggle) onAutoContinueToggle(); // toggle OFF in store
-  }, [onAutoContinueToggle]);
-
-  // Sprint 22: Resume handler
-  const handleAutoContinueResume = useCallback(async () => {
-    if (api?.autoContinueResume) {
-      const result = await api.autoContinueResume();
-      setAutoContinueStatus(result);
-      // Schedule next turn after resume
-      if (result.active) {
-        scheduleAutoContinue('');
-      }
-    }
-  }, [scheduleAutoContinue]);
-
-  // Sprint 19: Escape key cancels auto-continue
-  useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && autoContinueStatus.active) {
-        handleAutoContinueCancel();
-      }
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [autoContinueStatus.active, handleAutoContinueCancel]);
 
   const handleFollowupAction = useCallback((prompt: string) => {
     if (prompt.startsWith('/')) {
@@ -851,17 +664,6 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             onReset={() => api?.resetRateLimit?.()}
           />
 
-          {/* Sprint 19+22: Auto-Continue Toggle */}
-          {onAutoContinueToggle && (
-            <AutoContinueToggle
-              enabled={!!autoContinueEnabled}
-              status={autoContinueStatus}
-              onToggle={onAutoContinueToggle}
-              onCancel={handleAutoContinueCancel}
-              onResume={handleAutoContinueResume}
-            />
-          )}
-
           {/* Mode indicator — Sprint 18: clearer labels */}
           <button
             onClick={() => onModeChange(executionMode === 'plan' ? 'build' : 'plan')}
@@ -902,6 +704,9 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           <SuggestionCards onSelect={handleSuggestionSelect} />
         ) : (
           <>
+            {/* Sprint 27.5: Task queue panel — always visible above messages */}
+            <TaskQueuePanel sessionId={session.id} />
+
             {messages.map((msg, idx) => (
               <div key={msg.id} className={`animate-fadeIn ${msg.role === 'user' ? 'flex justify-end' : ''}`}>
                 <div className={`max-w-[85%] ${
@@ -932,21 +737,17 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                     {renderContent(msg.content)}
                   </div>
 
-                  {/* Sprint 18: improved tool call display */}
+                  {/* Sprint 27.5: Real ToolCallBlock display */}
                   {msg.toolCalls && msg.toolCalls.length > 0 && (
                     <div className="mt-3 pt-2 border-t border-matrix-border/30 space-y-1.5">
-                      <p className="text-[9px] text-matrix-text-muted/50 mb-1.5 flex items-center gap-1.5">
-                        <span className="inline-block w-1 h-1 rounded-full bg-matrix-green/30" />
-                        <span className="uppercase tracking-wider">{msg.toolCalls.length} tool call{msg.toolCalls.length !== 1 ? 's' : ''}</span>
-                      </p>
                       {msg.toolCalls.map((tc, i) => (
-                        <ToolCallCard
+                        <ToolCallBlock
                           key={i}
-                          name={tc.name}
+                          toolName={tc.name}
+                          toolCallId={`${msg.id}-tc-${i}`}
                           input={tc.input}
-                          result={tc.result}
-                          status={tc.status}
-                          onOpenCompareWorkspace={onOpenCompareWorkspace}
+                          result={typeof tc.result === 'string' ? tc.result : tc.result ? JSON.stringify(tc.result) : undefined}
+                          isError={tc.status === 'error'}
                         />
                       ))}
                     </div>
@@ -979,13 +780,14 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
               {streamingToolCalls.length > 0 && (
                 <div className="mb-2 space-y-1.5">
                   {streamingToolCalls.map((tc, i) => (
-                    <ToolCallCard
+                    <ToolCallBlock
                       key={i}
-                      name={tc.name}
+                      toolName={tc.name}
+                      toolCallId={`streaming-tc-${i}`}
                       input={tc.input}
-                      result={tc.result}
-                      status={tc.status}
-                      onOpenCompareWorkspace={onOpenCompareWorkspace}
+                      result={typeof tc.result === 'string' ? tc.result : tc.result ? JSON.stringify(tc.result) : undefined}
+                      isError={tc.status === 'error'}
+                      isPending={tc.status === 'running'}
                     />
                   ))}
                 </div>

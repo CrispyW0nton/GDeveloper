@@ -19,6 +19,7 @@ import { executeParallelSearch, type ParallelSearchInput } from './parallelSearc
 import { executeParallelRead, type ParallelReadInput } from './parallelRead';
 import { executeSummarizeLargeDocument, type SummarizeInput } from './summarizeLargeDocument';
 import { executeTaskPlan, getActivePlan, type TaskPlanInput } from './taskPlan';
+import { TODO_TOOL_DEFINITION, executeTodo, type TodoWriteInput } from './taskTool';
 import * as compareEngine from '../compare';
 import type { CompareFilters, HunkAction, SyncDirection } from '../compare';
 
@@ -312,6 +313,8 @@ export const LOCAL_TOOL_DEFINITIONS: LocalToolDef[] = [
       required: ['action']
     }
   },
+  // ─── Sprint 27.5: Claude Code TodoWrite-compatible tool ───
+  TODO_TOOL_DEFINITION,
   // ─── Sprint 27: Compare Agent Tools ───
   {
     name: 'compare_file',
@@ -469,6 +472,14 @@ export async function executeLocalTool(
       case 'task_plan': {
         const tpResult = executeTaskPlan(args as unknown as TaskPlanInput);
         result = JSON.stringify(tpResult);
+        break;
+      }
+      case 'todo': {
+        const todoResult = executeTodo(args as unknown as TodoWriteInput);
+        if (todoResult.isError) {
+          throw new Error(todoResult.content);
+        }
+        result = todoResult.content;
         break;
       }
       // ─── Sprint 27: Compare Agent Tools ───

@@ -13,7 +13,7 @@ import simpleGit, { SimpleGit } from 'simple-git';
 import { IPC_CHANNELS } from './ipc';
 import { getDatabase } from './db';
 import { getSecureSettings } from './security';
-import { ClaudeProvider, providerRegistry, streamChatToRenderer } from './providers';
+import { ClaudeProvider, providerRegistry } from './providers';
 import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
 import { getOrchestrationEngine } from './orchestration';
@@ -54,13 +54,9 @@ import {
   getHandoffInfo, getTaskWorktrees, shouldRecommendWorktree,
 } from './worktree/taskIsolation';
 import { buildFileTree, readFileSafe, writeFileSafe, checkFileWritable } from './fs';
-import {
-  startAutoContinue, stopAutoContinue, pauseAutoContinue, resumeAutoContinue,
-  getAutoContinueState, getAutoContinueConfig, getAutoContinueLog,
-  shouldAutoContinue, shouldContinueNext, buildContinueNudge, isAutoContinueActive,
-  scheduleNextTurn,
-  type AutoContinueContext,
-} from './orchestration/autoContinue';
+// Sprint 27.5: Canonical agent loop — no auto-continue, stop_reason only
+import { runAgentLoop } from './orchestration/agentLoop';
+import { setTodoWindow } from './tools/taskTool';
 import { getSessionUsage, resetSessionUsage } from './providers';
 import { getRetryHandler } from './providers/retryHandler';
 import { getRateLimiter } from './providers/rateLimiter';
@@ -504,253 +500,30 @@ function registerIPCHandlers(): void {
         enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`;
       }
 
-      // ─── Agentic Loop: stream → execute tools → continue ───
-      // Sprint 27: Increased max loops for long-task orchestration, added checkpoint injection
-      let loopCount = 0;
-      const maxLoops = 25;
-      let fullContent = '';
-      let allToolCalls: any[] = [];
-      let currentMessages = [...messages];
-      let consecutiveErrors = 0;
-      const MAX_CONSECUTIVE_ERRORS = 3;
+      // ─── Sprint 27.5: Canonical Agent Loop (stop_reason only) ───
+      const loopResult = await runAgentLoop(provider, messages, {
+        maxTurns: 25,
+        win: mainWindow,
+        sessionId,
+        systemPrompt: enhancedPrompt,
+        tools: allTools,
+        mcpToolMeta: mcpTools.map(t => ({ name: t.name, serverId: t.serverId })),
+        mcpExecute: (serverId: string, toolName: string, input: Record<string, unknown>) =>
+          mcp.executeTool(serverId, toolName, input),
+        wsPath: wsPath || undefined,
+        mode,
+        executeLocal: executeLocalTool,
+        db: {
+          insertMessage: (sid: string, role: string, content: string, tcs?: any[]) =>
+            db.insertMessage(sid, role, content, tcs),
+          logActivity: (sid: string, type: string, summary: string, detail?: string, meta?: any, level?: string) =>
+            db.logActivity(sid, type, summary, detail || '', meta || {}, level),
+        },
+        emitSandboxEvent,
+        writeToolNames: WRITE_TOOL_NAMES,
+      });
 
-      while (loopCount < maxLoops) {
-        loopCount++;
-
-        // Sprint 27: Checkpoint injection every 5 loops
-        if (loopCount > 1 && loopCount % 5 === 0) {
-          const todoProgress = getTodoProgress(sessionId);
-          createCheckpoint(sessionId, `loop-${loopCount}`, {
-            todoProgress: { done: todoProgress.done, total: todoProgress.total },
-            toolCallCount: allToolCalls.length,
-            loopIteration: loopCount,
-          });
-        }
-
-        // Sprint 27: Consecutive error circuit-breaker
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('chat:stream-chunk', {
-              sessionId,
-              type: 'text',
-              content: `\n**[Agent Loop]** Stopped after ${MAX_CONSECUTIVE_ERRORS} consecutive errors. Use /checkpoint list to review progress.\n`,
-              fullContent: '',
-            });
-          }
-          break;
-        }
-
-        // Sprint 24: Pre-flight rate-limit check before every API call
-        const preCheck = getRateLimiter().preFlightCheck();
-        if (!preCheck.ok) {
-          // Hard-paused — notify renderer and stop
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('chat:stream-chunk', {
-              sessionId,
-              type: 'text',
-              content: `\n**[Rate Limit]** ${preCheck.reason}\n`,
-              fullContent: preCheck.reason || '',
-            });
-          }
-          break;
-        }
-        if (preCheck.delayMs > 0) {
-          // Throttled — wait before sending
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('chat:stream-chunk', {
-              sessionId,
-              type: 'text',
-              content: `\n*Waiting ${Math.round(preCheck.delayMs / 1000)}s for rate-limit window...*\n`,
-              fullContent: '',
-            });
-          }
-          await new Promise(resolve => setTimeout(resolve, preCheck.delayMs));
-        }
-
-        const result = await streamChatToRenderer(
-          mainWindow,
-          provider,
-          currentMessages,
-          sessionId,
-          enhancedPrompt,
-          allTools.length > 0 ? allTools : undefined
-        );
-
-        fullContent = result.content;
-
-        if (!result.toolCalls || result.toolCalls.length === 0) {
-          // No tool calls — done
-          break;
-        }
-
-        // Process each tool call
-        allToolCalls.push(...result.toolCalls);
-
-        // Add assistant message with tool calls to conversation
-        const assistantContent: any[] = [];
-        if (result.content) {
-          assistantContent.push({ type: 'text', text: result.content });
-        }
-        for (const tc of result.toolCalls) {
-          assistantContent.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.name,
-            input: tc.input || {}
-          });
-        }
-        currentMessages.push({ role: 'assistant', content: JSON.stringify(assistantContent) });
-
-        // Execute each tool and collect results
-        const toolResults: any[] = [];
-        for (const tc of result.toolCalls) {
-          db.logActivity(sessionId, 'tool_call', `Tool call: ${tc.name}`, JSON.stringify(tc.input).substring(0, 200), {
-            toolName: tc.name,
-            toolCallId: tc.id,
-            sessionId,
-            loop: loopCount
-          });
-
-          let toolResultContent: string;
-          let isError = false;
-
-          // Sprint 16: Plan/Build mode enforcement — reject write tools in plan mode
-          if (mode === 'plan' && WRITE_TOOL_NAMES.includes(tc.name)) {
-            toolResultContent = `Error: Tool "${tc.name}" is disabled in Plan mode. Switch to Build mode with /build to use write tools.`;
-            isError = true;
-            emitSandboxEvent({ type: 'error', tool: tc.name, summary: `Blocked ${tc.name} (Plan mode)`, status: 'error' });
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: tc.id,
-              content: toolResultContent,
-              is_error: true,
-            });
-            // Send to renderer
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('chat:stream-chunk', {
-                sessionId,
-                type: 'tool_error',
-                toolName: tc.name,
-                result: toolResultContent,
-              });
-            }
-            continue;
-          }
-
-          // Sprint 15.2: Emit sandbox event for tool start with cwd and args
-          const isCommandTool = ['run_command', 'bash_command'].includes(tc.name);
-          emitSandboxEvent({
-            type: isCommandTool ? 'command' : 'tool_call',
-            tool: tc.name,
-            summary: isCommandTool ? `$ ${(tc.input?.command || '').substring(0, 100)}` : `Calling ${tc.name}`,
-            detail: JSON.stringify(tc.input || {}).substring(0, 500),
-            cwd: getActiveWorkspace() || undefined,
-            status: 'running',
-          });
-
-          // Check if it's a local tool
-          const isLocalTool = LOCAL_TOOL_DEFINITIONS.some(t => t.name === tc.name);
-
-          if (isLocalTool) {
-            try {
-              const localResult = await executeLocalTool(tc.name, tc.input || {});
-              toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-              // Sprint 15.2: Emit file_edit event for write/patch tools
-              const isFileEdit = ['write_file', 'patch_file', 'multi_edit'].includes(tc.name);
-              emitSandboxEvent({
-                type: isFileEdit ? 'file_edit' : 'tool_result',
-                tool: tc.name,
-                summary: `${tc.name} completed${isFileEdit ? `: ${tc.input?.path || tc.input?.file_path || ''}` : ''}`,
-                detail: toolResultContent.substring(0, 300),
-                cwd: getActiveWorkspace() || undefined,
-                status: 'success',
-              });
-              // Sprint 19: Notify renderer about file changes for live view
-              if (isFileEdit && mainWindow && !mainWindow.isDestroyed()) {
-                const filePath = tc.input?.path || tc.input?.file_path || '';
-                const wsPath = getActiveWorkspace() || '';
-                const absolutePath = filePath.startsWith('/') ? filePath : join(wsPath, filePath);
-                mainWindow.webContents.send('filetree:file-changed', {
-                  filePath: filePath,
-                  absolutePath: absolutePath,
-                  toolName: tc.name,
-                  timestamp: Date.now(),
-                });
-              }
-            } catch (err) {
-              toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-              isError = true;
-              emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `${tc.name} failed`, detail: toolResultContent, status: 'error' });
-            }
-          } else {
-            // MCP tool
-            const toolMeta = mcpTools.find(t => t.name === tc.name);
-            if (toolMeta) {
-              try {
-                emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
-                const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
-                toolResultContent = mcpResult?.content
-                  ? (Array.isArray(mcpResult.content)
-                      ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
-                      : JSON.stringify(mcpResult.content))
-                  : JSON.stringify(mcpResult);
-                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
-              } catch (err) {
-                toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-                isError = true;
-                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} failed`, detail: toolResultContent, status: 'error' });
-              }
-            } else {
-              toolResultContent = `Error: Unknown tool "${tc.name}"`;
-              isError = true;
-            }
-          }
-
-          toolResults.push({
-            toolCallId: tc.id,
-            toolName: tc.name,
-            content: toolResultContent,
-            isError
-          });
-
-          db.logActivity(sessionId, isError ? 'tool_error' : 'tool_result', `Tool ${isError ? 'error' : 'result'}: ${tc.name}`, toolResultContent.substring(0, 200), {
-            toolName: tc.name,
-            toolCallId: tc.id,
-            success: !isError,
-            loop: loopCount
-          });
-
-          // Send tool result to renderer
-          mainWindow?.webContents.send('chat:stream-chunk', {
-            sessionId,
-            type: isError ? 'tool_error' : 'tool_result',
-            toolCallId: tc.id,
-            toolName: tc.name,
-            result: toolResultContent.substring(0, 2000)
-          });
-        }
-
-        // Sprint 27: Track consecutive errors for circuit-breaker
-        const errorCount = toolResults.filter(tr => tr.isError).length;
-        if (errorCount > 0 && errorCount === toolResults.length) {
-          consecutiveErrors++;
-        } else {
-          consecutiveErrors = 0;
-        }
-
-        // Add tool results as user message for next turn
-        const toolResultMessage = toolResults.map(tr =>
-          `[Tool Result: ${tr.toolName}]\n${tr.content.substring(0, 4000)}`
-        ).join('\n\n');
-
-        currentMessages.push({ role: 'user', content: toolResultMessage });
-
-        // Persist the tool results
-        db.insertMessage(sessionId, 'assistant', result.content || '(tool execution)', result.toolCalls);
-        db.insertMessage(sessionId, 'user', toolResultMessage);
-      }
-
-      // Sprint 24: Emit session usage and rate-limit snapshot to renderer after complete response
+      // Sprint 24: Emit session usage and rate-limit snapshot
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('chat:stream-chunk', {
           sessionId,
@@ -760,29 +533,34 @@ function registerIPCHandlers(): void {
         });
       }
 
-      // Save final assistant response to DB
-      const msgId = db.insertMessage(sessionId, 'assistant', fullContent, allToolCalls.length > 0 ? allToolCalls : undefined);
+      // Save final response to DB
+      const msgId = db.insertMessage(
+        sessionId, 'assistant', loopResult.content,
+        loopResult.toolCalls.length > 0 ? loopResult.toolCalls : undefined,
+      );
 
-      // Update task status
       if (taskId) {
         db.updateTaskStatus(taskId, 'EXECUTING', 'AI response received');
         db.logActivity(sessionId, 'task_updated', 'Task executing', 'AI processing response', { taskId, status: 'EXECUTING' });
       }
 
-      db.logActivity(sessionId, 'chat_response', `AI responded (${fullContent.length} chars, ${loopCount} loops, ${allToolCalls.length} tool calls)`, fullContent.substring(0, 150), {
-        sessionId,
-        provider: provider.name,
-        contentLength: fullContent.length,
-        toolCalls: allToolCalls.length,
-        loops: loopCount
-      });
+      db.logActivity(sessionId, 'chat_response',
+        `AI responded (${loopResult.content.length} chars, ${loopResult.turns} turns, ${loopResult.toolCalls.length} tool calls, reason: ${loopResult.reason})`,
+        loopResult.content.substring(0, 150), {
+          sessionId,
+          provider: provider.name,
+          contentLength: loopResult.content.length,
+          toolCalls: loopResult.toolCalls.length,
+          turns: loopResult.turns,
+          reason: loopResult.reason,
+        });
 
       return {
         id: msgId,
         role: 'assistant',
-        content: fullContent,
-        toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
-        streaming: true
+        content: loopResult.content,
+        toolCalls: loopResult.toolCalls.length > 0 ? loopResult.toolCalls : undefined,
+        streaming: true,
       };
     } catch (err) {
       const errMsg = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
@@ -2410,46 +2188,31 @@ function registerIPCHandlers(): void {
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  Sprint 19 + Sprint 24: Auto-Continue IPC Handlers (Fixed)
+  //  Sprint 27.5: Todo IPC Handlers
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_START, async (_event, config?: any) => {
-    const state = startAutoContinue(config);
-    db.logActivity('system', 'auto_continue', 'Auto-Continue started', `Max ${state.maxIterations} iterations`);
-    return state;
+  ipcMain.handle(IPC_CHANNELS.TODO_GET, async (_event, sessionId: string) => {
+    return getTodoList(sessionId);
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_STOP, async (_event, reason?: string) => {
-    const stopReason = (reason as 'user' | 'safety' | 'completion' | 'error' | 'rate-limit') || 'user';
-    const state = stopAutoContinue(stopReason);
-    db.logActivity('system', 'auto_continue', `Auto-Continue stopped: ${stopReason}`, state.lastStatus);
-    return state;
+  ipcMain.handle(IPC_CHANNELS.TODO_CREATE, async (_event, sessionId: string, items: any[]) => {
+    return createTodoList(sessionId, items);
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_STATUS, async () => {
-    return getAutoContinueState();
+  ipcMain.handle(IPC_CHANNELS.TODO_UPDATE_ITEM, async (_event, sessionId: string, itemId: string, updates: any) => {
+    return updateTodoItem(sessionId, itemId, updates);
   });
 
-  // Sprint 24: Fixed pause — uses pauseAutoContinue() instead of stopAutoContinue()
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_PAUSE, async (_event, reason?: string) => {
-    const state = pauseAutoContinue(reason || 'Manual pause');
-    db.logActivity('system', 'auto_continue', `Auto-Continue paused: ${reason || 'manual'}`, state.lastStatus);
-    return state;
+  ipcMain.handle(IPC_CHANNELS.TODO_APPEND, async (_event, sessionId: string, items: any[]) => {
+    return appendTodoItems(sessionId, items);
   });
 
-  // Sprint 24: Fixed resume — uses resumeAutoContinue() instead of startAutoContinue()
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_RESUME, async () => {
-    const state = resumeAutoContinue();
-    db.logActivity('system', 'auto_continue', 'Auto-Continue resumed', state.lastStatus);
-    return state;
+  ipcMain.handle(IPC_CHANNELS.TODO_CLEAR, async (_event, sessionId: string) => {
+    return clearTodoList(sessionId);
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_LOG, async () => {
-    return { entries: getAutoContinueLog() };
-  });
-
-  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_CONFIG, async () => {
-    return getAutoContinueConfig();
+  ipcMain.handle(IPC_CHANNELS.TODO_PROGRESS, async (_event, sessionId: string) => {
+    return getTodoProgress(sessionId);
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2527,33 +2290,7 @@ function registerIPCHandlers(): void {
     return compareEngine.saveMergeResult(sessionId, outputPath);
   });
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  Sprint 27: Todo Manager IPC
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  ipcMain.handle(IPC_CHANNELS.TODO_GET, async (_event, sessionId: string) => {
-    return getTodoList(sessionId);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.TODO_CREATE, async (_event, sessionId: string, items: any[]) => {
-    return createTodoList(sessionId, items);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.TODO_UPDATE_ITEM, async (_event, sessionId: string, itemId: string, updates: any) => {
-    return updateTodoItem(sessionId, itemId, updates);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.TODO_APPEND, async (_event, sessionId: string, items: any[]) => {
-    return appendTodoItems(sessionId, items);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.TODO_CLEAR, async (_event, sessionId: string) => {
-    return clearTodoList(sessionId);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.TODO_PROGRESS, async (_event, sessionId: string) => {
-    return getTodoProgress(sessionId);
-  });
+  // (Sprint 27 Todo Manager IPC — removed, handled by Sprint 27.5 block above)
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Sprint 27: Checkpoint IPC
@@ -2647,9 +2384,10 @@ app.whenReady().then(() => {
   registerIPCHandlers();
   createWindow();
 
-  // Wire mainWindow into the commands module for streaming research results
+  // Wire mainWindow into the commands module and todo broadcast
   if (mainWindow) {
     setCommandsMainWindow(mainWindow);
+    setTodoWindow(mainWindow);
   }
 
   app.on('activate', () => {

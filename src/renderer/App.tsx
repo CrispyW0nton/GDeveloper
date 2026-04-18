@@ -48,7 +48,6 @@ function AppInner() {
     refreshWorktreeContext,
     // Sprint 19
     setFileTreeOpen, setFileTreeWidth,
-    setAutoContinueEnabled,
     setLiveViewOpen, setLiveViewAutoOpen,
     setActiveFilePath, addHighlightedFile, clearHighlightedFiles,
     // Sprint 21
@@ -321,9 +320,6 @@ function AppInner() {
               availableModels={state.availableModels}
               onModelChange={setSelectedModel}
               worktreeContext={state.worktreeContext}
-              autoContinueEnabled={state.autoContinueEnabled}
-              onAutoContinueToggle={() => setAutoContinueEnabled(!state.autoContinueEnabled)}
-              autoContinueMaxIterations={state.autoContinueMaxIterations}
               rateLimitSnapshot={state.rateLimitSnapshot}
               retryState={state.retryState}
               softInputLimit={state.tokenBudget.softInputTokensPerMinute}
