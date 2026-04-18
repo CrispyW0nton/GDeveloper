@@ -591,8 +591,10 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     }
   };
 
-  // Sprint 24: Fixed auto-continue scheduler — uses shouldAutoContinue IPC check
-  const scheduleAutoContinue = useCallback(async (lastContent: string) => {
+  // Sprint 27.2: Fixed auto-continue scheduler — uses shouldFireNudge state machine
+  // Bug H fix: only fires when shouldFireNudge() returns { fire: true }
+  // Bug B fix: step counter is now read from state machine snapshot
+  const scheduleAutoContinue = useCallback(async (_lastContent: string) => {
     if (!api?.autoContinueStatus) return;
 
     // Cancel any existing scheduled turn
@@ -612,7 +614,29 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       setAutoContinueStatus(status);
       if (!status.active || status.phase === 'paused') return;
 
-      // Debounce: wait 500ms before sending next nudge (configurable range 500-1500ms)
+      // Sprint 27.2: Ask the state machine if we should fire
+      const fireCheck = api.autoContinueShouldFire
+        ? await api.autoContinueShouldFire()
+        : { fire: true, reason: 'OK', step: status.currentIteration, maxSteps: status.maxIterations };
+
+      if (!fireCheck.fire) {
+        // State machine says no — show reason in system message if it's a stall/text-only pause
+        if (fireCheck.reason && !fireCheck.reason.startsWith('Not running')) {
+          const pauseMsg: Message = {
+            id: `msg-pause-${Date.now()}`,
+            role: 'system',
+            content: `Auto-Continue paused: ${fireCheck.reason}`,
+            timestamp: new Date().toISOString(),
+          };
+          setMessages(prev => [...prev, pauseMsg]);
+          // Update status to reflect paused state
+          const updatedStatus = await api.autoContinueStatus();
+          setAutoContinueStatus(updatedStatus);
+        }
+        return;
+      }
+
+      // Debounce: wait 500ms before sending next nudge
       const debounceMs = 500;
       autoContinueDebounceRef.current = setTimeout(async () => {
         autoContinueDebounceRef.current = null;
@@ -622,14 +646,20 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         setAutoContinueStatus(recheck);
         if (!recheck.active || recheck.phase === 'paused') return;
 
+        // Re-check shouldFire (state may have changed during debounce)
+        const reFireCheck = api.autoContinueShouldFire
+          ? await api.autoContinueShouldFire()
+          : { fire: true, step: recheck.currentIteration, maxSteps: recheck.maxIterations };
+        if (!reFireCheck.fire) return;
+
         // Don't auto-continue while user is typing
         if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
           return;
         }
 
-        // Build and send the nudge
-        const iter = recheck.currentIteration + 1;
-        const max = recheck.maxIterations;
+        // Build and send the nudge — use step from state machine (Bug B fix)
+        const iter = reFireCheck.step + 1;
+        const max = reFireCheck.maxSteps;
         const taskInfo = recheck.tasksTotal > 0
           ? ` (${recheck.tasksCompleted}/${recheck.tasksTotal} tasks complete)`
           : '';
@@ -652,10 +682,12 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
           try {
             const result = await api.sendMessage(session.id, nudge);
+            // Sprint 27.2 Bug C fix: Always render assistant text content
+            const assistantContent = sanitizeContent(result.content);
             const assistantMsg: Message = {
               id: result.id || `msg-auto-${Date.now()}`,
               role: 'assistant',
-              content: sanitizeContent(result.content),
+              content: assistantContent || '(tool execution)',
               toolCalls: result.toolCalls?.map((tc: any) => ({
                 name: tc.name,
                 description: `Called ${tc.name}`,

@@ -228,6 +228,11 @@ const electronAPI = {
   autoContinueResume: () => ipcRenderer.invoke('auto-continue:resume'),
   autoContinueLog: () => ipcRenderer.invoke('auto-continue:log'),
   autoContinueConfig: () => ipcRenderer.invoke('auto-continue:config'),
+  // Sprint 27.2: State machine APIs
+  autoContinueShouldFire: () => ipcRenderer.invoke('auto-continue:should-fire'),
+  autoContinueStateSnapshot: () => ipcRenderer.invoke('auto-continue:state-snapshot'),
+  autoContinuePauseUser: () => ipcRenderer.invoke('auto-continue:pause-user'),
+  autoContinueResumeUser: () => ipcRenderer.invoke('auto-continue:resume-user'),
 
   // ─── Sprint 19: Live Code View events ──────────────
   onFileChanged: (callback: (data: any) => void) => {

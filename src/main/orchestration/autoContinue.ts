@@ -1,5 +1,12 @@
 /**
- * Auto-Continue Engine — Sprint 19 + Sprint 22 (Auto Mode Addendum)
+ * Auto-Continue Engine — Sprint 19 + Sprint 22 (Auto Mode Addendum) + Sprint 27.2
+ *
+ * Sprint 27.2 additions:
+ *  - Delegates key decisions to autoContinueState.ts state machine
+ *  - recordTurn() is called after each loop iteration
+ *  - shouldFireNudge() is exported for the renderer to use
+ *  - startAutoContinue() also starts the state machine
+ *  - stopAutoContinue() also stops the state machine
  *
  * Sprint 22 fixes & enhancements:
  *  - shouldAutoContinue() logic that checks: Auto enabled, tasks remain, no final answer,
@@ -20,6 +27,11 @@
  */
 
 import { getActivePlan } from '../tools/taskPlan';
+import {
+  startMachine, stopMachine, pauseByUser, resumeByUser,
+  recordTurn, shouldFireNudge as stateShouldFire, getSnapshot,
+  type AutoContinueStateSnapshot,
+} from './autoContinueState';
 
 // ─── Types ───
 
@@ -139,6 +151,8 @@ export function startAutoContinue(userConfig?: Partial<AutoContinueConfig>): Aut
     tasksTotal: 0,
     log: [],
   };
+  // Sprint 27.2: Start state machine in parallel
+  startMachine(merged.maxIterations);
   logAction('enabled', `Auto-continue started (max ${merged.maxIterations} iterations, ${Math.round(merged.maxElapsedMs / 60000)} min)`);
   updateTaskProgress();
   return { ...state };
@@ -148,6 +162,8 @@ export function stopAutoContinue(reason: 'user' | 'safety' | 'completion' | 'err
   cancelScheduled();
   state.active = false;
   state.cancelledBy = reason;
+  // Sprint 27.2: Stop state machine
+  stopMachine(reason);
 
   switch (reason) {
     case 'user':
@@ -181,6 +197,8 @@ export function pauseAutoContinue(reason: string): AutoContinueState {
   state.phase = 'paused';
   state.pauseReason = reason;
   state.lastStatus = `Paused: ${reason}`;
+  // Sprint 27.2: Sync pause to state machine
+  pauseByUser();
   logAction('paused', reason);
   return { ...state };
 }
@@ -192,6 +210,8 @@ export function resumeAutoContinue(): AutoContinueState {
   state.phase = 'continuing';
   state.pauseReason = null;
   state.lastStatus = 'Resumed';
+  // Sprint 27.2: Resume state machine
+  resumeByUser();
   logAction('resumed', 'Auto-continue resumed by user');
   return { ...state };
 }
@@ -337,6 +357,36 @@ export function shouldAutoContinue(ctx: AutoContinueContext): ShouldContinueDeci
   logAction('iteration', `Iteration ${state.currentIteration}/${state.maxIterations}`);
 
   return { shouldContinue: true, reason: state.lastStatus, phase: 'continuing' };
+}
+
+// ─── Sprint 27.2: Exports for state machine integration ───
+
+/**
+ * Called after each agent loop iteration to record turn output.
+ * This is the key integration point for Bug B (step counter) and Bug H (text-only).
+ */
+export function recordAgentTurn(hadTools: boolean, hadText: boolean): void {
+  recordTurn(hadTools, hadText);
+  // Sync step counter from state machine to legacy state
+  const snapshot = getSnapshot();
+  state.currentIteration = snapshot.step;
+  state.tasksCompleted = snapshot.tasksCompleted;
+  state.tasksTotal = snapshot.tasksTotal;
+}
+
+/**
+ * Should the renderer fire an auto-continue nudge?
+ * Delegates to the state machine for Bug H (text-only) and Bug D (stall) checks.
+ */
+export function shouldFireAutoContinueNudge(): { fire: boolean; reason: string; step: number; maxSteps: number } {
+  return stateShouldFire();
+}
+
+/**
+ * Get state machine snapshot for renderer.
+ */
+export function getStateMachineSnapshot(): AutoContinueStateSnapshot {
+  return getSnapshot();
 }
 
 // ─── Sprint 22: Debounced Scheduler ───

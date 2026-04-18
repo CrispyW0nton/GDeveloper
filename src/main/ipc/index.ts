@@ -274,6 +274,12 @@ export const IPC_CHANNELS = {
   // ─── Sprint 27.1: Rate Limit Lite ───
   RATE_LIMIT_LITE_SNAPSHOT: 'rate-limit-lite:snapshot',
   RATE_LIMIT_LITE_HEADERS: 'rate-limit-lite:headers',
+
+  // ─── Sprint 27.2: Auto-Continue State Machine ───
+  AUTO_CONTINUE_SHOULD_FIRE: 'auto-continue:should-fire',
+  AUTO_CONTINUE_STATE_SNAPSHOT: 'auto-continue:state-snapshot',
+  AUTO_CONTINUE_PAUSE_USER: 'auto-continue:pause-user',
+  AUTO_CONTINUE_RESUME_USER: 'auto-continue:resume-user',
 } as const;
 
 export type IPCChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];

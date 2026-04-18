@@ -70,7 +70,7 @@ import {
   startAutoContinue, stopAutoContinue, pauseAutoContinue, resumeAutoContinue,
   getAutoContinueState, getAutoContinueConfig, getAutoContinueLog,
   shouldAutoContinue, shouldContinueNext, buildContinueNudge, isAutoContinueActive,
-  scheduleNextTurn,
+  scheduleNextTurn, recordAgentTurn, shouldFireAutoContinueNudge, getStateMachineSnapshot,
   type AutoContinueContext,
 } from './orchestration/autoContinue';
 import { getSessionUsage, resetSessionUsage } from './providers';
@@ -620,7 +620,8 @@ function registerIPCHandlers(): void {
         fullContent = result.content;
 
         if (!result.toolCalls || result.toolCalls.length === 0) {
-          // No tool calls — done
+          // No tool calls — record text-only turn and exit loop
+          recordAgentTurn(false, !!(result.content && result.content.trim().length > 0));
           break;
         }
 
@@ -772,6 +773,11 @@ function registerIPCHandlers(): void {
             result: toolResultContent.substring(0, 2000)
           });
         }
+
+        // Sprint 27.2: Record turn in state machine (Bug B + H fix)
+        const hadToolCalls = result.toolCalls && result.toolCalls.length > 0;
+        const hadTextOutput = !!(result.content && result.content.trim().length > 0);
+        recordAgentTurn(!!hadToolCalls, hadTextOutput);
 
         // Sprint 27: Track consecutive errors for circuit-breaker
         const errorCount = toolResults.filter(tr => tr.isError).length;
@@ -2493,6 +2499,27 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_CONFIG, async () => {
     return getAutoContinueConfig();
+  });
+
+  // Sprint 27.2: State machine IPC handlers
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_SHOULD_FIRE, async () => {
+    return shouldFireAutoContinueNudge();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_STATE_SNAPSHOT, async () => {
+    return getStateMachineSnapshot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_PAUSE_USER, async () => {
+    const state = pauseAutoContinue('Paused by user');
+    db.logActivity('system', 'auto_continue', 'Auto-Continue paused by user', state.lastStatus);
+    return state;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CONTINUE_RESUME_USER, async () => {
+    const state = resumeAutoContinue();
+    db.logActivity('system', 'auto_continue', 'Auto-Continue resumed by user', state.lastStatus);
+    return state;
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
