@@ -1237,6 +1237,56 @@ register({
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  SPRINT 27.2: PAUSE / RESUME COMMANDS (Bug I+G)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+register({
+  name: 'pause',
+  description: 'Pause Auto-Continue. The agent will stop sending nudges until you /resume.',
+  category: 'workflow',
+  safe: true,
+  async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+    try {
+      const { pauseByUser, getSnapshot } = require('../orchestration/autoContinueState');
+      const { pauseAutoContinue } = require('../orchestration/autoContinue');
+      pauseByUser();
+      pauseAutoContinue('User ran /pause');
+      const snap = getSnapshot();
+      return {
+        success: true,
+        message: `**Auto-Continue paused.** Step ${snap.step}/${snap.maxSteps}.\nUse \`/resume\` to continue.`,
+        data: { snapshot: snap },
+      };
+    } catch (err) {
+      return { success: false, message: `Pause failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
+
+register({
+  name: 'resume',
+  description: 'Resume Auto-Continue after a /pause or stall.',
+  category: 'workflow',
+  safe: true,
+  async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+    try {
+      const { resumeByUser, getSnapshot } = require('../orchestration/autoContinueState');
+      const { resumeAutoContinue } = require('../orchestration/autoContinue');
+      resumeByUser();
+      resumeAutoContinue();
+      const snap = getSnapshot();
+      return {
+        success: true,
+        message: `**Auto-Continue resumed.** Step ${snap.step}/${snap.maxSteps}.\nThe agent will continue working.`,
+        data: { snapshot: snap },
+      };
+    } catch (err) {
+      return { success: false, message: `Resume failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  SPRINT 27: MCP COMMANDS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
