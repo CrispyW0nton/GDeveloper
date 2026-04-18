@@ -1,5 +1,5 @@
 /**
- * Canonical Agent Loop — Sprint 27.5
+ * Canonical Agent Loop — Sprint 27.5 + 27.5.1 (todo continuation fix)
  *
  * Mirrors easy-agent/step4.js exactly:
  *   while (stop_reason === "tool_use") { execute tools; send results; }
@@ -7,13 +7,41 @@
  * Termination is governed SOLELY by Anthropic's stop_reason.
  * NO timers, NO step counters. Pure stop_reason-driven loop.
  *
+ * Sprint 27.5.1 addition: silent todo-continuation check.
+ * When the model prematurely ends after a todo-only turn with incomplete
+ * tasks, a user-role nudge is injected to continue execution. A safety
+ * limit of 3 consecutive nudges prevents infinite loops (stuck_after_todo).
+ *
  * Reference: https://github.com/ConardLi/easy-agent/blob/main/step/step4.js
  * Reference: https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+ * Reference: https://github.com/anthropics/claude-code/issues/10980
  */
 
 import { BrowserWindow } from 'electron';
 import { ToolDefinition } from '../domain/entities';
 import { executeToolCall, type ToolCallResult } from '../tools/toolExecutor';
+import { getTodos } from '../tools/taskTool';
+
+/** Maximum consecutive todo-only nudges before giving up */
+const MAX_TODO_NUDGES = 3;
+
+/** The nudge message injected when the model prematurely ends after a todo-only turn */
+export const TODO_NUDGE_MESSAGE = 'Continue executing the in_progress task from your todo list. Do not end your turn until all tasks are completed.';
+
+/**
+ * Check if there are still incomplete (pending/in_progress) tasks in the todo list.
+ */
+function hasIncompleteTasks(): boolean {
+  const todos = getTodos();
+  return todos.length > 0 && todos.some(t => t.status === 'pending' || t.status === 'in_progress');
+}
+
+/**
+ * Check if the only tools called in a turn were 'todo' tools.
+ */
+export function onlyTodoCalled(toolCalls: Array<{ name: string }>): boolean {
+  return toolCalls.length > 0 && toolCalls.every(tc => tc.name === 'todo');
+}
 
 // ─── Types ───
 
@@ -59,7 +87,7 @@ export interface AgentLoopResult {
   /** Number of turns executed */
   turns: number;
   /** Why the loop exited */
-  reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'max_turns' | 'error' | 'aborted' | 'no_tools';
+  reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'max_turns' | 'error' | 'aborted' | 'no_tools' | 'stuck_after_todo';
 }
 
 // ─── Stream + collect response ───
@@ -124,6 +152,10 @@ export async function runAgentLoop(
   let allToolCalls: any[] = [];
   let lastContent = '';
 
+  // ─── Sprint 27.5.1: Todo continuation state ───
+  let consecutiveTodoNudges = 0;
+  let lastTurnOnlyTodo = false;
+
   for (let turn = 0; turn < maxTurns; turn++) {
     // Check abort signal
     if (opts.signal?.aborted) {
@@ -146,7 +178,34 @@ export async function runAgentLoop(
     // Per Anthropic docs: only continue if stop_reason === "tool_use"
 
     if (result.stopReason === 'end_turn') {
-      // Model is done. Exit immediately.
+      // ─── Sprint 27.5.1: Silent todo-continuation check ───
+      // If the previous turn only called the todo tool and there are still
+      // incomplete tasks, the model prematurely ended. Inject a nudge.
+      if (lastTurnOnlyTodo && hasIncompleteTasks()) {
+        consecutiveTodoNudges++;
+        if (consecutiveTodoNudges >= MAX_TODO_NUDGES) {
+          // Safety: model is stuck in a todo→end_turn loop
+          opts.db.insertMessage(opts.sessionId, 'assistant', lastContent || '(stuck after todo)');
+          return {
+            content: lastContent || 'Error: agent stuck in todo loop after ' + MAX_TODO_NUDGES + ' nudges.',
+            toolCalls: allToolCalls,
+            turns: turn + 1,
+            reason: 'stuck_after_todo',
+          };
+        }
+
+        // Inject a user-role nudge and continue the loop
+        currentMessages.push({ role: 'assistant', content: lastContent || '(planning)' });
+        currentMessages.push({ role: 'user', content: TODO_NUDGE_MESSAGE });
+        opts.db.insertMessage(opts.sessionId, 'assistant', lastContent || '(planning)');
+        opts.db.insertMessage(opts.sessionId, 'user', TODO_NUDGE_MESSAGE);
+
+        // Reset lastTurnOnlyTodo so we don't double-count
+        lastTurnOnlyTodo = false;
+        continue;
+      }
+
+      // Model is done. Exit.
       return { content: lastContent, toolCalls: allToolCalls, turns: turn + 1, reason: 'end_turn' };
     }
 
@@ -232,6 +291,19 @@ export async function runAgentLoop(
     // Persist messages
     opts.db.insertMessage(opts.sessionId, 'assistant', result.content || '(tool execution)', result.toolCalls);
     opts.db.insertMessage(opts.sessionId, 'user', toolResultMessage);
+
+    // ─── Sprint 27.5.1: Track todo-only turns for continuation check ───
+    const thisOnlyTodo = onlyTodoCalled(result.toolCalls);
+    if (thisOnlyTodo && hasIncompleteTasks()) {
+      lastTurnOnlyTodo = true;
+      // Don't reset nudges — they only reset when a non-todo tool is called
+    } else {
+      lastTurnOnlyTodo = false;
+      // Reset nudge counter on any non-todo tool call
+      if (!thisOnlyTodo) {
+        consecutiveTodoNudges = 0;
+      }
+    }
   }
 
   // Exhausted maxTurns — safety net
