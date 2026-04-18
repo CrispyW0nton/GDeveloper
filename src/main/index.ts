@@ -21,7 +21,7 @@ import { SYSTEM_PROMPT } from './orchestration/prompts';
 import * as compareEngine from './compare';
 import {
   setActiveWorkspace, getActiveWorkspace,
-  executeLocalTool, LOCAL_TOOL_DEFINITIONS,
+  executeLocalTool, LOCAL_TOOL_DEFINITIONS, setToolSessionId,
   gitPull, gitPush, gitFetch, gitStash, gitStashPop,
   gitBranches, gitCheckout, gitGetStatus, gitClone, isGitRepo,
 } from './tools';
@@ -91,7 +91,9 @@ import {
   getTodoList, getTodoProgress, isTodoComplete,
   createTodoList, updateTodoItem, appendTodoItems, clearTodoList,
   setTodoBroadcast,
+  getActiveTask, setActive, completeActive, advanceToNextPending, blockActive,
 } from './orchestration/todoManager';
+import { withTimeout, getTimeoutForTool } from './tools/toolTimeout';
 import { buildEnhancedSystemPrompt } from './orchestration/promptBuilder';
 import {
   runAssertions, formatVerifyReport, getPersistedReports,
@@ -146,34 +148,11 @@ function emitSandboxEvent(event: Omit<SandboxEvent, 'id' | 'timestamp'>): void {
   }
 }
 
-// ─── Sprint 27.2: Per-tool timeout (Bug E) ───
-// Default timeout per tool execution: 120s for commands, 60s for others
-const TOOL_TIMEOUT_MS: Record<string, number> = {
-  run_command: 120_000,
-  bash_command: 120_000,
-};
-const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
-
-/**
- * Execute a promise with a per-tool timeout.
- * If the timeout fires, returns an error string instead of throwing.
- */
-async function withToolTimeout<T>(
-  toolName: string,
-  promise: Promise<T>,
-): Promise<T> {
-  const timeoutMs = TOOL_TIMEOUT_MS[toolName] || DEFAULT_TOOL_TIMEOUT_MS;
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Tool "${toolName}" timed out after ${Math.round(timeoutMs / 1000)}s`));
-    }, timeoutMs);
-
-    promise.then(
-      (val) => { clearTimeout(timer); resolve(val); },
-      (err) => { clearTimeout(timer); reject(err); },
-    );
-  });
-}
+// ─── Sprint 27.2: Per-tool timeout (Bug E) — FIXED ───
+// Previous implementation raced a timer against the promise but could NOT abort
+// execSync (which blocks the event loop). Now uses withTimeout from toolTimeout.ts
+// which provides: AbortController signal, spawnAsync (non-blocking), SIGTERM→SIGKILL.
+// The withTimeout import is at the top of the file.
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -560,6 +539,7 @@ function registerIPCHandlers(): void {
 
       // Sprint 27.2: Wire sessionId so task_plan syncs to todoManager (Bug A fix)
       setTaskPlanSessionId(sessionId);
+      setToolSessionId(sessionId);
 
       // ─── Agentic Loop: stream → execute tools → continue ───
       // Sprint 27: Increased max loops for long-task orchestration, added checkpoint injection
@@ -651,7 +631,28 @@ function registerIPCHandlers(): void {
 
         if (!result.toolCalls || result.toolCalls.length === 0) {
           // No tool calls — record text-only turn and exit loop
-          recordAgentTurn(false, !!(result.content && result.content.trim().length > 0));
+          const hasRealContent = !!(result.content && result.content.trim().length > 0);
+          recordAgentTurn(false, hasRealContent);
+
+          // Sprint 27.2: If the turn is completely empty (no text, no tools),
+          // this is a bad turn — stop looping immediately. The state machine
+          // tracks consecutiveEmptyTurns and will pause if this recurs.
+          if (!hasRealContent) {
+            console.warn(`[Agent Loop] Empty turn at loop ${loopCount} — breaking to prevent infinite loop`);
+          }
+
+          // Sprint 27.2: Send final assistant text to renderer immediately.
+          // This guarantees end_turn content reaches the UI and isn't swallowed.
+          if (hasRealContent && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:stream-chunk', {
+              sessionId,
+              type: 'text',
+              content: result.content,
+              fullContent: result.content,
+              isFinal: true,
+            });
+          }
+
           break;
         }
 
@@ -726,9 +727,16 @@ function registerIPCHandlers(): void {
           const isLocalTool = LOCAL_TOOL_DEFINITIONS.some(t => t.name === tc.name);
 
           if (isLocalTool) {
-            try {
-              // Sprint 27.2: Per-tool timeout (Bug E fix)
-              const localResult = await withToolTimeout(tc.name, executeLocalTool(tc.name, tc.input || {}));
+            // Sprint 27.2: Proper per-tool timeout with AbortController (replaces broken withToolTimeout)
+            const timeoutMs = getTimeoutForTool(tc.name);
+            const timeoutResult = await withTimeout(
+              tc.name,
+              timeoutMs,
+              (_signal) => executeLocalTool(tc.name, tc.input || {}),
+            );
+
+            if (timeoutResult.ok) {
+              const localResult = timeoutResult.value;
               toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
               // Sprint 15.2: Emit file_edit event for write/patch tools
               const isFileEdit = ['write_file', 'patch_file', 'multi_edit'].includes(tc.name);
@@ -752,29 +760,49 @@ function registerIPCHandlers(): void {
                   timestamp: Date.now(),
                 });
               }
-            } catch (err) {
-              toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            } else {
+              // Timeout or error
+              toolResultContent = `Error: ${timeoutResult.error}`;
               isError = true;
               emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `${tc.name} failed`, detail: toolResultContent, status: 'error' });
+
+              // Sprint 27.2: If a tool timed out, block the active task so it doesn't loop
+              if (timeoutResult.timed_out) {
+                blockActive(sessionId, `Tool ${tc.name} timed out after ${Math.round(timeoutResult.elapsed_ms / 1000)}s`);
+                const progress = getTodoProgress(sessionId);
+                updateStateMachineProgress(progress.done, progress.total);
+              }
             }
           } else {
             // MCP tool
             const toolMeta = mcpTools.find(t => t.name === tc.name);
             if (toolMeta) {
-              try {
+              const mcpTimeoutMs = getTimeoutForTool('mcp_tool');
+              const mcpTimeoutResult = await withTimeout(
+                tc.name,
+                mcpTimeoutMs,
+                (_signal) => mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {}),
+              );
+
+              if (mcpTimeoutResult.ok) {
+                const mcpResult = mcpTimeoutResult.value;
                 emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
-                // Sprint 27.2: Per-tool timeout (Bug E fix)
-                const mcpResult = await withToolTimeout(tc.name, mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {}));
                 toolResultContent = mcpResult?.content
                   ? (Array.isArray(mcpResult.content)
                       ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
                       : JSON.stringify(mcpResult.content))
                   : JSON.stringify(mcpResult);
                 emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
-              } catch (err) {
-                toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+              } else {
+                toolResultContent = `Error: ${mcpTimeoutResult.error}`;
                 isError = true;
                 emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} failed`, detail: toolResultContent, status: 'error' });
+
+                if (mcpTimeoutResult.timed_out) {
+                  blockActive(sessionId, `MCP tool ${tc.name} timed out`);
+                  const progress = getTodoProgress(sessionId);
+                  updateStateMachineProgress(progress.done, progress.total);
+                }
               }
             } else {
               toolResultContent = `Error: Unknown tool "${tc.name}"`;
@@ -811,7 +839,7 @@ function registerIPCHandlers(): void {
         const hadTextOutput = !!(result.content && result.content.trim().length > 0);
         recordAgentTurn(!!hadToolCalls, hadTextOutput);
 
-        // Sprint 27: Track consecutive errors for circuit-breaker
+        // Sprint 27.2: Task lifecycle — advance tasks on successful tool turns
         const errorCount = toolResults.filter(tr => tr.isError).length;
         if (errorCount > 0 && errorCount === toolResults.length) {
           consecutiveErrors++;
@@ -819,10 +847,55 @@ function registerIPCHandlers(): void {
           consecutiveErrors = 0;
         }
 
+        // Sprint 27.2: Task lifecycle integration
+        // After tool execution, check if a task_plan was created/updated and manage lifecycle
+        for (const tc of result.toolCalls!) {
+          if (tc.name === 'task_plan') {
+            try {
+              const input = tc.input || {};
+              if (input.action === 'create') {
+                // Auto-activate the first pending task
+                advanceToNextPending(sessionId);
+              } else if (input.action === 'update' && input.new_status === 'done') {
+                // Task completed — advance to next
+                advanceToNextPending(sessionId);
+              } else if (input.action === 'update' && (input.new_status === 'in_progress')) {
+                // Explicitly mark task as active
+                if (input.task_id) setActive(sessionId, input.task_id);
+              }
+              // Sync progress to state machine
+              const progress = getTodoProgress(sessionId);
+              updateStateMachineProgress(progress.done, progress.total);
+            } catch { /* lifecycle sync is best-effort */ }
+          }
+        }
+
+        // If no active task exists but pending tasks remain, auto-advance
+        if (!getActiveTask(sessionId) && !isTodoComplete(sessionId)) {
+          const list = getTodoList(sessionId);
+          if (list && list.items.length > 0) {
+            advanceToNextPending(sessionId);
+          }
+        }
+
+        // Inject task progress into tool result message for AI context
+        const todoProgressInfo = getTodoProgress(sessionId);
+        let taskProgressNote = '';
+        if (todoProgressInfo.total > 0) {
+          taskProgressNote = `\n[Task Progress: ${todoProgressInfo.done}/${todoProgressInfo.total} complete]`;
+          const active = getActiveTask(sessionId);
+          if (active) {
+            taskProgressNote += ` Active task: "${active.content}"`;
+          }
+          if (isTodoComplete(sessionId)) {
+            taskProgressNote += ' ALL TASKS COMPLETE — provide final summary.';
+          }
+        }
+
         // Add tool results as user message for next turn
         const toolResultMessage = toolResults.map(tr =>
           `[Tool Result: ${tr.toolName}]\n${tr.content.substring(0, 4000)}`
-        ).join('\n\n');
+        ).join('\n\n') + taskProgressNote;
 
         currentMessages.push({ role: 'user', content: toolResultMessage });
 

@@ -10,8 +10,8 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { join, resolve, relative, isAbsolute, dirname, sep } from 'path';
-import { execSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
+import { spawnAsync } from './toolTimeout';
 import { getDatabase } from '../db';
 import { executeMultiEdit, type MultiEditInput } from './multiEdit';
 import { executeBashCommand, isDestructiveCommand, isBlockedCommand, type BashCommandInput } from './bashCommand';
@@ -19,12 +19,21 @@ import { executeParallelSearch, type ParallelSearchInput } from './parallelSearc
 import { executeParallelRead, type ParallelReadInput } from './parallelRead';
 import { executeSummarizeLargeDocument, type SummarizeInput } from './summarizeLargeDocument';
 import { executeTaskPlan, getActivePlan, type TaskPlanInput } from './taskPlan';
+import {
+  completeActive, advanceToNextPending, getActiveTask, getTodoProgress,
+} from '../orchestration/todoManager';
+import { updateProgress as updateStateMachineProgress } from '../orchestration/autoContinueState';
 import * as compareEngine from '../compare';
 import type { CompareFilters, HunkAction, SyncDirection } from '../compare';
 
 // ─── Workspace State ───
 
 let activeWorkspacePath: string | null = null;
+let _toolSessionId: string = 'default';
+
+export function setToolSessionId(sessionId: string): void {
+  _toolSessionId = sessionId;
+}
 
 export function setActiveWorkspace(path: string | null): void {
   activeWorkspacePath = path;
@@ -312,6 +321,19 @@ export const LOCAL_TOOL_DEFINITIONS: LocalToolDef[] = [
       required: ['action']
     }
   },
+  // ─── Sprint 27.2: Task Lifecycle Tool ───
+  {
+    name: 'todo_complete',
+    description: 'Mark the currently active task as done and optionally advance to the next pending task. Call this after completing work on a task. Returns the completed task and the newly activated task (if any).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        notes: { type: 'string', description: 'Optional completion notes' },
+        advance: { type: 'boolean', description: 'Whether to automatically advance to the next pending task (default: true)' },
+      },
+      required: [],
+    },
+  },
   // ─── Sprint 27: Compare Agent Tools ───
   {
     name: 'compare_file',
@@ -419,10 +441,10 @@ export async function executeLocalTool(
         result = toolListFiles(ws, args);
         break;
       case 'search_files':
-        result = toolSearchFiles(ws, args);
+        result = await toolSearchFiles(ws, args);
         break;
       case 'run_command':
-        result = toolRunCommand(ws, args);
+        result = await toolRunCommand(ws, args);
         break;
       case 'git_status':
         result = await toolGitStatus(ws);
@@ -447,7 +469,8 @@ export async function executeLocalTool(
         break;
       }
       case 'bash_command': {
-        const bcResult = executeBashCommand(ws, resolveSafe, args as unknown as BashCommandInput);
+        // Sprint 27.2: executeBashCommand is now async (uses spawnAsync, not execSync)
+        const bcResult = await executeBashCommand(ws, resolveSafe, args as unknown as BashCommandInput);
         result = JSON.stringify(bcResult);
         break;
       }
@@ -469,6 +492,26 @@ export async function executeLocalTool(
       case 'task_plan': {
         const tpResult = executeTaskPlan(args as unknown as TaskPlanInput);
         result = JSON.stringify(tpResult);
+        break;
+      }
+      // ─── Sprint 27.2: Task Lifecycle ───
+      case 'todo_complete': {
+        const notes = args.notes as string | undefined;
+        const advance = args.advance !== false; // default true
+        const completed = completeActive(_toolSessionId, notes);
+        let nextTask = null;
+        if (advance && completed) {
+          nextTask = advanceToNextPending(_toolSessionId);
+        }
+        const progress = getTodoProgress(_toolSessionId);
+        updateStateMachineProgress(progress.done, progress.total);
+        result = JSON.stringify({
+          success: !!completed,
+          completed: completed ? { id: completed.id, content: completed.content } : null,
+          nextActive: nextTask ? { id: nextTask.id, content: nextTask.content } : null,
+          progress: { done: progress.done, total: progress.total },
+          allComplete: progress.done >= progress.total && progress.total > 0,
+        });
         break;
       }
       // ─── Sprint 27: Compare Agent Tools ───
@@ -709,7 +752,7 @@ function toolListFiles(ws: string, args: Record<string, unknown>): string {
   return entries.join('\n') + truncated;
 }
 
-function toolSearchFiles(ws: string, args: Record<string, unknown>): string {
+async function toolSearchFiles(ws: string, args: Record<string, unknown>): Promise<string> {
   const query = String(args.query || '');
   const searchPath = String(args.path || '.');
   const include = args.include ? String(args.include) : '';
@@ -725,7 +768,9 @@ function toolSearchFiles(ws: string, args: Record<string, unknown>): string {
     }
     cmd += ` "${query.replace(/"/g, '\\"')}" "${absDir}" 2>/dev/null || true`;
 
-    const output = execSync(cmd, { maxBuffer: 512 * 1024, timeout: 10000 }).toString();
+    // Sprint 27.2: Use async spawnAsync instead of blocking execSync
+    const spawnResult = await spawnAsync(cmd, ws);
+    const output = spawnResult.stdout;
 
     // Relativize paths
     const lines = output.split('\n').filter(Boolean).slice(0, 100);
@@ -741,7 +786,7 @@ function toolSearchFiles(ws: string, args: Record<string, unknown>): string {
   }
 }
 
-function toolRunCommand(ws: string, args: Record<string, unknown>): string {
+async function toolRunCommand(ws: string, args: Record<string, unknown>): Promise<string> {
   const command = String(args.command || '');
   if (!command) throw new Error('command is required');
 
@@ -754,20 +799,13 @@ function toolRunCommand(ws: string, args: Record<string, unknown>): string {
   const cwdRel = args.cwd ? String(args.cwd) : '.';
   const cwd = resolveSafe(ws, cwdRel);
 
-  try {
-    const output = execSync(command, {
-      cwd,
-      maxBuffer: 1024 * 1024,
-      timeout: 30000,
-      encoding: 'utf-8',
-      shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash'
-    });
-    return output || '(no output)';
-  } catch (err: any) {
-    const stdout = err.stdout || '';
-    const stderr = err.stderr || '';
-    const code = err.status ?? 1;
-    return `Exit code: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`;
+  // Sprint 27.2: Use async spawnAsync instead of blocking execSync
+  const result = await spawnAsync(command, cwd);
+
+  if (result.exit_code === 0) {
+    return result.stdout || '(no output)';
+  } else {
+    return `Exit code: ${result.exit_code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
   }
 }
 

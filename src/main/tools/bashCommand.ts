@@ -1,12 +1,16 @@
 /**
- * bash_command — Sprint 16
+ * bash_command — Sprint 16 + Sprint 27.2 (async rewrite)
  * Scoped one-shot shell tool: executes a command, captures stdout/stderr/exit code.
  * No elevated privileges, no PTY. Destructive commands require confirmation.
+ *
+ * Sprint 27.2: Replaced execSync with spawnAsync from toolTimeout.ts.
+ * execSync blocks the Node.js event loop, making timeout timers and AbortController
+ * ineffective. spawnAsync uses child_process.spawn which is fully async.
  */
 
-import { execSync } from 'child_process';
 import { existsSync } from 'fs';
 import { resolve, sep } from 'path';
+import { spawnAsync } from './toolTimeout';
 
 export interface BashCommandInput {
   command: string;
@@ -68,12 +72,17 @@ export function isBlockedCommand(command: string): boolean {
 
 /**
  * Execute a bash command in the workspace scope.
+ *
+ * Sprint 27.2: Now async — uses spawnAsync instead of execSync.
+ * This keeps the Node.js event loop alive so AbortController and
+ * timeout timers can fire, preventing tool-stall freezes.
  */
-export function executeBashCommand(
+export async function executeBashCommand(
   workspacePath: string,
   resolveSafe: (ws: string, fp: string) => string,
-  input: BashCommandInput
-): BashCommandResult {
+  input: BashCommandInput,
+  signal?: AbortSignal,
+): Promise<BashCommandResult> {
   const { command, cwd, timeout = 30000, description } = input;
   const defaultResult: BashCommandResult = {
     success: false,
@@ -115,46 +124,18 @@ export function executeBashCommand(
     return { ...defaultResult, stderr: `Working directory not found: ${effectiveCwd}` };
   }
 
-  // Clamp timeout
-  const effectiveTimeout = Math.max(1000, Math.min(timeout, 120000));
+  // Sprint 27.2: Use async spawnAsync instead of blocking execSync
+  const spawnResult = await spawnAsync(command, effectiveCwd, signal);
 
-  const start = Date.now();
-  try {
-    const stdout = execSync(command, {
-      cwd: effectiveCwd,
-      maxBuffer: 2 * 1024 * 1024,
-      timeout: effectiveTimeout,
-      encoding: 'utf-8',
-      shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash',
-      env: { ...process.env, TERM: 'dumb' },
-    });
-
-    const duration = Date.now() - start;
-    return {
-      success: true,
-      command,
-      cwd: effectiveCwd,
-      stdout: (stdout || '').substring(0, 100000),
-      stderr: '',
-      exit_code: 0,
-      timed_out: false,
-      blocked: false,
-      duration_ms: duration,
-    };
-  } catch (err: any) {
-    const duration = Date.now() - start;
-    const timedOut = err.killed || (err.signal === 'SIGTERM');
-
-    return {
-      success: false,
-      command,
-      cwd: effectiveCwd,
-      stdout: (err.stdout || '').substring(0, 100000),
-      stderr: (err.stderr || '').substring(0, 100000),
-      exit_code: err.status ?? 1,
-      timed_out: timedOut,
-      blocked: false,
-      duration_ms: duration,
-    };
-  }
+  return {
+    success: spawnResult.exit_code === 0 && !spawnResult.timed_out,
+    command,
+    cwd: effectiveCwd,
+    stdout: spawnResult.stdout,
+    stderr: spawnResult.stderr,
+    exit_code: spawnResult.exit_code,
+    timed_out: spawnResult.timed_out,
+    blocked: false,
+    duration_ms: spawnResult.duration_ms,
+  };
 }

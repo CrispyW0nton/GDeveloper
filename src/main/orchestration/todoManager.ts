@@ -150,3 +150,117 @@ export function isTodoComplete(sessionId: string): boolean {
   if (!list || list.items.length === 0) return false;
   return list.items.every(i => i.status === 'done' || i.status === 'skipped');
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Sprint 27.2: Task Lifecycle — single active task enforcement
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Get the currently active (in_progress) task, if any.
+ * Enforces single active task invariant.
+ */
+export function getActiveTask(sessionId: string): TodoItem | null {
+  const list = todoLists.get(sessionId);
+  if (!list) return null;
+  return list.items.find(i => i.status === 'in_progress') || null;
+}
+
+/**
+ * Set a specific task as active (in_progress).
+ * If another task is already in_progress, it stays — caller should completeActive first.
+ * This is idempotent: calling setActive on an already active task is a no-op.
+ */
+export function setActive(sessionId: string, itemId: string): TodoItem | null {
+  const list = todoLists.get(sessionId);
+  if (!list) return null;
+
+  const item = list.items.find(i => i.id === itemId);
+  if (!item) return null;
+
+  // Idempotent: already active
+  if (item.status === 'in_progress') return item;
+
+  // Only transition from pending → in_progress
+  if (item.status !== 'pending') return null;
+
+  // Enforce single active: deactivate any other in_progress tasks first
+  for (const other of list.items) {
+    if (other.id !== itemId && other.status === 'in_progress') {
+      other.status = 'pending';
+      other.updatedAt = new Date().toISOString();
+    }
+  }
+
+  item.status = 'in_progress';
+  item.updatedAt = new Date().toISOString();
+  list.updatedAt = new Date().toISOString();
+  broadcast(sessionId, 'active-changed');
+  return item;
+}
+
+/**
+ * Complete the currently active task (mark as done) and optionally advance.
+ * Returns the completed item, or null if no active task.
+ */
+export function completeActive(sessionId: string, notes?: string): TodoItem | null {
+  const list = todoLists.get(sessionId);
+  if (!list) return null;
+
+  const active = list.items.find(i => i.status === 'in_progress');
+  if (!active) return null;
+
+  active.status = 'done';
+  active.updatedAt = new Date().toISOString();
+  if (notes) active.notes = notes;
+  list.updatedAt = new Date().toISOString();
+  broadcast(sessionId, 'completed');
+  return active;
+}
+
+/**
+ * Advance to the next pending task (mark it as in_progress).
+ * Returns the newly active task, or null if no pending tasks remain.
+ * Respects priority: high > medium > low.
+ */
+export function advanceToNextPending(sessionId: string): TodoItem | null {
+  const list = todoLists.get(sessionId);
+  if (!list) return null;
+
+  // Already have an active task — don't overwrite
+  const existing = list.items.find(i => i.status === 'in_progress');
+  if (existing) return existing;
+
+  // Find next pending task, preferring higher priority
+  const priorityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  const pending = list.items
+    .filter(i => i.status === 'pending')
+    .sort((a, b) => (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1));
+
+  if (pending.length === 0) return null;
+
+  const next = pending[0];
+  next.status = 'in_progress';
+  next.updatedAt = new Date().toISOString();
+  list.updatedAt = new Date().toISOString();
+  broadcast(sessionId, 'advanced');
+  return next;
+}
+
+/**
+ * Mark the active task as blocked (e.g., tool timeout or error).
+ * Optionally sets a reason in notes.
+ */
+export function blockActive(sessionId: string, reason?: string): TodoItem | null {
+  const list = todoLists.get(sessionId);
+  if (!list) return null;
+
+  const active = list.items.find(i => i.status === 'in_progress');
+  if (!active) return null;
+
+  active.status = 'blocked';
+  active.updatedAt = new Date().toISOString();
+  if (reason) active.notes = (active.notes ? active.notes + '; ' : '') + reason;
+  list.updatedAt = new Date().toISOString();
+  broadcast(sessionId, 'blocked');
+  return active;
+}

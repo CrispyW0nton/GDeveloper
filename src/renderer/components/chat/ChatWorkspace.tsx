@@ -706,6 +706,25 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         const taskInfo = recheck.tasksTotal > 0
           ? ` (${recheck.tasksCompleted}/${recheck.tasksTotal} tasks complete)`
           : '';
+
+        // Sprint 27.2: Don't nudge if all tasks are already complete
+        if (recheck.tasksTotal > 0 && recheck.tasksCompleted >= recheck.tasksTotal) {
+          // All tasks done — stop auto-continue instead of sending another nudge
+          try {
+            if (api?.autoContinueStop) await api.autoContinueStop('completion');
+            const finalStatus = await api.autoContinueStatus();
+            setAutoContinueStatus(finalStatus);
+          } catch { /* ignore */ }
+          const doneMsg: Message = {
+            id: `msg-done-${Date.now()}`,
+            role: 'system',
+            content: `Auto-Continue stopped: all ${recheck.tasksTotal} tasks complete.`,
+            timestamp: new Date().toISOString(),
+          };
+          setMessages(prev => [...prev, doneMsg]);
+          return;
+        }
+
         const nudge = `Continue with the current task (step ${iter}/${max})${taskInfo}. If all tasks are complete, say "All tasks are complete."`;
 
         // Add auto-continue nudge as system indicator
