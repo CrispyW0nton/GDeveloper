@@ -145,6 +145,35 @@ function emitSandboxEvent(event: Omit<SandboxEvent, 'id' | 'timestamp'>): void {
   }
 }
 
+// ─── Sprint 27.2: Per-tool timeout (Bug E) ───
+// Default timeout per tool execution: 120s for commands, 60s for others
+const TOOL_TIMEOUT_MS: Record<string, number> = {
+  run_command: 120_000,
+  bash_command: 120_000,
+};
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
+
+/**
+ * Execute a promise with a per-tool timeout.
+ * If the timeout fires, returns an error string instead of throwing.
+ */
+async function withToolTimeout<T>(
+  toolName: string,
+  promise: Promise<T>,
+): Promise<T> {
+  const timeoutMs = TOOL_TIMEOUT_MS[toolName] || DEFAULT_TOOL_TIMEOUT_MS;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Tool "${toolName}" timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -697,7 +726,8 @@ function registerIPCHandlers(): void {
 
           if (isLocalTool) {
             try {
-              const localResult = await executeLocalTool(tc.name, tc.input || {});
+              // Sprint 27.2: Per-tool timeout (Bug E fix)
+              const localResult = await withToolTimeout(tc.name, executeLocalTool(tc.name, tc.input || {}));
               toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
               // Sprint 15.2: Emit file_edit event for write/patch tools
               const isFileEdit = ['write_file', 'patch_file', 'multi_edit'].includes(tc.name);
@@ -732,7 +762,8 @@ function registerIPCHandlers(): void {
             if (toolMeta) {
               try {
                 emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
-                const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
+                // Sprint 27.2: Per-tool timeout (Bug E fix)
+                const mcpResult = await withToolTimeout(tc.name, mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {}));
                 toolResultContent = mcpResult?.content
                   ? (Array.isArray(mcpResult.content)
                       ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
