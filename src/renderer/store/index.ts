@@ -17,7 +17,134 @@ const api = (window as any).electronAPI;
 
 export type ExecutionMode = 'plan' | 'build';
 
-export type TabId = 'chat' | 'github' | 'mcp' | 'forge' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal';
+export type TabId = 'chat' | 'github' | 'mcp' | 'forge' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal' | 'compare';
+
+// ─── Sprint 21: Rate-limit / token-budget types ───
+export type AnthropicTier = 'tier1' | 'tier2' | 'tier3' | 'tier4';
+export type PresetProfileId = 'safe' | 'balanced' | 'aggressive' | 'custom';
+export type RetryStrategy = 'none' | 'linear' | 'exponential';
+
+export interface TokenBudgetSettings {
+  maxOutputTokensPerResponse: number;
+  maxContextTokensPerRequest: number;
+  maxConversationHistoryMessages: number;
+  maxToolResultTokensPerTool: number;
+  maxToolResultsRetained: number;
+  maxParallelToolCalls: number;
+  softInputTokensPerMinute: number;
+  softOutputTokensPerMinute: number;
+  softRequestsPerMinute: number;
+  retryStrategy: RetryStrategy;
+  retryMaxRetries: number;
+  retryBaseDelayMs: number;
+  retryMaxDelayMs: number;
+  providerTier: AnthropicTier;
+  activePresetProfile: PresetProfileId;
+}
+
+export type RateLimitSeverity = 'green' | 'amber' | 'red';
+export interface RateLimitSnapshot {
+  inputTokensLast60s: number;
+  outputTokensLast60s: number;
+  requestsLast60s: number;
+  severity: RateLimitSeverity;
+  inputPercent: number;
+  outputPercent: number;
+  requestPercent: number;
+  isPaused: boolean;
+  isThrottled: boolean;
+  recommendedDelayMs: number;
+  lastUpdated: number;
+}
+
+export interface RetryState {
+  isRetrying: boolean;
+  attempt: number;
+  maxAttempts: number;
+  nextRetryMs: number;
+  reason: string;
+  gaveUp: boolean;
+}
+
+// ─── Sprint 23: Model metadata ───
+export interface ModelMeta {
+  id: string;
+  name: string;
+  provider: 'claude' | 'openai' | 'custom';
+  supportsTools: boolean;
+  supportsStreaming: boolean;
+  contextWindow?: number;
+  maxOutput?: number;
+}
+
+// ─── Sprint 24: Session usage tracking ───
+export interface SessionUsage {
+  cumulativeInputTokens: number;
+  cumulativeOutputTokens: number;
+  cumulativeRequests: number;
+  lastInputTokens: number;
+  lastOutputTokens: number;
+  contextWindowUsed: number;
+  contextWindowMax: number;
+}
+
+// ─── Sprint 25: Attachment types ───
+export type AttachmentType = 'image' | 'document' | 'code' | 'unknown';
+export type AttachmentSource = 'drag-drop' | 'clipboard' | 'file-picker' | 'workspace';
+
+export interface AttachmentMeta {
+  id: string;
+  filename: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  type: AttachmentType;
+  dataUri?: string;
+  extractedText?: string;
+  thumbnailUri?: string;
+  visionTokenEstimate?: number;
+  storagePath?: string;
+  warnings: string[];
+  exifStripped: boolean;
+  width?: number;
+  height?: number;
+  downscaled: boolean;
+  addedAt: number;
+  source: AttachmentSource;
+}
+
+export interface AttachmentConfig {
+  maxImageSizeMB: number;
+  maxDocSizeMB: number;
+  maxTotalSizeMB: number;
+  maxFilesPerMessage: number;
+  autoDownscaleMaxPx: number;
+  stripExif: boolean;
+  warnOnSensitiveFiles: boolean;
+  enableDragDrop: boolean;
+  enableClipboardPaste: boolean;
+  enableVision: boolean;
+  maxTextChars: number;
+}
+
+// ─── Sprint 23: Editor dirty-file tracking ───
+export interface EditorDirtyFile {
+  filePath: string;
+  absolutePath: string;
+  isDirty: boolean;
+  lastSavedAt?: number;
+}
+
+// ─── Sprint 17: Worktree context ───
+export interface WorktreeContextInfo {
+  isWorktree: boolean;
+  isMain: boolean;
+  isLinked: boolean;
+  branch: string | null;
+  head: string;
+  mainRoot: string | null;
+  currentPath: string;
+}
 
 // ─── App State Interface ───
 export interface AppState {
@@ -43,6 +170,31 @@ export interface AppState {
   selectedModel: string;
   availableModels: string[];
   sandboxMonitorOpen: boolean;
+  // Sprint 17: Worktree awareness
+  worktreeContext: WorktreeContextInfo | null;
+  // Sprint 19: File tree, live view
+  fileTreeOpen: boolean;
+  fileTreeWidth: number;
+  // Sprint 28: autoContinue state removed — loop is driven by stop_reason
+  liveViewOpen: boolean;
+  liveViewAutoOpen: boolean;
+  activeFilePath: string | null;
+  highlightedFiles: string[];
+  // Sprint 21: Token budget & rate limits
+  tokenBudget: TokenBudgetSettings;
+  rateLimitSnapshot: RateLimitSnapshot | null;
+  retryState: RetryState | null;
+  // Sprint 23: Model metadata & editor state
+  modelMetaList: ModelMeta[];
+  defaultModel: string;
+  editorDirtyFiles: Map<string, EditorDirtyFile>;
+  editorToast: string;
+  // Sprint 24: Session usage tracking
+  sessionUsage: SessionUsage;
+  // Sprint 25: Attachment config
+  attachmentConfig: AttachmentConfig;
+  // Sprint 27: Compare workspace
+  compareSessionId: string | null;
 }
 
 export interface SelectedRepo {
@@ -157,9 +309,70 @@ export const INITIAL_STATE: AppState = {
   // Sprint 15
   theme: 'matrix' as ThemeId,
   // Sprint 16
-  selectedModel: 'claude-sonnet-4-6',
+  selectedModel: 'claude-3-5-sonnet-20241022',
   availableModels: [],
   sandboxMonitorOpen: false,
+  // Sprint 17
+  worktreeContext: null,
+  // Sprint 19
+  fileTreeOpen: true,
+  fileTreeWidth: 260,
+  // Sprint 28: autoContinue defaults removed
+  liveViewOpen: false,
+  liveViewAutoOpen: true,
+  activeFilePath: null,
+  highlightedFiles: [],
+  // Sprint 21
+  tokenBudget: {
+    maxOutputTokensPerResponse: 4096,
+    maxContextTokensPerRequest: 80_000,
+    maxConversationHistoryMessages: 20,
+    maxToolResultTokensPerTool: 2500,
+    maxToolResultsRetained: 10,
+    maxParallelToolCalls: 2,
+    softInputTokensPerMinute: 400_000,
+    softOutputTokensPerMinute: 14_000,
+    softRequestsPerMinute: 45,
+    retryStrategy: 'exponential',
+    retryMaxRetries: 5,
+    retryBaseDelayMs: 1500,
+    retryMaxDelayMs: 30000,
+    providerTier: 'tier2',  // Sprint 32: Match DEFAULT_TIER=2 from main process
+    activePresetProfile: 'balanced',
+  },
+  rateLimitSnapshot: null,
+  retryState: null,
+  // Sprint 23
+  modelMetaList: [],
+  defaultModel: 'claude-3-5-sonnet-20241022',
+  editorDirtyFiles: new Map(),
+  editorToast: '',
+  // Sprint 24
+  sessionUsage: {
+    cumulativeInputTokens: 0,
+    cumulativeOutputTokens: 0,
+    cumulativeRequests: 0,
+    lastInputTokens: 0,
+    lastOutputTokens: 0,
+    contextWindowUsed: 0,
+    contextWindowMax: 200_000,
+  },
+  // Sprint 25
+  attachmentConfig: {
+    maxImageSizeMB: 20,
+    maxDocSizeMB: 10,
+    maxTotalSizeMB: 50,
+    maxFilesPerMessage: 10,
+    autoDownscaleMaxPx: 2048,
+    stripExif: true,
+    warnOnSensitiveFiles: true,
+    enableDragDrop: true,
+    enableClipboardPaste: true,
+    enableVision: true,
+    maxTextChars: 100_000,
+  },
+  // Sprint 27
+  compareSessionId: null,
 };
 
 // ─── State Hook ───
@@ -214,6 +427,17 @@ export function useAppState() {
         const savedTheme: ThemeId = (settings.theme as ThemeId) || 'matrix';
         applyTheme(savedTheme);
 
+        // ─── Sprint 17: Worktree context hydration ───
+        let worktreeContext: WorktreeContextInfo | null = null;
+        if (activeWorkspace && api.worktreeContext) {
+          try {
+            const ctxResult = await api.worktreeContext();
+            if (ctxResult.success && ctxResult.context) {
+              worktreeContext = ctxResult.context;
+            }
+          } catch { /* worktree context is optional */ }
+        }
+
         setState(prev => ({
           ...prev,
           apiKeyConfigured: hasKey,
@@ -226,6 +450,7 @@ export function useAppState() {
           selectedRepo,
           startupError: null,
           theme: savedTheme,
+          worktreeContext,
         }));
 
         // If GitHub is connected, try loading repos
@@ -304,7 +529,7 @@ export function useAppState() {
   const setTab = useCallback((tab: TabId) => {
     setState(prev => {
       // Always accessible tabs (no workspace or repo needed)
-      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'forge', 'settings', 'github'];
+      const alwaysAccessible: TabId[] = ['workspace', 'mcp', 'forge', 'settings', 'github', 'compare'];
       if (alwaysAccessible.includes(tab)) {
         return { ...prev, activeTab: tab };
       }
@@ -400,6 +625,117 @@ export function useAppState() {
     setState(prev => ({ ...prev, sandboxMonitorOpen: open }));
   }, []);
 
+  // Sprint 17: Worktree context
+  const refreshWorktreeContext = useCallback(async () => {
+    if (!api?.worktreeContext) return;
+    try {
+      const result = await api.worktreeContext();
+      if (result.success) {
+        setState(prev => ({ ...prev, worktreeContext: result.context }));
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const setWorktreeContext = useCallback((ctx: WorktreeContextInfo | null) => {
+    setState(prev => ({ ...prev, worktreeContext: ctx }));
+  }, []);
+
+  // Sprint 19: File tree
+  const setFileTreeOpen = useCallback((open: boolean) => {
+    setState(prev => ({ ...prev, fileTreeOpen: open }));
+  }, []);
+
+  const setFileTreeWidth = useCallback((width: number) => {
+    setState(prev => ({ ...prev, fileTreeWidth: Math.max(180, Math.min(600, width)) }));
+  }, []);
+
+  // Sprint 28: autoContinue setters removed
+
+  // Sprint 19: Live view
+  const setLiveViewOpen = useCallback((open: boolean) => {
+    setState(prev => ({ ...prev, liveViewOpen: open }));
+  }, []);
+
+  const setLiveViewAutoOpen = useCallback((autoOpen: boolean) => {
+    setState(prev => ({ ...prev, liveViewAutoOpen: autoOpen }));
+  }, []);
+
+  const setActiveFilePath = useCallback((path: string | null) => {
+    setState(prev => ({ ...prev, activeFilePath: path }));
+  }, []);
+
+  const addHighlightedFile = useCallback((path: string) => {
+    setState(prev => ({
+      ...prev,
+      highlightedFiles: prev.highlightedFiles.includes(path) ? prev.highlightedFiles : [...prev.highlightedFiles, path],
+    }));
+  }, []);
+
+  const clearHighlightedFiles = useCallback(() => {
+    setState(prev => ({ ...prev, highlightedFiles: [] }));
+  }, []);
+
+  // Sprint 21: Token budget & rate limits
+  const setTokenBudget = useCallback((budget: Partial<TokenBudgetSettings>) => {
+    setState(prev => ({ ...prev, tokenBudget: { ...prev.tokenBudget, ...budget } }));
+  }, []);
+
+  const setRateLimitSnapshot = useCallback((snapshot: RateLimitSnapshot | null) => {
+    setState(prev => ({ ...prev, rateLimitSnapshot: snapshot }));
+  }, []);
+
+  const setRetryState = useCallback((retryState: RetryState | null) => {
+    setState(prev => ({ ...prev, retryState }));
+  }, []);
+
+  // Sprint 23: Model metadata
+  const setModelMetaList = useCallback((models: ModelMeta[]) => {
+    setState(prev => ({ ...prev, modelMetaList: models }));
+  }, []);
+
+  const setDefaultModel = useCallback((model: string) => {
+    setState(prev => ({ ...prev, defaultModel: model }));
+    if (api?.setDefaultModel) api.setDefaultModel(model);
+  }, []);
+
+  // Sprint 23: Editor dirty file tracking
+  const setEditorDirtyFile = useCallback((filePath: string, isDirty: boolean, absolutePath?: string) => {
+    setState(prev => {
+      const newMap = new Map(prev.editorDirtyFiles);
+      if (isDirty) {
+        newMap.set(filePath, { filePath, absolutePath: absolutePath || filePath, isDirty: true });
+      } else {
+        newMap.delete(filePath);
+      }
+      return { ...prev, editorDirtyFiles: newMap };
+    });
+  }, []);
+
+  const setEditorToast = useCallback((msg: string) => {
+    setState(prev => ({ ...prev, editorToast: msg }));
+    if (msg) setTimeout(() => setState(prev => ({ ...prev, editorToast: '' })), 3000);
+  }, []);
+
+  // Sprint 24: Session usage
+  const setSessionUsage = useCallback((usage: SessionUsage) => {
+    setState(prev => ({ ...prev, sessionUsage: usage }));
+  }, []);
+
+  // Sprint 25: Attachment config
+  const setAttachmentConfig = useCallback((config: AttachmentConfig) => {
+    setState(prev => ({ ...prev, attachmentConfig: config }));
+    if (api?.setAttachmentConfig) api.setAttachmentConfig(config);
+  }, []);
+
+  // Sprint 27: Compare workspace
+  const openCompareWorkspace = useCallback((sessionId: string) => {
+    setState(prev => ({ ...prev, compareSessionId: sessionId, activeTab: 'compare' as TabId }));
+  }, []);
+
+  const closeCompareWorkspace = useCallback(() => {
+    setState(prev => ({ ...prev, compareSessionId: null, activeTab: 'chat' as TabId }));
+  }, []);
+
   return {
     state,
     setApiKey,
@@ -422,5 +758,33 @@ export function useAppState() {
     setAvailableModels,
     toggleSandboxMonitor,
     setSandboxMonitorOpen,
+    // Sprint 17
+    refreshWorktreeContext,
+    setWorktreeContext,
+    // Sprint 19
+    setFileTreeOpen,
+    setFileTreeWidth,
+    // Sprint 28: autoContinue setters removed
+    setLiveViewOpen,
+    setLiveViewAutoOpen,
+    setActiveFilePath,
+    addHighlightedFile,
+    clearHighlightedFiles,
+    // Sprint 21
+    setTokenBudget,
+    setRateLimitSnapshot,
+    setRetryState,
+    // Sprint 23
+    setModelMetaList,
+    setDefaultModel,
+    setEditorDirtyFile,
+    setEditorToast,
+    // Sprint 24
+    setSessionUsage,
+    // Sprint 25
+    setAttachmentConfig,
+    // Sprint 27
+    openCompareWorkspace,
+    closeCompareWorkspace,
   };
 }

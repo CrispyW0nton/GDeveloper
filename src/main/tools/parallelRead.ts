@@ -2,7 +2,14 @@
  * parallel_read — Sprint 16
  * Parallel URL-read tool: fetches content from multiple URLs concurrently.
  * Optionally answers per-URL questions using content extraction.
+ *
+ * Sprint 36 Fix 4: Also handles file:// URIs and workspace-relative paths.
+ * On Windows, file:// URIs are converted using fileURLToPath from 'url'.
  */
+
+import { readFile } from 'fs/promises';
+import { fileURLToPath } from 'url';
+import { resolve, isAbsolute } from 'path';
 
 export interface ReadTarget {
   url: string;
@@ -59,9 +66,78 @@ function htmlToText(html: string): string {
 }
 
 /**
+ * Sprint 36 Fix 4: Read a local file path (absolute or workspace-relative).
+ * Handles file:// URIs cross-platform via fileURLToPath.
+ */
+async function readLocalFile(target: ReadTarget, workspacePath?: string): Promise<ReadResult> {
+  const { url, question } = target;
+  try {
+    let filePath: string;
+    if (url.startsWith('file://')) {
+      filePath = fileURLToPath(url);
+    } else if (isAbsolute(url)) {
+      filePath = url;
+    } else {
+      // Workspace-relative path
+      const base = workspacePath || process.cwd();
+      filePath = resolve(base, url);
+    }
+
+    const rawText = await readFile(filePath, 'utf-8');
+    const content = rawText.substring(0, 50000);
+    const wordCount = content.split(/\s+/).filter(Boolean).length;
+
+    // Simple question answering
+    let answer: string | undefined;
+    if (question && content) {
+      const keywords = question.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+      const paragraphs = content.split(/\n\n+/).filter(p => p.length > 30);
+      const scored = paragraphs.map(p => {
+        const pLower = p.toLowerCase();
+        const score = keywords.filter(k => pLower.includes(k)).length;
+        return { text: p, score };
+      }).sort((a, b) => b.score - a.score);
+      if (scored.length > 0 && scored[0].score > 0) {
+        answer = scored.slice(0, 3).map(s => s.text.trim()).join('\n\n').substring(0, 2000);
+      } else {
+        answer = content.substring(0, 500) + '...';
+      }
+    }
+
+    return {
+      url,
+      status: 'success',
+      content: content.substring(0, 10000),
+      title: filePath,
+      word_count: wordCount,
+      question,
+      answer,
+    };
+  } catch (err) {
+    return { url, status: 'error', content: '', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Determine if a target URL refers to a local path.
+ */
+function isLocalPath(url: string): boolean {
+  if (url.startsWith('file://')) return true;
+  if (isAbsolute(url)) return true;
+  // Workspace-relative paths: don't start with http(s)://
+  if (!url.startsWith('http://') && !url.startsWith('https://')) return true;
+  return false;
+}
+
+/**
  * Fetch a single URL and extract content.
  */
-async function readSingle(target: ReadTarget): Promise<ReadResult> {
+async function readSingle(target: ReadTarget, workspacePath?: string): Promise<ReadResult> {
+  // Sprint 36 Fix 4: Route local paths to file reader
+  if (isLocalPath(target.url)) {
+    return readLocalFile(target, workspacePath);
+  }
+
   const { url, question } = target;
   try {
     const controller = new AbortController();
@@ -132,8 +208,9 @@ async function readSingle(target: ReadTarget): Promise<ReadResult> {
 
 /**
  * Execute parallel URL reads with concurrency cap.
+ * Sprint 36: Added optional workspacePath for resolving relative paths.
  */
-export async function executeParallelRead(input: ParallelReadInput): Promise<ParallelReadResult> {
+export async function executeParallelRead(input: ParallelReadInput, workspacePath?: string): Promise<ParallelReadResult> {
   if (!input.urls || !Array.isArray(input.urls) || input.urls.length === 0) {
     return { success: false, total_urls: 0, completed: 0, failed: 0, results: [], error: 'urls array is required' };
   }
@@ -153,7 +230,7 @@ export async function executeParallelRead(input: ParallelReadInput): Promise<Par
 
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
     const batch = targets.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.allSettled(batch.map(readSingle));
+    const batchResults = await Promise.allSettled(batch.map(t => readSingle(t, workspacePath)));
 
     for (const r of batchResults) {
       if (r.status === 'fulfilled') {

@@ -16,6 +16,8 @@ interface SidebarProps {
   sandboxMonitorOpen?: boolean;
   onToggleSandboxMonitor?: () => void;
   executionMode?: string;
+  devConsoleOpen?: boolean;
+  onToggleDevConsole?: () => void;
 }
 
 const MATRIX_CHARS = '\u30A2\u30A4\u30A6\u30A8\u30AA\u30AB\u30AD\u30AF\u30B1\u30B3\u30B5\u30B7\u30B9\u30BB\u30BD\u30BF\u30C1\u30C4\u30C6\u30C8\u30CA\u30CB\u30CC\u30CD\u30CE\u30CF\u30D2\u30D5\u30D8\u30DB\u30DE\u30DF\u30E0\u30E1\u30E2\u30E4\u30E6\u30E8\u30E9\u30EA\u30EB\u30EC\u30ED\u30EF\u30F2\u30F3';
@@ -72,6 +74,12 @@ const NAV_ITEMS: NavItem[] = [
     togglesPanel: true,
   },
   {
+    id: 'compare' as TabId,
+    label: 'Compare',
+    icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 3v18M3 12h18M8 8l-4 4 4 4M16 8l4 4-4 4"/></svg>,
+    requiresWorkspace: true
+  },
+  {
     id: 'mcp',
     label: 'MCP Servers',
     icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="15" width="20" height="6" rx="1"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>,
@@ -113,6 +121,7 @@ export default function Sidebar({
   activeTab, onTabChange, repoSelected, githubConnected, apiKeyConfigured,
   selectedRepo, collapsed, onToggleCollapse, activeWorkspace, terminalOpen,
   sandboxMonitorOpen, onToggleSandboxMonitor, executionMode,
+  devConsoleOpen, onToggleDevConsole,
 }: SidebarProps) {
   const { showMatrixRain } = useTheme();
 
@@ -225,6 +234,19 @@ export default function Sidebar({
             <span>Sandbox Monitor</span>
             {sandboxMonitorOpen && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-matrix-green animate-pulseDot" />}
           </button>
+          <button
+            onClick={onToggleDevConsole}
+            className={`w-full flex items-center gap-2 px-2 py-1 rounded text-[10px] transition-colors ${
+              devConsoleOpen
+                ? 'text-matrix-green bg-matrix-green/10 border border-matrix-green/30'
+                : 'text-matrix-text-muted/40 hover:text-matrix-text-dim border border-transparent hover:border-matrix-border/20'
+            }`}
+            title="Toggle Dev Console (Ctrl+Shift+D)"
+          >
+            <span>{'\uD83D\uDDA5\uFE0F'}</span>
+            <span>Dev Console</span>
+            {devConsoleOpen && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-matrix-green animate-pulseDot" />}
+          </button>
           {executionMode && (
             <div className={`text-center text-[9px] font-bold uppercase tracking-wider ${
               executionMode === 'plan' ? 'text-yellow-400' : 'text-matrix-green'
@@ -239,7 +261,7 @@ export default function Sidebar({
       <div className="relative z-10 p-3 border-t border-matrix-border">
         {!collapsed && (
           <div className="text-[9px] text-matrix-text-muted/30 text-center tracking-widest">
-            SPRINT 16A // v6.1
+            SPRINT 27 // v7.0
           </div>
         )}
         <button

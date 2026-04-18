@@ -23,12 +23,16 @@ export interface LLMResponse {
   }>;
   usage: { inputTokens: number; outputTokens: number };
   stopReason: string;
+  /** Sprint 24: Parsed Anthropic rate-limit headers from response */
+  rateLimitHeaders?: Record<string, any>;
 }
 
 export interface LLMStreamChunk {
   type: 'text' | 'tool_call' | 'done';
   content?: string;
   toolCall?: { id: string; name: string; input: Record<string, unknown> };
+  /** Sprint 28: stop_reason from Anthropic message_delta (e.g., 'end_turn', 'tool_use') */
+  stopReason?: string;
 }
 
 // ─── GitHub Gateway ───

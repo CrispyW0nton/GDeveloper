@@ -7,7 +7,9 @@
  * Sprint 15.2: always show tool name, target, status; display "No output" for empty results.
  */
 
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
+import deepEqual from 'fast-deep-equal';
+import CompareToolCard from '../compare/CompareToolCard';
 
 interface ToolCallCardProps {
   name: string;
@@ -15,6 +17,7 @@ interface ToolCallCardProps {
   result?: any;
   status: 'running' | 'success' | 'error';
   timestamp?: string;
+  onOpenCompareWorkspace?: (sessionId: string) => void;
 }
 
 // Icon map for tool types
@@ -36,11 +39,35 @@ const TOOL_ICONS: Record<string, string> = {
   git_log: '\uD83D\uDCDC',
   git_commit: '\u2714\uFE0F',
   git_create_branch: '\uD83C\uDF3F',
+  // Sprint 27: Compare Agent
+  compare_file: '\u00B1',
+  compare_folder: '\uD83D\uDCC1',
+  merge_3way: '\uD83D\uDD00',
+  sync_preview: '\uD83D\uDD04',
+  compare_hunk_detail: '\uD83D\uDD0D',
+  compare_apply_hunk: '\u2714\uFE0F',
 };
 
-export default function ToolCallCard({ name, input, result, status }: ToolCallCardProps) {
+// Sprint 27: Names that trigger the Compare tool card
+const COMPARE_TOOL_NAMES = new Set(['compare_file', 'compare_folder', 'merge_3way', 'sync_preview', 'compare_hunk_detail', 'compare_apply_hunk']);
+
+// Sprint 32: Memoize with deep equality to prevent unnecessary rerenders
+// Reference: Cline ChatRow.tsx — memo(component, deepEqual)
+function ToolCallCardInner({ name, input, result, status, onOpenCompareWorkspace }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(status === 'error');
   const icon = TOOL_ICONS[name] || '\uD83D\uDD27';
+
+  // Sprint 27: Render Compare tool card for compare operations
+  if (COMPARE_TOOL_NAMES.has(name) && result) {
+    let parsedResult = result;
+    if (typeof result === 'string') {
+      try { parsedResult = JSON.parse(result); } catch { /* keep as-is */ }
+    }
+    const sessionData = parsedResult?.compareSession || parsedResult;
+    if (sessionData?.sessionId) {
+      return <CompareToolCard sessionData={sessionData} onOpenWorkspace={onOpenCompareWorkspace} />;
+    }
+  }
 
   const statusColors = {
     running: 'border-matrix-warning/30 bg-matrix-warning/5',
@@ -113,6 +140,13 @@ function renderToolBody(name: string, input: any, result: any, status: string) {
       return <SummarizeBody input={input} result={result} />;
     case 'task_plan':
       return <TaskPlanBody input={input} result={result} />;
+    case 'compare_file':
+    case 'compare_folder':
+    case 'merge_3way':
+    case 'sync_preview':
+    case 'compare_hunk_detail':
+    case 'compare_apply_hunk':
+      return <GenericToolBody input={input} result={result} />;
     default:
       return <GenericToolBody input={input} result={result} />;
   }
@@ -159,6 +193,19 @@ function renderToolSummary(name: string, input: any, result: any): string {
         return input?.message ? input.message.substring(0, 60) : 'commit';
       case 'git_create_branch':
         return input?.name || 'new branch';
+      // Sprint 27: Compare Agent summaries
+      case 'compare_file':
+        return `${input?.left || '?'} \u2194 ${input?.right || '?'}`;
+      case 'compare_folder':
+        return `${input?.left || '?'} \u2194 ${input?.right || '?'} (folder)`;
+      case 'merge_3way':
+        return `3-way merge: ${input?.base || '?'}`;
+      case 'sync_preview':
+        return `sync ${input?.direction || 'preview'}`;
+      case 'compare_hunk_detail':
+        return `hunk #${input?.hunk_index ?? '?'} of ${input?.session_id?.substring(0, 12) || '?'}`;
+      case 'compare_apply_hunk':
+        return `${input?.action || '?'} hunk #${input?.hunk_index ?? '?'}`;
       default: {
         if (typeof result === 'string' && result.length > 0) return result.substring(0, 100);
         if (input) {
@@ -304,54 +351,22 @@ function SummarizeBody({ input, result }: { input: any; result: any }) {
   );
 }
 
+/**
+ * Sprint 32: Lightweight TaskPlanBody — plan state renders in the sticky
+ * TaskPlanCard at the top of the chat (Cline's currentFocusChainChecklist pattern).
+ * This body is just a one-line status indicator (like Cline's ChatRow case "task_progress":
+ * return <InvisibleSpacer />).
+ */
 function TaskPlanBody({ input, result }: { input: any; result: any }) {
-  const plan = result?.plan;
-  if (!plan?.tasks) {
-    return <div className="text-matrix-text-muted/50">{result?.message || result?.error || 'No plan data'}</div>;
-  }
-
-  const STATUS_ICONS: Record<string, string> = {
-    pending: '\u23F3',
-    in_progress: '\uD83D\uDD04',
-    done: '\u2705',
-    skipped: '\u23ED\uFE0F',
-    failed: '\u274C',
-  };
-
-  const done = plan.tasks.filter((t: any) => t.status === 'done').length;
-  const total = plan.tasks.length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-
+  const action = input?.action || 'update';
+  const taskCount = Array.isArray(input?.tasks) ? input.tasks.length : undefined;
   return (
-    <div className="space-y-2">
-      {/* Progress bar */}
-      <div className="flex items-center gap-2">
-        <div className="flex-1 h-1.5 bg-matrix-bg-elevated rounded overflow-hidden">
-          <div className="h-full bg-matrix-green transition-all duration-300" style={{ width: `${pct}%` }} />
-        </div>
-        <span className="text-[9px] text-matrix-text-muted/50">{done}/{total} ({pct}%)</span>
-      </div>
-      {/* Task list */}
-      <div className="space-y-1">
-        {plan.tasks.map((t: any) => (
-          <div key={t.id} className="flex items-start gap-2 text-[10px]">
-            <span>{STATUS_ICONS[t.status] || '\u2B55'}</span>
-            <span className={`flex-1 ${
-              t.status === 'done' ? 'line-through text-matrix-text-muted/30' :
-              t.status === 'in_progress' ? 'text-matrix-warning font-bold' :
-              t.status === 'failed' ? 'text-matrix-danger' :
-              t.status === 'skipped' ? 'text-matrix-text-muted/30' :
-              'text-matrix-text-dim'
-            }`}>
-              {t.content}
-            </span>
-            <span className={`text-[8px] uppercase ${
-              t.priority === 'high' ? 'text-matrix-danger' :
-              t.priority === 'low' ? 'text-matrix-text-muted/30' : 'text-matrix-text-muted/50'
-            }`}>{t.priority}</span>
-          </div>
-        ))}
-      </div>
+    <div className="text-xs text-matrix-text-muted/60">
+      {action}{taskCount != null ? ` \u2014 ${taskCount} tasks` : ''}
+      <span className="ml-2 text-[9px] text-matrix-text-muted/40">
+        {/* Full plan renders in the sticky TaskPlanCard at the top of the chat */}
+        (plan visible above)
+      </span>
     </div>
   );
 }
@@ -389,3 +404,7 @@ function GenericToolBody({ input, result }: { input: any; result: any }) {
     </div>
   );
 }
+
+// Sprint 32: Wrap export with memo + deepEqual (Cline ChatRow.tsx pattern)
+const ToolCallCard = memo(ToolCallCardInner, deepEqual);
+export default ToolCallCard;

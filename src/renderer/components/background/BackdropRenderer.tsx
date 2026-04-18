@@ -1,9 +1,10 @@
 /**
- * Backdrop Renderer — Sprint 16 Addendum
+ * Backdrop Renderer — Sprint 16 + Sprint 20 (Real-time Theme Editing)
  *
  * Renders the selected backdrop type behind the entire app.
  * Supports: matrix-rain, puddles, animated-gradient, static-noise, none.
  * Each backdrop respects opacity, intensity, and can be toggled on/off.
+ * Sprint 20: Reads matrixRainHue for dynamic rain character color.
  * Graceful degradation: if canvas fails, falls back to none.
  */
 
@@ -17,14 +18,19 @@ interface BackdropRendererProps {
   enabled: boolean;
   /** Override color for the rain/gradient effect */
   accentColor?: string;
+  /** Sprint 20: Matrix rain character hue color (overrides accentColor for rain) */
+  matrixRainHue?: string;
 }
 
-export default function BackdropRenderer({ type, opacity, intensity, enabled, accentColor }: BackdropRendererProps) {
+export default function BackdropRenderer({ type, opacity, intensity, enabled, accentColor, matrixRainHue }: BackdropRendererProps) {
   if (!enabled || type === 'none' || opacity <= 0) return null;
+
+  // Sprint 20: Use matrixRainHue for rain, fall back to accentColor then default green
+  const rainColor = matrixRainHue || accentColor || '#00ff41';
 
   switch (type) {
     case 'matrix-rain':
-      return <MatrixRainBackdrop opacity={opacity} intensity={intensity} color={accentColor || '#00ff41'} />;
+      return <MatrixRainBackdrop opacity={opacity} intensity={intensity} color={rainColor} />;
     case 'puddles':
       return <PuddlesBackdrop opacity={opacity} intensity={intensity} color={accentColor || '#00ff41'} />;
     case 'animated-gradient':
