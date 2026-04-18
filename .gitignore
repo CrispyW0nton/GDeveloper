@@ -30,3 +30,5 @@ Thumbs.db
 
 # Large binary assets (download separately)
 resources/matrix-bg.mp4
+ai_coding_platform_package/
+test-results/

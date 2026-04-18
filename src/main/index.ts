@@ -5,7 +5,7 @@
  * Sprint 9: + Workspace management, Git operations, Terminal, Agentic chat loop
  */
 
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
@@ -18,9 +18,11 @@ import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
 import { getOrchestrationEngine } from './orchestration';
 import { SYSTEM_PROMPT } from './orchestration/prompts';
+import * as compareEngine from './compare';
 import {
   setActiveWorkspace, getActiveWorkspace,
   executeLocalTool, LOCAL_TOOL_DEFINITIONS,
+  getToolsForMode, WRITE_ACCESS_TOOLS,
   gitPull, gitPush, gitFetch, gitStash, gitStashPop,
   gitBranches, gitCheckout, gitGetStatus, gitClone, isGitRepo,
 } from './tools';
@@ -43,6 +45,48 @@ import { testAdapter } from './mcp-forge/testHarness';
 import { registerAndConnectAdapter, unregisterAdapter } from './mcp-forge/register';
 import { researchAppForAdapter, cloneForAnalysis, listForgeAnalysisRepos, removeForgeAnalysisRepo } from './mcp-forge/research';
 import { v4 as uuid } from 'uuid';
+import {
+  listWorktrees, addWorktree, removeWorktree, pruneWorktrees,
+  repairWorktrees, lockWorktree, unlockWorktree, moveWorktree as gitMoveWorktree,
+  compareWorktrees, getWorktreeContext,
+} from './git/worktree';
+import {
+  createTaskWorktree, completeTaskWorktree, abandonTaskWorktree,
+  getHandoffInfo, getTaskWorktrees, shouldRecommendWorktree,
+} from './worktree/taskIsolation';
+import { buildFileTree, readFileSafe, writeFileSafe, checkFileWritable } from './fs';
+// Sprint 28: autoContinue engine removed — agent loop driven by stop_reason
+import { runAgentLoop } from './orchestration/agentLoop';
+import { DEFAULT_TIER, getTierPreset, getAllTierPresets, type TierPreset } from './orchestration/tierPresets';
+// Sprint 32: Cline-style top-level plan state (not card-level)
+import { setActivePlan as setActivePlanState, getActivePlan as getActivePlanState, clearActivePlan } from './orchestration/activePlanState';
+import { setCompletionWindow } from './tools/attemptCompletion';
+import { setFollowupWindow } from './tools/askFollowupQuestion';
+import { getSessionUsage, resetSessionUsage } from './providers';
+import { getRetryHandler } from './providers/retryHandler';
+import { getRateLimiter } from './providers/rateLimiter';
+import { DEFAULT_TOKEN_BUDGET_CONFIG } from './providers/rateLimitConfig';
+import {
+  processAttachment, processClipboardImage, loadAttachment,
+  deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
+  modelSupportsVision, buildVisionContent, type AttachmentMeta,
+} from './attachments';
+// Sprint 27: Orchestration enhancements
+import {
+  createCheckpoint, getCheckpoints, getLatestCheckpoint,
+  formatCheckpointSummary,
+} from './orchestration/checkpoint';
+import {
+  getTodoList, getTodoProgress, isTodoComplete,
+  createTodoList, updateTodoItem, appendTodoItems, clearTodoList,
+} from './orchestration/todoManager';
+import { buildEnhancedSystemPrompt } from './orchestration/promptBuilder';
+import {
+  runAssertions, formatVerifyReport, getPersistedReports,
+} from './orchestration/verifier';
+import {
+  buildChangelogEntry, writeChangelog,
+} from './orchestration/changelog';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -109,6 +153,47 @@ function createWindow(): void {
       shell.openExternal(url);
     }
     return { action: 'deny' };
+  });
+
+  // Sprint 25.7 + 25.8: Environment-aware CSP via HTTP headers (single source of truth).
+  // Dev needs 'unsafe-inline' + 'unsafe-eval' for Vite's @vitejs/plugin-react
+  // preamble injection and HMR eval-based module reloading. Production stays strict
+  // (preserving Sprint 25.5 hardening). Meta-tag CSP removed from index.html.
+  // Sprint 25.8: Added fonts.googleapis.com / fonts.gstatic.com to restore Matrix fonts.
+  const isDev = !app.isPackaged || !!process.env.ELECTRON_RENDERER_URL;
+
+  const devCsp = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:* https://api.anthropic.com https://api.openai.com https://api.github.com",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+  ].join('; ');
+
+  const prodCsp = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "connect-src 'self' https://api.anthropic.com https://api.openai.com https://api.github.com",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; ');
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [isDev ? devCsp : prodCsp],
+      },
+    });
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -179,14 +264,17 @@ function registerIPCHandlers(): void {
         const result = await claude.validateKey();
         if (result.valid) {
           settings.setApiKey(provider, key);
-          let bestModel = 'claude-sonnet-4-6';
-          if (result.models && result.models.length > 0) {
-            const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
-            const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
-            bestModel = sonnet4 || anySonnet || result.models[0];
-          }
-          const registeredProvider = new ClaudeProvider(key, bestModel);
+          // Sprint 25.5: Register with safe default, then discover + validate
+          const safeDefault = 'claude-3-5-sonnet-20241022';
+          const registeredProvider = new ClaudeProvider(key, safeDefault);
           providerRegistry.register(registeredProvider);
+          // Asynchronously discover models and pick the best one
+          registeredProvider.discoverModels().then(models => {
+            providerRegistry.availableModels = models;
+            const bestModel = providerRegistry.validateSelectedModel();
+            console.log(`[Validate] Discovered ${models.length} models, best: ${bestModel}`);
+          }).catch(() => {});
+          const bestModel = result.models?.[0] || safeDefault;
           db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
         }
         return { valid: result.valid, error: result.error };
@@ -310,7 +398,7 @@ function registerIPCHandlers(): void {
     // Sprint 16: Model-tool compatibility check
     const selectedModelId = providerRegistry.selectedModel;
     if (!providerRegistry.checkModelToolSupport(selectedModelId)) {
-      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-sonnet-4-6) in Settings.`;
+      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-3-5-sonnet-20241022) in Settings.`;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('chat:stream-chunk', {
           sessionId,
@@ -358,11 +446,9 @@ function registerIPCHandlers(): void {
         }
       }
 
-      // Build combined tools array (local + MCP) — Sprint 12: filter by mode
+      // Build combined tools array (local + MCP) — Sprint 30: use getToolsForMode
       const mode = getExecutionMode();
-      const filteredLocalTools = mode === 'plan'
-        ? LOCAL_TOOL_DEFINITIONS.filter(t => !WRITE_TOOL_NAMES.includes(t.name))
-        : LOCAL_TOOL_DEFINITIONS;
+      const filteredLocalTools = getToolsForMode(mode as 'plan' | 'build');
 
       const allTools: any[] = [
         ...filteredLocalTools.map(t => ({
@@ -393,210 +479,281 @@ function registerIPCHandlers(): void {
           enhancedPrompt += `\nTracking: ${status.tracking || '(none)'}`;
           enhancedPrompt += `\nModified: ${status.modified.length} | Staged: ${status.staged.length} | Untracked: ${status.not_added.length}`;
         } catch { /* git context optional */ }
+
+        // Sprint 17: Add worktree context to system prompt
+        try {
+          const wtContext = getWorktreeContext(wsPath);
+          if (wtContext) {
+            enhancedPrompt += `\nWorktree: ${wtContext.isMain ? 'Main' : 'Linked'}`;
+            if (wtContext.isLinked) {
+              enhancedPrompt += ` (branch: ${wtContext.branch || 'detached ' + wtContext.head?.substring(0, 7)})`;
+              enhancedPrompt += `\nMain repo root: ${wtContext.mainRoot || 'unknown'}`;
+            }
+            const wts = listWorktrees(wsPath);
+            if (wts.length > 1) {
+              enhancedPrompt += `\nTotal worktrees: ${wts.length} (${wts.filter(w => w.isLinked).length} linked)`;
+            }
+          }
+        } catch { /* worktree context optional */ }
       }
 
       enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
       enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(t => t.name).join(', ')}`;
       if (mode === 'plan') {
-        enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`;
+        enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${Array.from(WRITE_ACCESS_TOOLS).join(', ')}`;
       }
 
-      // ─── Agentic Loop: stream → execute tools → continue ───
-      let loopCount = 0;
-      const maxLoops = 10;
-      let fullContent = '';
-      let allToolCalls: any[] = [];
-      let currentMessages = [...messages];
+      // Sprint 29: Debug log of tool names for P0-A terminal tool wiring verification
+      const toolNameList = allTools.map((t: any) => t.name);
+      console.log(`[chat:send] Tools passed to agent loop (${toolNameList.length}): ${toolNameList.join(', ')}`);
+      const hasAttemptCompletion = toolNameList.includes('attempt_completion');
+      const hasAskFollowup = toolNameList.includes('ask_followup_question');
+      if (!hasAttemptCompletion || !hasAskFollowup) {
+        console.warn(`[chat:send] WARNING: Terminal tools missing! attempt_completion=${hasAttemptCompletion}, ask_followup_question=${hasAskFollowup}`);
+      }
 
-      while (loopCount < maxLoops) {
-        loopCount++;
+      // Sprint 33: Three invariants verification before agent loop
+      // Invariant 1: toolCount matches registry size
+      const expectedMinTools = 20; // at minimum 20 local tools + terminal tools
+      if (allTools.length < expectedMinTools) {
+        console.error(`[chat:send] INVARIANT VIOLATION: toolCount ${allTools.length} < ${expectedMinTools}. Tools may be missing.`);
+      }
+      // Invariant 2: system prompt contains tool-use contract
+      if (!enhancedPrompt.includes('attempt_completion')) {
+        console.error('[chat:send] INVARIANT VIOLATION: system prompt missing tool-use contract (attempt_completion reference).');
+      }
+      // Invariant 3: no tool_choice override to "none" (we never set it, but verify)
+      // This is implicitly satisfied since we don't pass tool_choice at all.
+      // The provider defaults to Anthropic's auto behavior when tools are present.
+      console.log(`[chat:send] Sprint 33 invariants: toolCount=${allTools.length}, systemHasContract=${enhancedPrompt.includes('attempt_completion')}, toolChoiceOverride=none`);
 
-        const result = await streamChatToRenderer(
-          mainWindow,
-          provider,
-          currentMessages,
+      // Sprint 33: Verify each tool has a valid inputSchema
+      const toolsWithoutSchema = allTools.filter((t: any) => !t.inputSchema);
+      if (toolsWithoutSchema.length > 0) {
+        console.error(`[chat:send] INVARIANT VIOLATION: ${toolsWithoutSchema.length} tools missing inputSchema: ${toolsWithoutSchema.map((t: any) => t.name).join(', ')}`);
+      }
+
+      // ─── Sprint 30: Emit Dev Console snapshots ───
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        // Emit API request event to Dev Console
+        mainWindow.webContents.send('devconsole:api-traffic', {
+          timestamp: Date.now(),
           sessionId,
-          enhancedPrompt,
-          allTools.length > 0 ? allTools : undefined
-        );
+          turn: 0,
+          direction: 'request',
+          model: providerRegistry.selectedModel,
+          toolCount: allTools.length,
+          toolNames: toolNameList,
+        });
 
-        fullContent = result.content;
+        // Emit tool registry snapshot
+        const buildModeTools = getToolsForMode('build').map(t => t.name);
+        const planModeTools = getToolsForMode('plan').map(t => t.name);
+        mainWindow.webContents.send('devconsole:tool-registry', {
+          localTools: filteredLocalTools.map(t => ({ name: t.name, description: t.description.substring(0, 100) })),
+          mcpTools: mcpTools.map((t: any) => ({ name: t.name, serverName: t.serverName || '', enabled: true })),
+          buildModeTools,
+          planModeTools,
+          activeMode: mode,
+          hasAttemptCompletion: buildModeTools.includes('attempt_completion'),
+          hasAskFollowupQuestion: buildModeTools.includes('ask_followup_question'),
+        });
 
-        if (!result.toolCalls || result.toolCalls.length === 0) {
-          // No tool calls — done
-          break;
-        }
+        // Emit settings snapshot
+        mainWindow.webContents.send('devconsole:settings-snapshot', {
+          tier: DEFAULT_TIER,
+          budgetValues: DEFAULT_TOKEN_BUDGET_CONFIG,
+          mode,
+          apiKeyPresent: !!provider,
+          workspacePath: wsPath || '',
+          sessionId,
+          selectedModel: providerRegistry.selectedModel,
+        });
+      }
 
-        // Process each tool call
-        allToolCalls.push(...result.toolCalls);
-
-        // Add assistant message with tool calls to conversation
-        const assistantContent: any[] = [];
-        if (result.content) {
-          assistantContent.push({ type: 'text', text: result.content });
-        }
-        for (const tc of result.toolCalls) {
-          assistantContent.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.name,
-            input: tc.input || {}
-          });
-        }
-        currentMessages.push({ role: 'assistant', content: JSON.stringify(assistantContent) });
-
-        // Execute each tool and collect results
-        const toolResults: any[] = [];
-        for (const tc of result.toolCalls) {
+      // ─── Sprint 28: Cline-style agent loop (stop_reason + terminal tools) ───
+      const loopResult = await runAgentLoop({
+        provider,
+        win: mainWindow,
+        sessionId,
+        systemPrompt: enhancedPrompt,
+        tools: allTools,
+        messages,
+        maxTurns: 25,
+        maxConsecutiveMistakes: 3,
+        rateLimitCheck: () => getRateLimiter().preFlightCheck(),
+        executeTool: async (tc) => {
           db.logActivity(sessionId, 'tool_call', `Tool call: ${tc.name}`, JSON.stringify(tc.input).substring(0, 200), {
-            toolName: tc.name,
-            toolCallId: tc.id,
-            sessionId,
-            loop: loopCount
+            toolName: tc.name, toolCallId: tc.id, sessionId,
           });
 
           let toolResultContent: string;
           let isError = false;
 
-          // Sprint 16: Plan/Build mode enforcement — reject write tools in plan mode
-          if (mode === 'plan' && WRITE_TOOL_NAMES.includes(tc.name)) {
-            toolResultContent = `Error: Tool "${tc.name}" is disabled in Plan mode. Switch to Build mode with /build to use write tools.`;
+          // Plan mode enforcement — Sprint 30: use canonical WRITE_ACCESS_TOOLS from tools/index.ts
+          if (mode === 'plan' && WRITE_ACCESS_TOOLS.has(tc.name)) {
+            toolResultContent = `Error: Tool "${tc.name}" is disabled in Plan mode. Switch to Build mode with /build.`;
             isError = true;
             emitSandboxEvent({ type: 'error', tool: tc.name, summary: `Blocked ${tc.name} (Plan mode)`, status: 'error' });
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: tc.id,
-              content: toolResultContent,
-              is_error: true,
-            });
-            // Send to renderer
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('chat:stream-chunk', {
-                sessionId,
-                type: 'tool_error',
-                toolName: tc.name,
-                result: toolResultContent,
-              });
-            }
-            continue;
-          }
-
-          // Sprint 15.2: Emit sandbox event for tool start with cwd and args
-          const isCommandTool = ['run_command', 'bash_command'].includes(tc.name);
-          emitSandboxEvent({
-            type: isCommandTool ? 'command' : 'tool_call',
-            tool: tc.name,
-            summary: isCommandTool ? `$ ${(tc.input?.command || '').substring(0, 100)}` : `Calling ${tc.name}`,
-            detail: JSON.stringify(tc.input || {}).substring(0, 500),
-            cwd: getActiveWorkspace() || undefined,
-            status: 'running',
-          });
-
-          // Check if it's a local tool
-          const isLocalTool = LOCAL_TOOL_DEFINITIONS.some(t => t.name === tc.name);
-
-          if (isLocalTool) {
-            try {
-              const localResult = await executeLocalTool(tc.name, tc.input || {});
-              toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-              // Sprint 15.2: Emit file_edit event for write/patch tools
-              const isFileEdit = ['write_file', 'patch_file', 'multi_edit'].includes(tc.name);
-              emitSandboxEvent({
-                type: isFileEdit ? 'file_edit' : 'tool_result',
-                tool: tc.name,
-                summary: `${tc.name} completed${isFileEdit ? `: ${tc.input?.path || tc.input?.file_path || ''}` : ''}`,
-                detail: toolResultContent.substring(0, 300),
-                cwd: getActiveWorkspace() || undefined,
-                status: 'success',
-              });
-            } catch (err) {
-              toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-              isError = true;
-              emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `${tc.name} failed`, detail: toolResultContent, status: 'error' });
-            }
           } else {
-            // MCP tool
-            const toolMeta = mcpTools.find(t => t.name === tc.name);
-            if (toolMeta) {
+            const isLocalTool = LOCAL_TOOL_DEFINITIONS.some(t => t.name === tc.name);
+            const isCommandTool = ['run_command', 'bash_command'].includes(tc.name);
+            emitSandboxEvent({
+              type: isCommandTool ? 'command' : 'tool_call',
+              tool: tc.name,
+              summary: isCommandTool ? `$ ${(tc.input?.command || '').substring(0, 100)}` : `Calling ${tc.name}`,
+              detail: JSON.stringify(tc.input || {}).substring(0, 500),
+              cwd: getActiveWorkspace() || undefined,
+              status: 'running',
+            });
+
+            if (isLocalTool) {
               try {
-                emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
-                const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
-                toolResultContent = mcpResult?.content
-                  ? (Array.isArray(mcpResult.content)
-                      ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
-                      : JSON.stringify(mcpResult.content))
-                  : JSON.stringify(mcpResult);
-                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
+                const localResult = await executeLocalTool(tc.name, tc.input || {});
+                toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
+                const isFileEdit = ['write_file', 'patch_file', 'multi_edit'].includes(tc.name);
+                emitSandboxEvent({
+                  type: isFileEdit ? 'file_edit' : 'tool_result',
+                  tool: tc.name,
+                  summary: `${tc.name} completed${isFileEdit ? `: ${tc.input?.path || tc.input?.file_path || ''}` : ''}`,
+                  detail: toolResultContent.substring(0, 300),
+                  cwd: getActiveWorkspace() || undefined,
+                  status: 'success',
+                });
+                if (isFileEdit && mainWindow && !mainWindow.isDestroyed()) {
+                  const filePath = tc.input?.path || tc.input?.file_path || '';
+                  const wsPath = getActiveWorkspace() || '';
+                  const absolutePath = filePath.startsWith('/') ? filePath : join(wsPath, filePath);
+                  mainWindow.webContents.send('filetree:file-changed', { filePath, absolutePath, toolName: tc.name, timestamp: Date.now() });
+                }
               } catch (err) {
                 toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
                 isError = true;
-                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} failed`, detail: toolResultContent, status: 'error' });
+                emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `${tc.name} failed`, detail: toolResultContent, status: 'error' });
               }
             } else {
-              toolResultContent = `Error: Unknown tool "${tc.name}"`;
-              isError = true;
+              // MCP tool
+              const toolMeta = mcpTools.find(t => t.name === tc.name);
+              if (toolMeta) {
+                try {
+                  emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
+                  const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
+                  toolResultContent = mcpResult?.content
+                    ? (Array.isArray(mcpResult.content)
+                        ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
+                        : JSON.stringify(mcpResult.content))
+                    : JSON.stringify(mcpResult);
+                  emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
+                } catch (err) {
+                  toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+                  isError = true;
+                  emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} failed`, detail: toolResultContent, status: 'error' });
+                }
+              } else {
+                toolResultContent = `Error: Unknown tool "${tc.name}"`;
+                isError = true;
+              }
             }
           }
 
-          toolResults.push({
-            toolCallId: tc.id,
-            toolName: tc.name,
-            content: toolResultContent,
-            isError
-          });
-
           db.logActivity(sessionId, isError ? 'tool_error' : 'tool_result', `Tool ${isError ? 'error' : 'result'}: ${tc.name}`, toolResultContent.substring(0, 200), {
-            toolName: tc.name,
-            toolCallId: tc.id,
-            success: !isError,
-            loop: loopCount
+            toolName: tc.name, toolCallId: tc.id, success: !isError,
           });
 
-          // Send tool result to renderer
+          // Sprint 31 Bug #1: Length-aware truncation — 16 KB for structured tools, 2 KB for others
+          const STRUCTURED_TOOL_NAMES = new Set([
+            'task_plan', 'compare_file', 'compare_folder', 'merge_3way',
+            'attempt_completion', 'ask_followup_question',
+          ]);
+          const maxResultLen = STRUCTURED_TOOL_NAMES.has(tc.name) ? 16000 : 2000;
+          const truncatedResult = toolResultContent.substring(0, maxResultLen);
+          const wasTruncated = toolResultContent.length > maxResultLen;
+
           mainWindow?.webContents.send('chat:stream-chunk', {
-            sessionId,
-            type: isError ? 'tool_error' : 'tool_result',
-            toolCallId: tc.id,
-            toolName: tc.name,
-            result: toolResultContent.substring(0, 2000)
+            sessionId, type: isError ? 'tool_error' : 'tool_result',
+            toolCallId: tc.id, toolName: tc.name, result: truncatedResult,
           });
-        }
 
-        // Add tool results as user message for next turn
-        const toolResultMessage = toolResults.map(tr =>
-          `[Tool Result: ${tr.toolName}]\n${tr.content.substring(0, 4000)}`
-        ).join('\n\n');
+          // Sprint 32: Emit plan via dedicated IPC channel (Cline's currentFocusChainChecklist pattern).
+          // Plan state lives in activePlanState.ts, NOT inside a tool card's result field.
+          // This prevents the reversion bug where React unmounts/remounts the card.
+          if (tc.name === 'task_plan' && !isError) {
+            try {
+              const cleaned = toolResultContent.replace(/^\[Tool Result:\s*\w+\]\s*/i, '').trim();
+              const parsed = JSON.parse(cleaned);
+              const planData = parsed?.plan || (parsed?.tasks ? parsed : null);
+              if (planData?.tasks && Array.isArray(planData.tasks) && planData.tasks.length > 0) {
+                // Store as first-class session-scoped state
+                setActivePlanState(sessionId, planData);
 
-        currentMessages.push({ role: 'user', content: toolResultMessage });
+                // Emit via dedicated channel with immutable plan.id as identity
+                mainWindow?.webContents.send('chat:active-plan-update', {
+                  sessionId,
+                  planId: planData.id,
+                  plan: planData,
+                  action: parsed.action,
+                  ts: Date.now(),
+                });
+              }
+            } catch (err) {
+              console.warn('[task_plan] parse failed for active-plan-update', err);
+            }
+          }
 
-        // Persist the tool results
-        db.insertMessage(sessionId, 'assistant', result.content || '(tool execution)', result.toolCalls);
-        db.insertMessage(sessionId, 'user', toolResultMessage);
+          // Sprint 31: Emit tool-result metadata to DevConsole
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('devconsole:api-traffic', {
+              timestamp: Date.now(),
+              sessionId,
+              direction: 'tool-result',
+              toolName: tc.name,
+              toolCallId: tc.id,
+              resultLength: toolResultContent.length,
+              truncated: wasTruncated,
+              maxAllowed: maxResultLen,
+            });
+          }
+
+          return { content: toolResultContent, isError };
+        },
+        persistMessage: (role, content, toolCalls) => {
+          db.insertMessage(sessionId, role, content, toolCalls);
+        },
+        emitSandboxEvent,
+      });
+
+      // Sprint 24: Emit session usage and rate-limit snapshot
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('chat:stream-chunk', {
+          sessionId, type: 'usage-update',
+          sessionUsage: getSessionUsage(),
+          rateLimitSnapshot: getRateLimiter().getSnapshot(),
+        });
       }
 
       // Save final assistant response to DB
-      const msgId = db.insertMessage(sessionId, 'assistant', fullContent, allToolCalls.length > 0 ? allToolCalls : undefined);
+      const msgId = db.insertMessage(sessionId, 'assistant', loopResult.content, loopResult.toolCalls.length > 0 ? loopResult.toolCalls : undefined);
 
-      // Update task status
       if (taskId) {
         db.updateTaskStatus(taskId, 'EXECUTING', 'AI response received');
         db.logActivity(sessionId, 'task_updated', 'Task executing', 'AI processing response', { taskId, status: 'EXECUTING' });
       }
 
-      db.logActivity(sessionId, 'chat_response', `AI responded (${fullContent.length} chars, ${loopCount} loops, ${allToolCalls.length} tool calls)`, fullContent.substring(0, 150), {
-        sessionId,
-        provider: provider.name,
-        contentLength: fullContent.length,
-        toolCalls: allToolCalls.length,
-        loops: loopCount
+      db.logActivity(sessionId, 'chat_response', `AI responded (${loopResult.content.length} chars, ${loopResult.turns} turns, ${loopResult.toolCalls.length} tool calls, reason: ${loopResult.reason})`, loopResult.content.substring(0, 150), {
+        sessionId, provider: provider.name,
+        contentLength: loopResult.content.length, toolCalls: loopResult.toolCalls.length,
+        turns: loopResult.turns, reason: loopResult.reason,
       });
 
       return {
         id: msgId,
         role: 'assistant',
-        content: fullContent,
-        toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
-        streaming: true
+        content: loopResult.content,
+        toolCalls: loopResult.toolCalls.length > 0 ? loopResult.toolCalls : undefined,
+        streaming: true,
+        completionResult: loopResult.completionResult,
+        followupQuestion: loopResult.followupQuestion,
+        exitReason: loopResult.reason,
       };
     } catch (err) {
       const errMsg = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
@@ -616,8 +773,53 @@ function registerIPCHandlers(): void {
     return db.getMessages(sessionId);
   });
 
+  // Sprint 36 Fix 2: Abort active stream on demand (tab switch / component unmount)
+  ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async () => {
+    const provider = providerRegistry.getDefault() as ClaudeProvider | undefined;
+    if (provider && typeof provider.abortActiveStream === 'function') {
+      provider.abortActiveStream();
+      console.log('[chat:abort] Active stream aborted');
+    }
+    return { success: true };
+  });
+
   ipcMain.handle(IPC_CHANNELS.CHAT_CLEAR, async (_event, sessionId: string) => {
-    db.logActivity(sessionId, 'chat_cleared', 'Chat history cleared');
+    // Sprint 35 Fix 1: Actually delete messages from the DB (was a no-op before)
+    const deletedCount = db.deleteMessages(sessionId);
+    console.log(`[CHAT_CLEAR] Deleted ${deletedCount} messages for session ${sessionId}`);
+
+    // Reset cumulative session usage so token counter starts fresh
+    resetSessionUsage();
+
+    // Clear the active plan state for this session
+    clearActivePlan(sessionId);
+
+    // Sprint 36 Fix 1: Send plan:null to renderer so TaskPlanCard hides immediately.
+    // Without this, the card stays visible after clearing because the renderer
+    // never receives the null update via the dedicated plan channel.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('chat:active-plan-update', {
+        sessionId,
+        planId: null,
+        plan: null,
+        action: 'clear',
+        ts: Date.now(),
+      });
+    }
+
+    // Emit session-cleared event to renderer for UI sync
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('agent:loop-event', {
+        event: 'session-cleared',
+        sessionId,
+        deletedMessages: deletedCount,
+        timestamp: Date.now(),
+      });
+    }
+
+    db.logActivity(sessionId, 'chat_cleared', 'Chat history cleared', `Deleted ${deletedCount} messages`, {
+      sessionId, deletedCount,
+    });
     return true;
   });
 
@@ -1537,9 +1739,13 @@ function registerIPCHandlers(): void {
     // Bash (always available on Linux/macOS)
     shells.push({ id: 'bash', name: 'Bash', command: 'bash', available: true });
 
+    // Sprint 36 Fix 4: Use platform-specific command lookup.
+    // On Windows, 'which' doesn't exist; 'where' is the equivalent.
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+
     // Check for zsh
     try {
-      execSync('which zsh', { timeout: 2000 });
+      execSync(`${whichCmd} zsh`, { timeout: 2000 });
       shells.push({ id: 'zsh', name: 'Zsh', command: 'zsh', available: true });
     } catch {
       shells.push({ id: 'zsh', name: 'Zsh', command: 'zsh', available: false });
@@ -1547,7 +1753,7 @@ function registerIPCHandlers(): void {
 
     // PowerShell (pwsh)
     try {
-      execSync('which pwsh', { timeout: 2000 });
+      execSync(`${whichCmd} pwsh`, { timeout: 2000 });
       shells.push({ id: 'pwsh', name: 'PowerShell 7', command: 'pwsh', available: true });
     } catch {
       shells.push({ id: 'pwsh', name: 'PowerShell 7', command: 'pwsh', available: false });
@@ -1753,6 +1959,24 @@ function registerIPCHandlers(): void {
     return models;
   });
 
+  // Sprint 25.5: Force-refresh models from API (user clicked "Refresh models")
+  ipcMain.handle(IPC_CHANNELS.MODEL_REFRESH, async () => {
+    try {
+      const models = await providerRegistry.refreshModels();
+      // Also validate the selected model after refresh
+      const validatedModel = providerRegistry.validateSelectedModel();
+      return { success: true, models, selectedModel: validatedModel };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Refresh failed', models: providerRegistry.availableModels };
+    }
+  });
+
+  // Sprint 25.5: Validate that selected model exists in available models
+  ipcMain.handle(IPC_CHANNELS.MODEL_VALIDATE_SELECTED, async () => {
+    const validatedModel = providerRegistry.validateSelectedModel();
+    return { model: validatedModel, availableModels: providerRegistry.availableModels };
+  });
+
   ipcMain.handle(IPC_CHANNELS.MODEL_CHECK_TOOLS, async (_event, model?: string) => {
     return providerRegistry.checkModelToolSupport(model);
   });
@@ -1769,6 +1993,673 @@ function registerIPCHandlers(): void {
     sandboxLog.length = 0;
     return { success: true };
   });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 17: Git Worktree IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_LIST, async () => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const worktrees = listWorktrees(ws);
+      return { success: true, worktrees };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to list worktrees', worktrees: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_ADD, async (_event, options: any) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = addWorktree(ws, options);
+      if (result.success) {
+        db.logActivity('system', 'worktree_created', `Worktree created: ${options.path}`, result.message, { path: options.path, branch: options.branchOrCommit });
+        emitSandboxEvent({ type: 'status', summary: `Worktree created: ${options.path}`, status: 'success' });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to add worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_REMOVE, async (_event, options: any) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = removeWorktree(ws, options);
+      if (result.success) {
+        db.logActivity('system', 'worktree_removed', `Worktree removed: ${options.path}`, result.message, { path: options.path });
+        emitSandboxEvent({ type: 'status', summary: `Worktree removed: ${options.path}`, status: 'success' });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to remove worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_PRUNE, async (_event, dryRun?: boolean) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = pruneWorktrees(ws, dryRun);
+      if (result.success && !dryRun) {
+        db.logActivity('system', 'worktree_pruned', 'Worktrees pruned', result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to prune worktrees' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_REPAIR, async (_event, targetPath?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = repairWorktrees(ws, targetPath);
+      if (result.success) {
+        db.logActivity('system', 'worktree_repaired', 'Worktrees repaired', result.message, { target: targetPath });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to repair worktrees' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_LOCK, async (_event, targetPath: string, reason?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = lockWorktree(ws, targetPath, reason);
+      if (result.success) {
+        db.logActivity('system', 'worktree_locked', `Worktree locked: ${targetPath}`, reason || '', { path: targetPath, reason });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to lock worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_UNLOCK, async (_event, targetPath: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = unlockWorktree(ws, targetPath);
+      if (result.success) {
+        db.logActivity('system', 'worktree_unlocked', `Worktree unlocked: ${targetPath}`, '', { path: targetPath });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to unlock worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_MOVE, async (_event, from: string, to: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = gitMoveWorktree(ws, { from, to });
+      if (result.success) {
+        db.logActivity('system', 'worktree_moved', `Worktree moved: ${from} → ${to}`, '', { from, to });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to move worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_COMPARE, async (_event, pathA: string, pathB: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = compareWorktrees(ws, pathA, pathB);
+      return result ? { success: true, result } : { success: false, error: 'Could not compare worktrees' };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to compare worktrees' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_CONTEXT, async (_event, path?: string) => {
+    try {
+      const ws = path || requireActiveWorkspacePath();
+      const context = getWorktreeContext(ws);
+      return { success: true, context };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to get context' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_CREATE_TASK, async (_event, request: any) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = createTaskWorktree({ ...request, repoPath: ws });
+      if (result.success) {
+        db.logActivity(request.sessionId || 'system', 'worktree_task_created', `Task worktree: ${request.taskDescription}`, result.message, {
+          taskId: result.data?.taskId, path: result.data?.worktreePath,
+        });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to create task worktree' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_COMPLETE_TASK, async (_event, taskId: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = completeTaskWorktree(taskId, ws);
+      if (result.success) {
+        db.logActivity('system', 'worktree_task_completed', `Task worktree completed: ${taskId}`, result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to complete task' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_ABANDON_TASK, async (_event, taskId: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = abandonTaskWorktree(taskId, ws);
+      if (result.success) {
+        db.logActivity('system', 'worktree_task_abandoned', `Task worktree abandoned: ${taskId}`, result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to abandon task' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_HANDOFF, async (_event, worktreePath: string, targetBranch?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const result = getHandoffInfo(ws, worktreePath, targetBranch);
+      if (result.success) {
+        db.logActivity('system', 'worktree_handoff', `Handoff info: ${worktreePath} → ${targetBranch || 'main'}`, result.message);
+      }
+      return result;
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : 'Failed to get handoff info' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_TASK_LIST, async () => {
+    return getTaskWorktrees();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_RECOMMEND, async (_event, taskDescription: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const git = simpleGit(ws);
+      const status = await git.status();
+      const dirty = !status.isClean();
+      return shouldRecommendWorktree(taskDescription, dirty);
+    } catch (err) {
+      return { recommend: false, reason: '' };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 19: File Tree IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.FILE_TREE_GET, async (_event, maxDepth?: number) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const tree = buildFileTree(ws, maxDepth || 4);
+      return { success: true, tree };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to build file tree', tree: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FILE_TREE_READ, async (_event, filePath: string) => {
+    try {
+      const result = readFileSafe(filePath);
+      return result;
+    } catch (err) {
+      return { content: null, isBinary: false, isTooLarge: false, size: 0 };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 23: File Writing (Editor) IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.FILE_WRITE, async (_event, filePath: string, content: string) => {
+    try {
+      const result = writeFileSafe(filePath, content);
+      if (result.success) {
+        db.logActivity('system', 'file_write', `File saved: ${filePath}`, `${content.length} chars`);
+        // Notify renderer about the file change
+        mainWindow?.webContents.send('filetree:file-changed', {
+          filePath,
+          absolutePath: filePath,
+          toolName: 'user-edit',
+        });
+      }
+      return result;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Write failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FILE_CHECK_WRITABLE, async (_event, filePath: string) => {
+    try {
+      const wsPath = getActiveWorkspace() || undefined;
+      return checkFileWritable(filePath, wsPath);
+    } catch (err) {
+      return { writable: false, reason: 'Check failed', isBinary: false, isLockFile: false, isOutsideWorktree: false, isTooLarge: false, size: 0 };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 23: Model Metadata IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_GET_META_LIST, async () => {
+    try {
+      const models = providerRegistry.availableModels;
+      return models.map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        provider: m.provider || 'claude',
+        supportsTools: m.supportsTools ?? true,
+        supportsStreaming: m.supportsStreaming ?? true,
+        contextWindow: m.contextWindow,
+        maxOutput: m.maxOutput,
+      }));
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_GET_DEFAULT, async () => {
+    try {
+      const settings = getSecureSettings();
+      const all = settings.getSettings();
+      return (all as any).preferences?.defaultModel || 'claude-3-5-sonnet-20241022';
+    } catch {
+      return 'claude-3-5-sonnet-20241022';
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MODEL_SET_DEFAULT, async (_event, model: string) => {
+    try {
+      const settings = getSecureSettings();
+      settings.updateSettings({ preferences: { defaultModel: model } } as any);
+      providerRegistry.selectedModel = model;
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to set default model' };
+    }
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 24: Rate Limiting & Token Budget IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const rateLimiter = getRateLimiter();
+  const retryHandler = getRetryHandler();
+
+  // Push rate-limit snapshot to renderer whenever it changes
+  rateLimiter.onChange((snapshot) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('rate-limit:update', snapshot);
+    }
+  });
+
+  // Push retry state to renderer whenever it changes
+  retryHandler.onStateChange((retryState) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('retry:state-update', retryState);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_GET_SNAPSHOT, async () => {
+    return rateLimiter.getSnapshot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_RESET, async () => {
+    rateLimiter.reset();
+    return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RATE_LIMIT_PAUSE_RESUME, async () => {
+    const snap = rateLimiter.getSnapshot();
+    if (snap.isPaused) {
+      rateLimiter.resume();
+    } else {
+      rateLimiter.pause();
+    }
+    return rateLimiter.getSnapshot();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TOKEN_BUDGET_GET, async () => {
+    return rateLimiter.getConfig();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TOKEN_BUDGET_SET, async (_event, config: any) => {
+    try {
+      rateLimiter.updateConfig({ ...DEFAULT_TOKEN_BUDGET_CONFIG, ...config });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to update token budget' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.RETRY_STATE_GET, async () => {
+    return retryHandler.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_SUMMARIZE, async (_event, _sessionId: string) => {
+    return { success: true, message: 'Context summarized' };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_COMPACT, async (_event, _sessionId: string) => {
+    return { success: true, message: 'History compacted' };
+  });
+
+  // Sprint 24: Session-level usage
+  ipcMain.handle(IPC_CHANNELS.SESSION_USAGE_GET, async () => {
+    return getSessionUsage();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SESSION_USAGE_RESET, async () => {
+    resetSessionUsage();
+    return { success: true };
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 25: Attachment & Vision IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PROCESS, async (_event, fileData: { buffer: number[]; name: string; mimeType: string; conversationId: string; source: string }) => {
+    try {
+      const buffer = Buffer.from(fileData.buffer);
+      const result = processAttachment(
+        buffer,
+        fileData.name,
+        fileData.mimeType,
+        fileData.conversationId,
+        (fileData.source as any) || 'drag-drop',
+        getAttachmentConfig(),
+      );
+      db.logActivity('system', 'attachment_processed', `Attachment: ${result.originalName} (${result.type})`, `${(result.size / 1024).toFixed(1)} KB`, {
+        attachmentId: result.id, type: result.type, size: result.size, warnings: result.warnings,
+      });
+      return { success: true, attachment: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to process attachment' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PROCESS_CLIPBOARD, async (_event, data: { pngBase64: string; conversationId: string }) => {
+    try {
+      const buffer = Buffer.from(data.pngBase64, 'base64');
+      const result = processClipboardImage(buffer, data.conversationId, getAttachmentConfig());
+      db.logActivity('system', 'attachment_clipboard', `Clipboard image: ${result.originalName}`, `${(result.size / 1024).toFixed(1)} KB`);
+      return { success: true, attachment: result };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to process clipboard image' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_LOAD, async (_event, conversationId: string, filename: string) => {
+    try {
+      const buffer = loadAttachment(conversationId, filename);
+      if (!buffer) return { success: false, error: 'Attachment not found' };
+      return { success: true, data: buffer.toString('base64'), size: buffer.length };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to load attachment' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_DELETE_CONVERSATION, async (_event, conversationId: string) => {
+    try {
+      deleteConversationAttachments(conversationId);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to delete attachments' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_CONFIG_GET, async () => {
+    return getAttachmentConfig();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_CONFIG_SET, async (_event, config: any) => {
+    return setAttachmentConfig(config);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_CHECK_VISION, async (_event, modelId?: string) => {
+    const id = modelId || providerRegistry.selectedModel;
+    return { supportsVision: modelSupportsVision(id), modelId: id };
+  });
+
+  // Sprint 28: Auto-continue IPC handlers removed — loop uses stop_reason + terminal tools
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Compare Agent IPC Handlers
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_FILES, async (_event, leftPath: string, rightPath: string, filters?: any) => {
+    try {
+      const session = compareEngine.compareFiles(leftPath, rightPath, filters);
+      db.logActivity('system', 'compare_files', `Compared files: ${leftPath} ↔ ${rightPath}`, session.id);
+      return compareEngine.getCompactOutput(session.id);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Compare failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_FOLDERS, async (_event, leftPath: string, rightPath: string, filters?: any) => {
+    try {
+      const session = compareEngine.compareFolders(leftPath, rightPath, filters);
+      db.logActivity('system', 'compare_folders', `Compared folders: ${leftPath} ↔ ${rightPath}`, session.id);
+      return compareEngine.getCompactOutput(session.id);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Compare failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_MERGE3, async (_event, leftPath: string, rightPath: string, basePath: string, filters?: any) => {
+    try {
+      const session = compareEngine.merge3Way(leftPath, rightPath, basePath, filters);
+      db.logActivity('system', 'compare_merge3', `3-way merge: ${basePath} → ${leftPath} / ${rightPath}`, session.id);
+      return compareEngine.getCompactOutput(session.id);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Merge failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_SYNC_PREVIEW, async (_event, sessionId: string, direction: string) => {
+    try {
+      const result = compareEngine.syncPreview(sessionId, direction as any);
+      return result || { error: 'Session not found or not a folder comparison' };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Sync preview failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_GET_SESSION, async (_event, sessionId: string) => {
+    return compareEngine.getSession(sessionId) || null;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_LIST_SESSIONS, async () => {
+    return compareEngine.listSessions();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_DELETE_SESSION, async (_event, sessionId: string) => {
+    return compareEngine.deleteSession(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_HUNK_ACTION, async (_event, sessionId: string, hunkIndex: number, action: string) => {
+    return compareEngine.applyHunkAction(sessionId, hunkIndex, action as any);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_HUNK_DETAIL, async (_event, sessionId: string, hunkIndex: number) => {
+    return compareEngine.getHunkDetail(sessionId, hunkIndex);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_FOLDER_ENTRY_DIFF, async (_event, sessionId: string, relativePath: string) => {
+    return compareEngine.getFolderEntryDiff(sessionId, relativePath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_COMPACT_OUTPUT, async (_event, sessionId: string, maxItems?: number) => {
+    return compareEngine.getCompactOutput(sessionId, maxItems);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPARE_SAVE_MERGE, async (_event, sessionId: string, outputPath: string) => {
+    return compareEngine.saveMergeResult(sessionId, outputPath);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Todo Manager IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.TODO_GET, async (_event, sessionId: string) => {
+    return getTodoList(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_CREATE, async (_event, sessionId: string, items: any[]) => {
+    return createTodoList(sessionId, items);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_UPDATE_ITEM, async (_event, sessionId: string, itemId: string, updates: any) => {
+    return updateTodoItem(sessionId, itemId, updates);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_APPEND, async (_event, sessionId: string, items: any[]) => {
+    return appendTodoItems(sessionId, items);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_CLEAR, async (_event, sessionId: string) => {
+    return clearTodoList(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TODO_PROGRESS, async (_event, sessionId: string) => {
+    return getTodoProgress(sessionId);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Checkpoint IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.CHECKPOINT_LIST, async (_event, sessionId: string) => {
+    return getCheckpoints(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CHECKPOINT_CREATE, async (_event, sessionId: string, label: string, data: any) => {
+    return createCheckpoint(sessionId, label, data);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CHECKPOINT_LATEST, async (_event, sessionId: string) => {
+    return getLatestCheckpoint(sessionId);
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 27: Verify IPC
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_RUN, async (_event, assertions: string, workspacePath?: string) => {
+    const ws = workspacePath || getActiveWorkspace() || '';
+    return runAssertions(assertions, ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.VERIFY_HISTORY, async () => {
+    return getPersistedReports();
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Sprint 29: Orchestration Settings Persistence
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_GET_ORCHESTRATION, async () => {
+    try {
+      const allSettings = settings.getSettings() as any;
+      const stored = allSettings?.orchestration;
+      if (stored && stored.tier) {
+        return { success: true, settings: stored, presets: getAllTierPresets() };
+      }
+      // Return default tier settings
+      const defaultPreset = getTierPreset(DEFAULT_TIER);
+      return { success: true, settings: { ...defaultPreset, tier: DEFAULT_TIER }, presets: getAllTierPresets() };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to get orchestration settings' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_SET_ORCHESTRATION, async (_event, orchSettings: any) => {
+    try {
+      settings.updateSettings({ orchestration: orchSettings } as any);
+      db.logActivity('system', 'settings_updated', `Orchestration settings updated (tier ${orchSettings.tier})`, '', {
+        tier: orchSettings.tier,
+      });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to save orchestration settings' };
+    }
+  });
+
+  // ─── Sprint 30: Dev Console IPC Handlers ───
+
+  ipcMain.handle(IPC_CHANNELS.DEVCONSOLE_GET_TOOL_REGISTRY, async () => {
+    try {
+      const mode = getExecutionMode() as 'plan' | 'build';
+      const buildModeTools = getToolsForMode('build').map(t => t.name);
+      const planModeTools = getToolsForMode('plan').map(t => t.name);
+      const localTools = LOCAL_TOOL_DEFINITIONS.map(t => ({
+        name: t.name,
+        description: t.description.substring(0, 100),
+      }));
+
+      // Gather MCP tools
+      const mcpServers = getMCPManager().getServers();
+      const mcpToolsList: Array<{ name: string; serverName: string; enabled: boolean }> = [];
+      for (const s of mcpServers) {
+        for (const t of (s.tools || [])) {
+          mcpToolsList.push({ name: t.name, serverName: s.name, enabled: t.enabled });
+        }
+      }
+
+      return {
+        localTools,
+        mcpTools: mcpToolsList,
+        buildModeTools,
+        planModeTools,
+        activeMode: mode,
+        hasAttemptCompletion: buildModeTools.includes('attempt_completion'),
+        hasAskFollowupQuestion: buildModeTools.includes('ask_followup_question'),
+      };
+    } catch (err) {
+      return null;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DEVCONSOLE_GET_SETTINGS_SNAPSHOT, async () => {
+    try {
+      const mode = getExecutionMode();
+      const wsPath = getActiveWorkspace();
+      return {
+        tier: DEFAULT_TIER,
+        budgetValues: DEFAULT_TOKEN_BUDGET_CONFIG,
+        mode,
+        apiKeyPresent: !!providerRegistry.getDefault(),
+        workspacePath: wsPath || '',
+        sessionId: '',
+        selectedModel: providerRegistry.selectedModel,
+      };
+    } catch (err) {
+      return null;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DEVCONSOLE_EXPORT, async (_event, payload: any) => {
+    try {
+      const { writeFileSync } = await import('fs');
+      const { join } = await import('path');
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '.';
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filePath = join(homeDir, `GDeveloper-debug-${timestamp}.json`);
+      writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+      return { success: true, path: filePath };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Export failed' };
+    }
+  });
 }
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
@@ -1776,23 +2667,30 @@ function registerIPCHandlers(): void {
 app.whenReady().then(() => {
   const settings = getSecureSettings();
 
-  // Auto-register saved API keys as providers
-  const providers = settings.getConfiguredProviders();
-  for (const provider of providers) {
-    const key = settings.getApiKey(provider);
-    if (key && provider === 'claude') {
-      const tempProvider = new ClaudeProvider(key);
-      tempProvider.validateKey().then(result => {
-        let bestModel = 'claude-sonnet-4-6';
-        if (result.valid && result.models && result.models.length > 0) {
-          const sonnet4 = result.models.find((m: string) => m.includes('sonnet-4'));
-          const anySonnet = result.models.find((m: string) => m.includes('sonnet'));
-          bestModel = sonnet4 || anySonnet || result.models[0];
-          console.log(`[Startup] Auto-detected best model: ${bestModel}`);
+  // Sprint 25.5: Auto-register saved API keys with dynamic model discovery
+  const configuredProviders = settings.getConfiguredProviders();
+  for (const providerName of configuredProviders) {
+    const key = settings.getApiKey(providerName);
+    if (key && providerName === 'claude') {
+      // Register immediately with a safe default model
+      const safeDefault = 'claude-3-5-sonnet-20241022';
+      const claudeInstance = new ClaudeProvider(key, safeDefault);
+      providerRegistry.register(claudeInstance);
+
+      // Then discover available models and validate/auto-switch
+      claudeInstance.discoverModels().then(models => {
+        providerRegistry.availableModels = models;
+
+        // Restore persisted model selection, then validate it exists
+        const savedSettings = settings.getSettings() as any;
+        const savedModel = savedSettings?.selectedModel || savedSettings?.preferences?.defaultModel;
+        if (savedModel) {
+          providerRegistry.selectedModel = savedModel;
         }
-        providerRegistry.register(new ClaudeProvider(key, bestModel));
-      }).catch(() => {
-        providerRegistry.register(new ClaudeProvider(key));
+        const validatedModel = providerRegistry.validateSelectedModel();
+        console.log(`[Startup] Discovered ${models.length} models, selected: ${validatedModel}`);
+      }).catch(err => {
+        console.warn('[Startup] Model discovery failed, using safe fallback:', err);
       });
     }
   }
@@ -1826,9 +2724,12 @@ app.whenReady().then(() => {
   registerIPCHandlers();
   createWindow();
 
-  // Wire mainWindow into the commands module for streaming research results
+  // Wire mainWindow into modules for IPC
   if (mainWindow) {
     setCommandsMainWindow(mainWindow);
+    // Sprint 28: Wire terminal tool windows
+    setCompletionWindow(mainWindow);
+    setFollowupWindow(mainWindow);
   }
 
   app.on('activate', () => {

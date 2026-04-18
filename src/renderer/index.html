@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- CSP is enforced via HTTP headers in main process (Sprint 25.7).
+       Meta-tag CSP removed: it cannot be environment-switched and conflicts
+       with the header-based policy. See src/main/index.ts onHeadersReceived. -->
   <title>GDeveloper // Matrix AI Coding Platform</title>
   <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet" crossorigin="anonymous" />
   <style>

@@ -115,7 +115,20 @@ export class DatabaseManager {
   }
 
   // ─── Chat Messages ─────────────────────────────────
+
+  // Sprint 36 Fix 3: Known nudge signature that must never be persisted.
+  // If the caller accidentally passes the noToolsUsed() text, we reject it
+  // so the payload cannot grow unboundedly.
+  private static readonly NUDGE_SIGNATURE = '[ERROR] You did not use a tool';
+
   insertMessage(sessionId: string, role: string, content: string, toolCalls?: any[], tokenCount = 0): string {
+    // Sprint 36 Fix 3: DB guard — reject nudge messages from being persisted.
+    // The nudge is ephemeral and must only live in the in-memory agent loop.
+    if (content && content.includes(DatabaseManager.NUDGE_SIGNATURE)) {
+      console.warn('[DB:guard] Rejected nudge insert — nudge messages must remain ephemeral');
+      return 'rejected-nudge';
+    }
+
     const id = uuid();
     this.db.prepare(
       `INSERT INTO chat_messages (id, session_id, role, content, tool_calls, token_count)
@@ -131,6 +144,14 @@ export class DatabaseManager {
       ...row,
       tool_calls: row.tool_calls ? JSON.parse(row.tool_calls) : null
     }));
+  }
+
+  /** Sprint 35: Delete all messages for a session (used by New Task / chat clear) */
+  deleteMessages(sessionId: string): number {
+    const result = this.db.prepare(
+      `DELETE FROM chat_messages WHERE session_id = ?`
+    ).run(sessionId);
+    return result.changes;
   }
 
   // ─── Tasks ─────────────────────────────────────────

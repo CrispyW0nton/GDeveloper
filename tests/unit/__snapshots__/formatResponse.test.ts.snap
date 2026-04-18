@@ -1,0 +1,30 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`formatResponse — Sprint 28 Snapshots > contextTruncationNotice snapshot 1`] = `"[NOTE] Some previous conversation history has been removed to maintain optimal context window length. The initial user task has been retained for continuity. Pay special attention to the user's latest messages."`;
+
+exports[`formatResponse — Sprint 28 Snapshots > noToolsUsed snapshot 1`] = `
+"[ERROR] You did not use a tool in your previous response! Please retry with a tool use.
+
+# Next Steps
+
+If you have completed the user's task, use the attempt_completion tool. 
+If you require additional information from the user, use the ask_followup_question tool. 
+Otherwise, if you have not completed the task and do not need additional information, then proceed with the next step of the task. 
+(This is an automated message, so do not respond to it conversationally.)"
+`;
+
+exports[`formatResponse — Sprint 28 Snapshots > tooManyMistakes snapshot 1`] = `
+"You seem to be having trouble proceeding. The user has provided the following feedback to help guide you:
+<feedback>
+test feedback
+</feedback>"
+`;
+
+exports[`formatResponse — Sprint 28 Snapshots > toolDenied snapshot 1`] = `"The user denied this operation."`;
+
+exports[`formatResponse — Sprint 28 Snapshots > toolError snapshot 1`] = `
+"The tool execution failed with the following error:
+<error>
+test error
+</error>"
+`;

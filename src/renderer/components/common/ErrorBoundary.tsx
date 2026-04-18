@@ -116,7 +116,7 @@ export default class ErrorBoundary extends Component<Props, State> {
 
             {/* Footer */}
             <div style={{ marginTop: 16, fontSize: 9, color: '#555', textAlign: 'center' }}>
-              GDeveloper v5.1 &middot; Sprint 15.1 Error Boundary
+              GDeveloper v7.0 &middot; Sprint 27 Error Boundary
             </div>
           </div>
         </div>

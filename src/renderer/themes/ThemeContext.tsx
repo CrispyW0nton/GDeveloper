@@ -1,15 +1,27 @@
 /**
- * Theme React Context — Sprint 15 + Sprint 16 Addendum (Theme Customization Studio)
+ * Theme React Context — Sprint 15 + Sprint 16 + Sprint 20 (Real-time Theme Editing)
  *
  * Provides the current theme state and methods to all descendants.
- * Now supports both legacy ThemeId-based switching and custom ThemePreset-based switching.
- * Hydrates saved preset from settings on mount.
- * Manages preset persistence (save/load/delete).
+ * Sprint 20 additions:
+ *  - Real-time token editing: every change instantly updates CSS variables (no Apply button)
+ *  - matrixRainHue: dedicated rain character color, persisted per-preset
+ *  - Snapshot / restore for cancel/discard
+ *  - Safe handling of invalid inputs
+ *  - updateTokenRealtime() for single-token live updates
+ *  - updateBackdropRealtime() for backdrop setting changes
  */
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { ThemeId, THEME_IDS, THEMES, applyTheme, applyPreset, getBuiltInPresets } from './index';
+import { ThemeId, THEME_IDS, THEMES, applyTheme, applyPreset, getBuiltInPresets, DEFAULT_MATRIX_RAIN_HUE } from './index';
 import { ThemePreset, BackdropType } from './tokens';
+import {
+  applyTokensRealtime,
+  applySingleToken,
+  applyMatrixRainHue,
+  snapshotCurrentTokens,
+  restoreTokenSnapshot,
+  type TokenSnapshot,
+} from './applyTheme';
 
 const api = (window as any).electronAPI;
 
@@ -23,7 +35,7 @@ interface ThemeContextValue {
   /** Whether the current theme shows CRT overlay */
   showCrtOverlay: boolean;
 
-  // ── Sprint 16 Addendum: Preset system ──
+  // ── Sprint 16: Preset system ──
   /** All available presets (built-in + user-saved) */
   presets: ThemePreset[];
   /** The currently active preset */
@@ -47,6 +59,28 @@ interface ThemeContextValue {
   backdropIntensity: number;
   matrixRainEnabled: boolean;
   crtOverlayEnabled: boolean;
+
+  // ── Sprint 20: Real-time editing ──
+  /** Matrix rain character hue color. Defaults to '#00ff41'. */
+  matrixRainHue: string;
+  /** Update a single token in real-time (CSS var updates instantly). */
+  updateTokenRealtime: (key: string, value: string) => void;
+  /** Update the matrix rain hue in real-time. */
+  updateMatrixRainHue: (hue: string) => void;
+  /** Reset matrix rain hue to default (#00ff41). */
+  resetMatrixRainHue: () => void;
+  /** Update backdrop settings in real-time. */
+  updateBackdropRealtime: (settings: Partial<{
+    backdropType: BackdropType;
+    backdropOpacity: number;
+    backdropIntensity: number;
+    matrixRainEnabled: boolean;
+    crtOverlayEnabled: boolean;
+  }>) => void;
+  /** Take a snapshot of current theme state for later restore. */
+  takeSnapshot: () => TokenSnapshot;
+  /** Restore a previous snapshot (cancel/discard changes). */
+  restoreSnapshot: (snapshot: TokenSnapshot) => void;
 }
 
 const ThemeCtx = createContext<ThemeContextValue>({
@@ -67,6 +101,14 @@ const ThemeCtx = createContext<ThemeContextValue>({
   backdropIntensity: 1.0,
   matrixRainEnabled: true,
   crtOverlayEnabled: true,
+  // Sprint 20
+  matrixRainHue: DEFAULT_MATRIX_RAIN_HUE,
+  updateTokenRealtime: () => {},
+  updateMatrixRainHue: () => {},
+  resetMatrixRainHue: () => {},
+  updateBackdropRealtime: () => {},
+  takeSnapshot: () => ({ tokens: {}, matrixRainHue: DEFAULT_MATRIX_RAIN_HUE, dataTheme: 'matrix', timestamp: 0 }),
+  restoreSnapshot: () => {},
 });
 
 export function useTheme(): ThemeContextValue {
@@ -81,7 +123,14 @@ const ACTIVE_PRESET_KEY = 'gdeveloper_active_preset';
 function loadPresetsFromStorage(): ThemePreset[] {
   try {
     const raw = localStorage.getItem(PRESETS_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw) as ThemePreset[];
+      // Sprint 20: Ensure legacy presets have matrixRainHue
+      return parsed.map(p => ({
+        ...p,
+        matrixRainHue: p.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE,
+      }));
+    }
   } catch {}
   return [];
 }
@@ -130,6 +179,9 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
   const [matrixRainEnabled, setMatrixRainEnabled] = useState(true);
   const [crtOverlayEnabled, setCrtOverlayEnabled] = useState(true);
 
+  // Sprint 20: Matrix rain hue
+  const [matrixRainHue, setMatrixRainHueState] = useState<string>(DEFAULT_MATRIX_RAIN_HUE);
+
   // All presets combined
   const allPresets = [...builtInPresets, ...userPresets];
 
@@ -170,6 +222,11 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
         setMatrixRainEnabled(target.matrixRainEnabled);
         setCrtOverlayEnabled(target.crtOverlayEnabled);
 
+        // Sprint 20: Hydrate rain hue
+        const hue = target.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE;
+        setMatrixRainHueState(hue);
+        applyMatrixRainHue(hue);
+
         // Map preset ID to legacy themeId for backward compat
         if (THEME_IDS.includes(target.id as ThemeId)) {
           setThemeId(target.id as ThemeId);
@@ -177,6 +234,7 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
       } catch {
         // Fallback: keep matrix default
         applyTheme('matrix');
+        applyMatrixRainHue(DEFAULT_MATRIX_RAIN_HUE);
       }
       setHydrated(true);
     };
@@ -202,6 +260,10 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
       setBackdropIntensity(preset.backdropIntensity);
       setMatrixRainEnabled(preset.matrixRainEnabled);
       setCrtOverlayEnabled(preset.crtOverlayEnabled);
+      // Sprint 20
+      const hue = preset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE;
+      setMatrixRainHueState(hue);
+      applyMatrixRainHue(hue);
       saveActivePresetId(id);
     }
     // Persist via IPC
@@ -223,6 +285,10 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
     setBackdropIntensity(preset.backdropIntensity);
     setMatrixRainEnabled(preset.matrixRainEnabled);
     setCrtOverlayEnabled(preset.crtOverlayEnabled);
+    // Sprint 20
+    const hue = preset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE;
+    setMatrixRainHueState(hue);
+    applyMatrixRainHue(hue);
     saveActivePresetId(presetId);
 
     // Update legacy themeId for compat
@@ -235,7 +301,12 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
   // ── Save preset ──
   const savePresetFn = useCallback((preset: ThemePreset): ThemePreset => {
     const now = new Date().toISOString();
-    const updated = { ...preset, updatedAt: now };
+    // Sprint 20: Ensure matrixRainHue is included
+    const updated: ThemePreset = {
+      ...preset,
+      matrixRainHue: preset.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE,
+      updatedAt: now,
+    };
 
     setUserPresets(prev => {
       const existing = prev.findIndex(p => p.id === updated.id);
@@ -268,6 +339,7 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
       createdAt: now,
       updatedAt: now,
       tokens: { ...source.tokens },
+      matrixRainHue: source.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE,
     };
 
     setUserPresets(prev => {
@@ -298,10 +370,9 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
     return true;
   }, [userPresets, activePresetId, applyPresetById]);
 
-  // ── Live preview ──
+  // ── Live preview (legacy) ──
   const previewTokens = useCallback((tokens: Record<string, string>) => {
-    const { applyTokenMap } = require('./index');
-    applyTokenMap(tokens, 'preview');
+    applyTokensRealtime(tokens, 'preview');
   }, []);
 
   const cancelPreview = useCallback(() => {
@@ -311,10 +382,60 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
       applyPreset(current);
     } else {
       applyTheme('matrix');
+      applyMatrixRainHue(DEFAULT_MATRIX_RAIN_HUE);
     }
   }, [builtInPresets, userPresets, activePresetId]);
 
-  const tokens = THEMES[themeId] || THEMES.matrix;
+  // ── Sprint 20: Real-time single-token update ──
+  const updateTokenRealtime = useCallback((key: string, value: string) => {
+    applySingleToken(key, value);
+  }, []);
+
+  // ── Sprint 20: Matrix rain hue ──
+  const updateMatrixRainHueCb = useCallback((hue: string) => {
+    setMatrixRainHueState(hue);
+    applyMatrixRainHue(hue);
+  }, []);
+
+  const resetMatrixRainHue = useCallback(() => {
+    setMatrixRainHueState(DEFAULT_MATRIX_RAIN_HUE);
+    applyMatrixRainHue(DEFAULT_MATRIX_RAIN_HUE);
+  }, []);
+
+  // ── Sprint 20: Real-time backdrop updates ──
+  const updateBackdropRealtime = useCallback((settings: Partial<{
+    backdropType: BackdropType;
+    backdropOpacity: number;
+    backdropIntensity: number;
+    matrixRainEnabled: boolean;
+    crtOverlayEnabled: boolean;
+  }>) => {
+    if (settings.backdropType !== undefined) setBackdropType(settings.backdropType);
+    if (settings.backdropOpacity !== undefined) setBackdropOpacity(settings.backdropOpacity);
+    if (settings.backdropIntensity !== undefined) setBackdropIntensity(settings.backdropIntensity);
+    if (settings.matrixRainEnabled !== undefined) setMatrixRainEnabled(settings.matrixRainEnabled);
+    if (settings.crtOverlayEnabled !== undefined) setCrtOverlayEnabled(settings.crtOverlayEnabled);
+  }, []);
+
+  // ── Sprint 20: Snapshot / restore ──
+  const takeSnapshot = useCallback((): TokenSnapshot => {
+    return snapshotCurrentTokens();
+  }, []);
+
+  const restoreSnapshotCb = useCallback((snapshot: TokenSnapshot) => {
+    restoreTokenSnapshot(snapshot);
+    // Also restore React state from the active preset
+    const all = [...builtInPresets, ...userPresets];
+    const current = all.find(p => p.id === activePresetId);
+    if (current) {
+      setBackdropType(current.backdrop);
+      setBackdropOpacity(current.backdropOpacity);
+      setBackdropIntensity(current.backdropIntensity);
+      setMatrixRainEnabled(current.matrixRainEnabled);
+      setCrtOverlayEnabled(current.crtOverlayEnabled);
+      setMatrixRainHueState(current.matrixRainHue || DEFAULT_MATRIX_RAIN_HUE);
+    }
+  }, [builtInPresets, userPresets, activePresetId]);
 
   return (
     <ThemeCtx.Provider value={{
@@ -335,6 +456,14 @@ export function ThemeProvider({ initialTheme = 'matrix', children }: ThemeProvid
       backdropIntensity,
       matrixRainEnabled,
       crtOverlayEnabled,
+      // Sprint 20
+      matrixRainHue,
+      updateTokenRealtime,
+      updateMatrixRainHue: updateMatrixRainHueCb,
+      resetMatrixRainHue,
+      updateBackdropRealtime,
+      takeSnapshot,
+      restoreSnapshot: restoreSnapshotCb,
     }}>
       {children}
     </ThemeCtx.Provider>
