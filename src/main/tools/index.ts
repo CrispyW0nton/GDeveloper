@@ -22,7 +22,7 @@ import { executeTaskPlan, getActivePlan, type TaskPlanInput } from './taskPlan';
 import {
   completeActive, advanceToNextPending, getActiveTask, getTodoProgress,
 } from '../orchestration/todoManager';
-import { updateProgress as updateStateMachineProgress } from '../orchestration/autoContinueState';
+import { executeTaskTool, TASK_TOOL_DEFINITION, type TaskToolInput } from './taskTool';
 import * as compareEngine from '../compare';
 import type { CompareFilters, HunkAction, SyncDirection } from '../compare';
 
@@ -334,6 +334,8 @@ export const LOCAL_TOOL_DEFINITIONS: LocalToolDef[] = [
       required: [],
     },
   },
+  // ─── Sprint 27.3: Claude Code TodoWrite tool ───
+  TASK_TOOL_DEFINITION as any,
   // ─── Sprint 27: Compare Agent Tools ───
   {
     name: 'compare_file',
@@ -494,6 +496,12 @@ export async function executeLocalTool(
         result = JSON.stringify(tpResult);
         break;
       }
+      // ─── Sprint 27.3: Claude Code TodoWrite tool ───
+      case 'todo_write': {
+        const twResult = executeTaskTool(args as unknown as TaskToolInput);
+        result = JSON.stringify(twResult);
+        break;
+      }
       // ─── Sprint 27.2: Task Lifecycle ───
       case 'todo_complete': {
         const notes = args.notes as string | undefined;
@@ -504,7 +512,6 @@ export async function executeLocalTool(
           nextTask = advanceToNextPending(_toolSessionId);
         }
         const progress = getTodoProgress(_toolSessionId);
-        updateStateMachineProgress(progress.done, progress.total);
         result = JSON.stringify({
           success: !!completed,
           completed: completed ? { id: completed.id, content: completed.content } : null,

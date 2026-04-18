@@ -31,6 +31,8 @@ export interface LLMStreamChunk {
   type: 'text' | 'tool_call' | 'done';
   content?: string;
   toolCall?: { id: string; name: string; input: Record<string, unknown> };
+  /** Sprint 27.3: stop_reason from Anthropic message_delta (only on 'done' chunks) */
+  stopReason?: string;
 }
 
 // ─── GitHub Gateway ───

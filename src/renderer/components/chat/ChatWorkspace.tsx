@@ -19,6 +19,7 @@ import SuggestionCards from './SuggestionCards';
 import FollowupButtons from './FollowupButtons';
 import ToolCallCard from './ToolCallCard';
 import AutoContinueToggle, { type AutoContinueStatus, type AutoContinuePhase } from './AutoContinueToggle';
+import ToolCallBlock from './ToolCallBlock';
 import TaskQueuePanel, { type TodoItem } from './TaskQueuePanel';
 import RateLimitIndicator, { type RateLimitSnapshot, type RetryState } from './RateLimitIndicator';
 import ModelPickerInline from './ModelPickerInline';
@@ -125,7 +126,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     tasksCompleted: 0,
     tasksTotal: 0,
   });
-  const autoContinueDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Sprint 27.3: autoContinueDebounceRef REMOVED — no more timer-based nudges
 
   // Sprint 27.2: Task Queue Panel state
   const [todoTasks, setTodoTasks] = useState<TodoItem[]>([]);
@@ -628,231 +629,21 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     setStreamingContent('');
     setStreamingToolCalls([]);
 
-    // Sprint 24: Auto-continue — send follow-up nudge if active
-    if (autoContinueStatus.active && autoContinueStatus.phase !== 'paused') {
-      scheduleAutoContinue(lastResponseContent);
-    }
+    // Sprint 27.3: Auto-continue nudge REMOVED — loop uses stop_reason only
   };
 
-  // Sprint 27.2: Fixed auto-continue scheduler — uses shouldFireNudge state machine
-  // Bug H fix: only fires when shouldFireNudge() returns { fire: true }
-  // Bug B fix: step counter is now read from state machine snapshot
-  const scheduleAutoContinue = useCallback(async (_lastContent: string) => {
-    if (!api?.autoContinueStatus) return;
+  // Sprint 27.3: scheduleAutoContinue REMOVED — loop uses stop_reason only
 
-    // Cancel any existing scheduled turn
-    if (autoContinueDebounceRef.current) {
-      clearTimeout(autoContinueDebounceRef.current);
-      autoContinueDebounceRef.current = null;
-    }
-
-    // Don't schedule while user is typing
-    if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
-      return;
-    }
-
-    try {
-      const statusResult = await api.autoContinueStatus();
-      const status: AutoContinueStatus = statusResult;
-      setAutoContinueStatus(status);
-      if (!status.active || status.phase === 'paused') return;
-
-      // Sprint 27.2: Ask the state machine if we should fire
-      const fireCheck = api.autoContinueShouldFire
-        ? await api.autoContinueShouldFire()
-        : { fire: true, reason: 'OK', step: status.currentIteration, maxSteps: status.maxIterations };
-
-      if (!fireCheck.fire) {
-        // State machine says no — show reason in system message if it's a stall/text-only pause
-        if (fireCheck.reason && !fireCheck.reason.startsWith('Not running')) {
-          const pauseMsg: Message = {
-            id: `msg-pause-${Date.now()}`,
-            role: 'system',
-            content: `Auto-Continue paused: ${fireCheck.reason}`,
-            timestamp: new Date().toISOString(),
-          };
-          setMessages(prev => [...prev, pauseMsg]);
-          // Update status to reflect paused state
-          const updatedStatus = await api.autoContinueStatus();
-          setAutoContinueStatus(updatedStatus);
-        }
-        return;
-      }
-
-      // Debounce: wait 500ms before sending next nudge
-      const debounceMs = 500;
-      autoContinueDebounceRef.current = setTimeout(async () => {
-        autoContinueDebounceRef.current = null;
-
-        // Re-check state (user might have cancelled during debounce)
-        const recheck = await api.autoContinueStatus();
-        setAutoContinueStatus(recheck);
-        if (!recheck.active || recheck.phase === 'paused') return;
-
-        // Re-check shouldFire (state may have changed during debounce)
-        const reFireCheck = api.autoContinueShouldFire
-          ? await api.autoContinueShouldFire()
-          : { fire: true, step: recheck.currentIteration, maxSteps: recheck.maxIterations };
-        if (!reFireCheck.fire) return;
-
-        // Don't auto-continue while user is typing
-        if (inputRef.current && document.activeElement === inputRef.current && (inputRef.current.value || '').trim().length > 0) {
-          return;
-        }
-
-        // Build and send the nudge — use step from state machine (Bug B fix)
-        const iter = reFireCheck.step + 1;
-        const max = reFireCheck.maxSteps;
-        const taskInfo = recheck.tasksTotal > 0
-          ? ` (${recheck.tasksCompleted}/${recheck.tasksTotal} tasks complete)`
-          : '';
-
-        // Sprint 27.2: Don't nudge if all tasks are already complete
-        if (recheck.tasksTotal > 0 && recheck.tasksCompleted >= recheck.tasksTotal) {
-          // All tasks done — stop auto-continue instead of sending another nudge
-          try {
-            if (api?.autoContinueStop) await api.autoContinueStop('completion');
-            const finalStatus = await api.autoContinueStatus();
-            setAutoContinueStatus(finalStatus);
-          } catch { /* ignore */ }
-          const doneMsg: Message = {
-            id: `msg-done-${Date.now()}`,
-            role: 'system',
-            content: `Auto-Continue stopped: all ${recheck.tasksTotal} tasks complete.`,
-            timestamp: new Date().toISOString(),
-          };
-          setMessages(prev => [...prev, doneMsg]);
-          return;
-        }
-
-        const nudge = `Continue with the current task (step ${iter}/${max})${taskInfo}. If all tasks are complete, say "All tasks are complete."`;
-
-        // Add auto-continue nudge as system indicator
-        const nudgeMsg: Message = {
-          id: `msg-nudge-${Date.now()}`,
-          role: 'system',
-          content: `Auto-Continue: step ${iter}/${max}${taskInfo}`,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages(prev => [...prev, nudgeMsg]);
-
-        // Use direct send to avoid re-triggering input state
-        if (api?.sendMessage) {
-          setIsLoading(true);
-          setStreamingContent('');
-          setStreamingToolCalls([]);
-
-          try {
-            const result = await api.sendMessage(session.id, nudge);
-            // Sprint 27.2 Bug C fix: Always render assistant text content
-            const assistantContent = sanitizeContent(result.content);
-            const assistantMsg: Message = {
-              id: result.id || `msg-auto-${Date.now()}`,
-              role: 'assistant',
-              content: assistantContent || '(tool execution)',
-              toolCalls: result.toolCalls?.map((tc: any) => ({
-                name: tc.name,
-                description: `Called ${tc.name}`,
-                status: 'success' as const,
-                input: tc.input || undefined,
-                result: tc.result || undefined,
-              })),
-              timestamp: new Date().toISOString(),
-            };
-            setMessages(prev => [...prev, assistantMsg]);
-
-            setIsLoading(false);
-            setStreamingContent('');
-            setStreamingToolCalls([]);
-
-            // Check if we should continue again
-            const nextCheck = await api.autoContinueStatus();
-            setAutoContinueStatus(nextCheck);
-            if (nextCheck.active && nextCheck.phase !== 'paused') {
-              scheduleAutoContinue(result.content || '');
-            }
-          } catch (err) {
-            setIsLoading(false);
-            // Record error — auto-continue engine tracks consecutive errors
-            try {
-              const errStatus = await api.autoContinueStatus();
-              setAutoContinueStatus(errStatus);
-            } catch { /* ignore */ }
-          }
-        }
-      }, debounceMs);
-    } catch { /* ignore */ }
-  }, [session.id]);
-
-  // Sprint 22: Clean up debounce on unmount
-  useEffect(() => {
-    return () => {
-      if (autoContinueDebounceRef.current) {
-        clearTimeout(autoContinueDebounceRef.current);
-      }
-    };
+  // Sprint 27.3: Auto-continue debounce, toggle, cancel, resume, escape — ALL REMOVED
+  // The agent loop now runs to completion based on stop_reason.
+  // AutoContinueToggle is kept as a UI element but is a no-op.
+  const handleAutoContinueCancel = useCallback(async () => {
+    // No-op: loop termination is now driven by stop_reason
   }, []);
 
-  // Sprint 24: Toggle auto-continue ON/OFF — calls start/stop IPC
-  useEffect(() => {
-    if (!api?.autoContinueStart || !api?.autoContinueStop) return;
-
-    const syncState = async () => {
-      if (autoContinueEnabled) {
-        // Start auto-continue engine in main process
-        const state = await api.autoContinueStart({
-          maxIterations: autoContinueMaxIterations || 20,
-          maxElapsedMs: 10 * 60 * 1000,
-          debounceMs: 500,
-        });
-        setAutoContinueStatus(state);
-      } else {
-        // Only stop if currently active
-        const currentStatus = await api.autoContinueStatus();
-        if (currentStatus.active) {
-          const state = await api.autoContinueStop('user');
-          setAutoContinueStatus(state);
-        }
-      }
-    };
-    syncState();
-  }, [autoContinueEnabled, autoContinueMaxIterations]);
-
-  // Sprint 19+22: Handle auto-continue cancel
-  const handleAutoContinueCancel = useCallback(async () => {
-    if (autoContinueDebounceRef.current) {
-      clearTimeout(autoContinueDebounceRef.current);
-      autoContinueDebounceRef.current = null;
-    }
-    if (api?.autoContinueStop) {
-      const result = await api.autoContinueStop('user');
-      setAutoContinueStatus(result);
-    }
-    if (onAutoContinueToggle) onAutoContinueToggle(); // toggle OFF in store
-  }, [onAutoContinueToggle]);
-
-  // Sprint 22: Resume handler
   const handleAutoContinueResume = useCallback(async () => {
-    if (api?.autoContinueResume) {
-      const result = await api.autoContinueResume();
-      setAutoContinueStatus(result);
-      // Schedule next turn after resume
-      if (result.active) {
-        scheduleAutoContinue('');
-      }
-    }
-  }, [scheduleAutoContinue]);
-
-  // Sprint 19: Escape key cancels auto-continue
-  useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && autoContinueStatus.active) {
-        handleAutoContinueCancel();
-      }
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [autoContinueStatus.active, handleAutoContinueCancel]);
+    // No-op: loop termination is now driven by stop_reason
+  }, []);
 
   const handleFollowupAction = useCallback((prompt: string) => {
     if (prompt.startsWith('/')) {

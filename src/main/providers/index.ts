@@ -333,6 +333,7 @@ export class ClaudeProvider implements ILLMProvider {
     let buffer = '';
     let currentToolCall: { id: string; name: string; inputJson: string } | null = null;
     let fullStreamContent = '';
+    let streamStopReason = '';
 
     try {
       while (true) {
@@ -391,6 +392,10 @@ export class ClaudeProvider implements ILLMProvider {
                   recordSessionUsage(streamInput, streamOutput);
                 }
               }
+              // Sprint 27.3: Capture stop_reason from message_delta
+              if (event.delta?.stop_reason) {
+                streamStopReason = event.delta.stop_reason;
+              }
             }
           } catch {
             // Skip unparseable lines
@@ -415,7 +420,7 @@ export class ClaudeProvider implements ILLMProvider {
       });
     }
 
-    yield { type: 'done' };
+    yield { type: 'done', stopReason: streamStopReason || 'end_turn' };
   }
 
   countTokens(text: string): number {
@@ -667,9 +672,10 @@ export async function streamChatToRenderer(
   sessionId: string,
   systemPrompt?: string,
   tools?: ToolDefinition[]
-): Promise<{ content: string; toolCalls?: any[] }> {
+): Promise<{ content: string; toolCalls?: any[]; stopReason: string }> {
   let fullContent = '';
   const toolCalls: any[] = [];
+  let stopReason = 'end_turn';
 
   try {
     for await (const chunk of (provider as ClaudeProvider).streamMessage(messages, tools, systemPrompt)) {
@@ -689,10 +695,15 @@ export async function streamChatToRenderer(
           toolCall: chunk.toolCall
         });
       } else if (chunk.type === 'done') {
+        // Sprint 27.3: Capture stop_reason from streaming
+        if (chunk.stopReason) {
+          stopReason = chunk.stopReason;
+        }
         win?.webContents.send('chat:stream-chunk', {
           sessionId,
           type: 'done',
-          fullContent
+          fullContent,
+          stopReason,
         });
       }
     }
@@ -706,5 +717,5 @@ export async function streamChatToRenderer(
     throw error;
   }
 
-  return { content: fullContent, toolCalls: toolCalls.length > 0 ? toolCalls : undefined };
+  return { content: fullContent, toolCalls: toolCalls.length > 0 ? toolCalls : undefined, stopReason };
 }
