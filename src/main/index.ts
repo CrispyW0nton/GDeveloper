@@ -25,6 +25,18 @@ import {
   gitPull, gitPush, gitFetch, gitStash, gitStashPop,
   gitBranches, gitCheckout, gitGetStatus, gitClone, isGitRepo,
 } from './tools';
+import { setTaskPlanSessionId } from './tools/taskPlan';
+import {
+  startMachine as startStateMachine,
+  stopMachine as stopStateMachine,
+  pauseByUser as pauseStateMachine,
+  resumeByUser as resumeStateMachine,
+  recordTurn,
+  shouldFireNudge,
+  getSnapshot as getStateMachineSnapshot,
+  resetMachine as resetStateMachine,
+  updateProgress as updateStateMachineProgress,
+} from './orchestration/autoContinueState';
 import {
   getAllCommands, getCommand, getExecutionMode, setExecutionMode,
   WRITE_TOOL_NAMES, WorkspaceContext, setCommandsMainWindow,
@@ -515,6 +527,9 @@ function registerIPCHandlers(): void {
       if (mode === 'plan') {
         enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`;
       }
+
+      // Sprint 27.2: Wire sessionId so task_plan syncs to todoManager (Bug A fix)
+      setTaskPlanSessionId(sessionId);
 
       // ─── Agentic Loop: stream → execute tools → continue ───
       // Sprint 27: Increased max loops for long-task orchestration, added checkpoint injection
