@@ -354,6 +354,26 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     if (!api?.onActivePlanUpdate) return;
     const unsubscribe = api.onActivePlanUpdate((data: any) => {
       if (data.sessionId !== session.id) return;
+
+      // Sprint 37 Fix #1: Honor explicit clear signals from the main process.
+      // Fresh Chat / session-cleared sends { plan: null, action: 'clear',
+      // reason: 'session-cleared' }. The previous guard below ("never downgrade")
+      // dropped these and caused TaskPlanCard to persist after Fresh Chat.
+      const isClearSignal =
+        data.action === 'clear' ||
+        data.reason === 'session-cleared' ||
+        data.plan === null;
+      if (isClearSignal) {
+        setActivePlanState(null);
+        activePlanRef.current = null;
+        // Dev-console breadcrumb for Probe C verification.
+        try {
+          // eslint-disable-next-line no-console
+          console.log('chat:active-plan-update', { plan: null, reason: data.reason || 'session-cleared' });
+        } catch { /* noop */ }
+        return;
+      }
+
       if (!data.plan?.tasks?.length) return; // Never downgrade — ignore empty plans
       setActivePlanState(data.plan);
       activePlanRef.current = data.plan;

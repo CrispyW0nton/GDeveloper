@@ -803,6 +803,7 @@ function registerIPCHandlers(): void {
         planId: null,
         plan: null,
         action: 'clear',
+        reason: 'session-cleared',
         ts: Date.now(),
       });
     }

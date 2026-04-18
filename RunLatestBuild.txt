@@ -1,0 +1,6 @@
+cd C:\Users\NewAdmin\Documents\GDeveloper\Workspaces\GDeveloper
+git fetch origin genspark_ai_developer
+git checkout genspark_ai_developer
+git pull origin genspark_ai_developer
+npm install
+npm run dev
