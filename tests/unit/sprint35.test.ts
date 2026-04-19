@@ -111,7 +111,7 @@ describe('Sprint 35 — Fix 2: Nudge is not persisted to DB', () => {
     expect(surroundingBlock).toContain('EPHEMERAL');
   });
 
-  it('only one persistMessage call exists in the nudge block (for assistant, not for nudge)', () => {
+  it('persistMessage calls in the nudge block always persist assistant content, never the nudge itself', () => {
     // Find the "Case 1: No tool calls" section
     const caseIdx = agentLoopSrc.indexOf('Case 1: No tool calls');
     expect(caseIdx).toBeGreaterThan(0);
@@ -122,10 +122,24 @@ describe('Sprint 35 — Fix 2: Nudge is not persisted to DB', () => {
 
     const nudgeSection = agentLoopSrc.substring(caseIdx, case2Idx);
 
-    // Count persistMessage calls in the nudge section
-    const persistCalls = nudgeSection.match(/options\.persistMessage\?\.\(/g) || [];
-    // Should be exactly 1: for the assistant response, NOT for the nudge
-    expect(persistCalls.length).toBe(1);
+    // Sprint 35 Fix 2 invariant (extended post-Sprint 27.5.1):
+    //   Case 1 may legitimately call persistMessage multiple times — for the
+    //   assistant response before the no-tools nudge, for the todo-continuation
+    //   nudge's assistant response, and for the stuck_after_todo exit. What is
+    //   forbidden is persisting the nudge TEXT itself. Enforce that invariant:
+    //     - every call uses the 'assistant' role (no 'user' role persists)
+    //     - no call's content argument references a nudge constant
+    const persistCallSignatures =
+      nudgeSection.match(/options\.persistMessage\?\.\([^)]*\)/g) || [];
+    expect(persistCallSignatures.length).toBeGreaterThanOrEqual(1);
+
+    for (const sig of persistCallSignatures) {
+      expect(sig).toContain("'assistant'");
+      expect(sig).not.toContain("'user'");
+      expect(sig).not.toContain('ephemeralNudge');
+      expect(sig).not.toContain('TODO_NUDGE_MESSAGE');
+      expect(sig).not.toContain('noToolsUsed()');
+    }
   });
 });
 
