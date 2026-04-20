@@ -45,17 +45,62 @@ const DESTRUCTIVE_PATTERNS = [
   /\bdd\s+if=/i,
 ];
 
-// Absolutely blocked commands
+// Absolutely blocked commands.
+// BUG-02: Hardened far beyond the original nine patterns to cover the
+// remote-code-execution and credential-exfiltration vectors flagged in the
+// audit. This is defense-in-depth on top of running inside the workspace
+// dir — the tool still executes with a real shell, so a clever enough
+// payload will still escape. The goal here is to block the obvious,
+// scripted-attack shapes without annoying legitimate shell work.
+//
+// Reference patterns drawn from: the audit (pipe-to-shell, subshell auth
+// writes, `rm -rf .`), Cline's ShellExecutor blocklist, HackTricks'
+// Electron-security guide, and common reverse-shell cheatsheets.
 const BLOCKED_PATTERNS = [
-  /\brm\s+-rf\s+\/\s*$/i,
-  /\brm\s+-rf\s+\/\*/i,
+  // Root-level rm — the classic
+  /\brm\s+-rf?\s+\/\s*$/i,
+  /\brm\s+-rf?\s+\/\*/i,
+  // Wipe current workspace
+  /\brm\s+-rf?\s+\.\s*$/i,
+  /\brm\s+-rf?\s+\.\/?\s*(?:&|;|\|\||$)/i,
+  // Privilege escalation
   /\bsudo\b/i,
-  /\bchmod\s+777\s+\//i,
-  /\b:()\s*\{\s*:\|\:&\s*\}\s*;/,  // fork bomb
+  /\bsu\s+-\b/i,
+  // Power / system control
   /\bshutdown\b/i,
   /\breboot\b/i,
   /\bhalt\b/i,
   /\binit\s+0\b/i,
+  /\bpoweroff\b/i,
+  // Fork bomb
+  /:\(\)\s*\{\s*:\s*\|\s*:&\s*\}\s*;/,
+  // Filesystem-level destruction
+  /\bmkfs(?:\.[a-z0-9]+)?\b/i,
+  /\bdd\s+.*of=\/dev\/(?:sd[a-z]|nvme|mmcblk|hd[a-z])/i,
+  /\bformat\s+[a-z]:/i,
+  // Pipe-to-shell RCE (curl … | sh, wget … | bash, iwr … | iex, etc.)
+  /(?:curl|wget|fetch|iwr|invoke-webrequest)\b[^|`;&]*\|\s*(?:sh|bash|zsh|ksh|dash|pwsh|powershell|iex\b)/i,
+  // Same pattern via command substitution: bash -c "$(curl …)"
+  /(?:sh|bash|zsh|ksh|dash)\s+-c\s+['"]?\$\(\s*(?:curl|wget)/i,
+  /(?:sh|bash|zsh|ksh|dash)\s+-c\s+['"]?`\s*(?:curl|wget)/i,
+  // Reverse shells
+  /\/dev\/(?:tcp|udp)\//i,
+  /\bnc(?:at)?\b[^|;&]*\s-(?:[a-z]*e[a-z]*)\b/i,
+  /\bbash\s+-i\b/i,
+  // Credential / config-store writes (ssh keys, cloud creds, shell rc files)
+  /authorized_keys\b/i,
+  />\s*(?:~|\$HOME|\$\{HOME\})[\/\\]\.(?:ssh|aws|gcloud|kube|docker|npmrc|pypirc|env|bashrc|zshrc|profile|bash_profile)\b/i,
+  />>\s*(?:~|\$HOME|\$\{HOME\})[\/\\]\.(?:ssh|aws|gcloud|kube|docker|npmrc|pypirc|env|bashrc|zshrc|profile|bash_profile)\b/i,
+  // Setuid / setgid escalation via chmod (u+s, g+s, 4xxx, 6xxx)
+  /\bchmod\s+(?:[ugoa]*[+=][a-rwxXst]*s|[0-7]?[4-7]\d{3})\b/i,
+  // chown to root
+  /\bchown\s+(?:-R\s+)?(?:root|0)[:.]/i,
+  // LD_PRELOAD / DYLD_INSERT_LIBRARIES library injection
+  /\b(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES)\s*=/i,
+  // chmod 777 on any leading-slash absolute path
+  /\bchmod\s+777\s+\//i,
+  // eval of network or decoded content
+  /\beval\s+.*(?:curl|wget|base64\s+-d|base64\s+--decode|xxd\s+-r|openssl\s+enc\s+-d)/i,
 ];
 
 export function isDestructiveCommand(command: string): boolean {

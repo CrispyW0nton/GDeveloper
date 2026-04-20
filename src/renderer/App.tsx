@@ -346,6 +346,7 @@ function AppInner() {
               onRefreshModels={handleRefreshModels}
               isRefreshingModels={isRefreshingModels}
               onOpenCompareWorkspace={openCompareWorkspace}
+              onOpenMCPSettings={() => setTab('mcp')}
             />
           );
         }

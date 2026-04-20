@@ -264,6 +264,24 @@ export interface ModelInfo {
  * The app dynamically fetches the real list from /v1/models on startup
  * and caches it. This list is ONLY used if the API call fails.
  */
+/**
+ * BUG-10: Single source of truth for the default Claude model ID.
+ *
+ * Previously the default was inconsistent: `ProviderRegistry._selectedModel`
+ * used 'claude-3-5-sonnet-20241022' while `ClaudeProvider`'s constructor
+ * defaulted to 'claude-sonnet-4-6', and half a dozen call sites in
+ * src/main/index.ts hardcoded either one or the other. If the app hit the
+ * constructor-default path on a user whose account / region hadn't been
+ * rolled out to the newer model, every request would 404.
+ *
+ * Rule: every place that needs a "safe default model" must import this
+ * constant. When we want to bump the default, we change it here and the
+ * whole app follows. The chosen value MUST also appear in
+ * SAFE_FALLBACK_MODELS below so first-boot requests have maxOutput metadata
+ * available before /v1/models discovery runs.
+ */
+export const DEFAULT_MODEL_ID = 'claude-3-5-sonnet-20241022';
+
 const SAFE_FALLBACK_MODELS: ModelInfo[] = [
   { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
   { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
@@ -339,10 +357,37 @@ export class ClaudeProvider implements ILLMProvider {
   // message-delta events and orphaned connections.
   private activeStream: AbortController | null = null;
 
-  constructor(apiKey: string, model = 'claude-sonnet-4-6', baseUrl = 'https://api.anthropic.com') {
+  constructor(apiKey: string, model: string = DEFAULT_MODEL_ID, baseUrl = 'https://api.anthropic.com') {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl;
+  }
+
+  /**
+   * Sprint 39 / BUG-09: Resolve the max output tokens for the active model.
+   *
+   * Previously max_tokens was hardcoded to 4096 at both API call sites,
+   * which caps Sonnet / Haiku / Opus-4 class models well below their real
+   * output ceiling (8192 – 32768 depending on model). That forces the agent
+   * to take more turns to produce the same amount of code, inflating both
+   * token cost and context-window pressure.
+   *
+   * Resolution order:
+   *   1. Live model cache populated from /v1/models (authoritative: each
+   *      API model entry carries max_output when the Anthropic catalogue
+   *      provides it).
+   *   2. SAFE_FALLBACK_MODELS — our hand-curated baseline shipped with the
+   *      app so first-boot requests aren't capped before discovery runs.
+   *   3. 4096 — matches the prior hardcoded behaviour for truly unknown
+   *      models, so we never regress a request that used to work.
+   */
+  private resolveMaxOutputTokens(): number {
+    const cached = getModelCache();
+    const fromCache = cached?.find(m => m.id === this.model);
+    if (fromCache?.maxOutput) return fromCache.maxOutput;
+    const fromFallback = SAFE_FALLBACK_MODELS.find(m => m.id === this.model);
+    if (fromFallback?.maxOutput) return fromFallback.maxOutput;
+    return 4096;
   }
 
   /**
@@ -379,7 +424,8 @@ export class ClaudeProvider implements ILLMProvider {
 
     const body: any = {
       model: this.model,
-      max_tokens: 4096,
+      // BUG-09: resolved from model metadata, not hardcoded. See resolveMaxOutputTokens.
+      max_tokens: this.resolveMaxOutputTokens(),
       messages: filteredMessages
     };
 
@@ -472,7 +518,8 @@ export class ClaudeProvider implements ILLMProvider {
 
     const body: any = {
       model: this.model,
-      max_tokens: 4096,
+      // BUG-09: resolved from model metadata, not hardcoded. See resolveMaxOutputTokens.
+      max_tokens: this.resolveMaxOutputTokens(),
       messages: filteredMessages,
       stream: true
     };
@@ -540,6 +587,21 @@ export class ClaudeProvider implements ILLMProvider {
     let fullStreamContent = '';
     let streamStopReason = 'end_turn';
     let _firstBlockLogged = false;
+
+    // BUG-03: Track authoritative API-reported usage separately from the
+    // post-loop string-length estimate. The SSE `message_delta` event carries
+    // actual input_tokens / output_tokens when the model stops. Previously
+    // recordSessionUsage was called TWICE per stream (once with the API
+    // numbers inside the loop, then again with estimates after the loop),
+    // double-counting every request against the per-session budget. And
+    // getRateLimiter().recordUsage() was fed ONLY the estimate, so the
+    // rate-limit snapshot was systematically off from reality. After this
+    // fix: both recorders get called exactly once, preferring the API
+    // numbers when we received them and falling back to estimates only if
+    // the stream closed without a message_delta usage payload.
+    let apiInputTokens = 0;
+    let apiOutputTokens = 0;
+    let usageRecordedFromAPI = false;
     let _toolBlockCount = 0; // Sprint 34: track tool_use blocks seen
 
     // Sprint 34: Tools that accept empty input (no required properties)
@@ -676,12 +738,17 @@ export class ClaudeProvider implements ILLMProvider {
                   toolBlocksSeen: _toolBlockCount,
                 }));
               }
-              // Sprint 24: Capture actual usage from message_delta
+              // Sprint 24 / BUG-03: Capture actual usage from message_delta
+              // but DO NOT record yet — defer to a single post-loop call so
+              // we never double-count. Track the flag so the post-loop block
+              // can choose API numbers over estimates.
               if (event.usage) {
                 const streamInput = event.usage.input_tokens || 0;
                 const streamOutput = event.usage.output_tokens || 0;
                 if (streamInput > 0 || streamOutput > 0) {
-                  recordSessionUsage(streamInput, streamOutput);
+                  apiInputTokens = streamInput;
+                  apiOutputTokens = streamOutput;
+                  usageRecordedFromAPI = true;
                 }
               }
             }
@@ -702,11 +769,23 @@ export class ClaudeProvider implements ILLMProvider {
       this.activeStream = null;
     }
 
-    // Sprint 24: Record streaming usage with estimates (message_delta may have recorded actuals)
-    const streamInputTokens = estimateTokens(filteredMessages.map(m => m.content).join(' '));
-    const streamOutputTokens = estimateTokens(fullStreamContent || '');
-    getRateLimiter().recordUsage(streamInputTokens, streamOutputTokens);
-    recordSessionUsage(streamInputTokens, streamOutputTokens);
+    // BUG-03: Single authoritative usage record per stream. Prefer the
+    // API-reported numbers from message_delta when we received them; fall
+    // back to chars/4 estimation only if the stream terminated without a
+    // usage payload (network abort, model error, etc.). Both the
+    // rate-limiter snapshot and the per-session counter now see the SAME
+    // value, exactly once.
+    let recordedInputTokens: number;
+    let recordedOutputTokens: number;
+    if (usageRecordedFromAPI) {
+      recordedInputTokens = apiInputTokens;
+      recordedOutputTokens = apiOutputTokens;
+    } else {
+      recordedInputTokens = estimateTokens(filteredMessages.map(m => m.content).join(' '));
+      recordedOutputTokens = estimateTokens(fullStreamContent || '');
+    }
+    getRateLimiter().recordUsage(recordedInputTokens, recordedOutputTokens);
+    recordSessionUsage(recordedInputTokens, recordedOutputTokens);
 
     // Sprint 24: Parse rate-limit headers from streaming response
     const streamRespHeaders: Record<string, string> = {};
@@ -864,7 +943,7 @@ export class ClaudeProvider implements ILLMProvider {
 // ─── Provider Registry (Sprint 16 + Sprint 25.5: dynamic model state) ───
 class ProviderRegistry {
   private providers: Map<string, ILLMProvider> = new Map();
-  private _selectedModel: string = 'claude-3-5-sonnet-20241022';
+  private _selectedModel: string = DEFAULT_MODEL_ID;
   private _availableModels: ModelInfo[] = SAFE_FALLBACK_MODELS;
   private _modelDiscovered: boolean = false;
 

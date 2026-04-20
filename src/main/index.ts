@@ -11,9 +11,10 @@ import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
 import { IPC_CHANNELS } from './ipc';
+import { validateIPC } from './ipc/validators';
 import { getDatabase } from './db';
 import { getSecureSettings } from './security';
-import { ClaudeProvider, providerRegistry, streamChatToRenderer } from './providers';
+import { ClaudeProvider, DEFAULT_MODEL_ID, providerRegistry, streamChatToRenderer } from './providers';
 import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
 import { getOrchestrationEngine } from './orchestration';
@@ -227,6 +228,25 @@ function registerIPCHandlers(): void {
   const db = getDatabase();
   const github = getGitHub();
 
+  // ─── SEC-02: Global IPC input validation ───────────────
+  //
+  // Wrap every handler registered below in validateIPC(). If the channel
+  // has a zod schema in IPC_SCHEMAS (src/main/ipc/validators.ts), the
+  // incoming args are schema-parsed BEFORE the handler body runs — on
+  // failure the renderer's invoke() rejects with a structured error and
+  // the body is never entered. Channels without a schema fall through
+  // unchanged, so this patch is safe to install globally.
+  //
+  // Implemented as a narrow monkey-patch of ipcMain.handle inside this
+  // registration function (rather than mutating the prototype globally)
+  // so it only affects the handlers we own. This keeps the diff small —
+  // adding validation for a new channel is a one-line schema addition in
+  // validators.ts, no call-site churn needed.
+  const _ipcHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = ((channel: string, listener: any) => {
+    return _ipcHandle(channel, validateIPC(channel, listener));
+  }) as typeof ipcMain.handle;
+
   // ─── Settings ───────────────────────────────────────────
 
   ipcMain.handle(IPC_CHANNELS.SETTINGS_GET, async () => {
@@ -264,9 +284,9 @@ function registerIPCHandlers(): void {
         const result = await claude.validateKey();
         if (result.valid) {
           settings.setApiKey(provider, key);
-          // Sprint 25.5: Register with safe default, then discover + validate
-          const safeDefault = 'claude-3-5-sonnet-20241022';
-          const registeredProvider = new ClaudeProvider(key, safeDefault);
+          // Sprint 25.5: Register with safe default, then discover + validate.
+          // BUG-10: safeDefault now comes from the single DEFAULT_MODEL_ID constant.
+          const registeredProvider = new ClaudeProvider(key, DEFAULT_MODEL_ID);
           providerRegistry.register(registeredProvider);
           // Asynchronously discover models and pick the best one
           registeredProvider.discoverModels().then(models => {
@@ -274,7 +294,7 @@ function registerIPCHandlers(): void {
             const bestModel = providerRegistry.validateSelectedModel();
             console.log(`[Validate] Discovered ${models.length} models, best: ${bestModel}`);
           }).catch(() => {});
-          const bestModel = result.models?.[0] || safeDefault;
+          const bestModel = result.models?.[0] || DEFAULT_MODEL_ID;
           db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
         }
         return { valid: result.valid, error: result.error };
@@ -398,7 +418,7 @@ function registerIPCHandlers(): void {
     // Sprint 16: Model-tool compatibility check
     const selectedModelId = providerRegistry.selectedModel;
     if (!providerRegistry.checkModelToolSupport(selectedModelId)) {
-      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-3-5-sonnet-20241022) in Settings.`;
+      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., ${DEFAULT_MODEL_ID}) in Settings.`;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('chat:stream-chunk', {
           sessionId,
@@ -2271,9 +2291,9 @@ function registerIPCHandlers(): void {
     try {
       const settings = getSecureSettings();
       const all = settings.getSettings();
-      return (all as any).preferences?.defaultModel || 'claude-3-5-sonnet-20241022';
+      return (all as any).preferences?.defaultModel || DEFAULT_MODEL_ID;
     } catch {
-      return 'claude-3-5-sonnet-20241022';
+      return DEFAULT_MODEL_ID;
     }
   });
 
@@ -2673,9 +2693,9 @@ app.whenReady().then(() => {
   for (const providerName of configuredProviders) {
     const key = settings.getApiKey(providerName);
     if (key && providerName === 'claude') {
-      // Register immediately with a safe default model
-      const safeDefault = 'claude-3-5-sonnet-20241022';
-      const claudeInstance = new ClaudeProvider(key, safeDefault);
+      // Register immediately with a safe default model.
+      // BUG-10: safeDefault unified via the single DEFAULT_MODEL_ID constant.
+      const claudeInstance = new ClaudeProvider(key, DEFAULT_MODEL_ID);
       providerRegistry.register(claudeInstance);
 
       // Then discover available models and validate/auto-switch

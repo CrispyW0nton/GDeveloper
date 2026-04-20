@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { join, resolve, relative, isAbsolute, dirname, sep } from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
 import { getDatabase } from '../db';
 import { executeMultiEdit, type MultiEditInput } from './multiEdit';
@@ -755,13 +755,48 @@ function toolSearchFiles(ws: string, args: Record<string, unknown>): string {
   if (!existsSync(absDir)) throw new Error(`Directory not found: ${searchPath}`);
 
   try {
-    let cmd = `grep -rn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.md" --include="*.css" --include="*.html"`;
+    // BUG-02 + BUG-08: Use execFileSync with an argv array instead of
+    // composing a shell command string. Two wins:
+    //   1. `query` is passed as its own argv element, so a malicious AI
+    //      response containing "; rm -rf ." or backticks cannot escape into
+    //      a shell. Previously the only escaping was .replace(/"/g, '\\"'),
+    //      which left every shell metacharacter (backticks, $(), ;, &&,
+    //      redirects) exploitable.
+    //   2. The default extension list is no longer capped at eight
+    //      web-centric extensions. `grep -I` skips binary files naturally,
+    //      and --exclude-dir prunes the usual noisy build / dep dirs, so
+    //      Python, Rust, Go, Java, Ruby, YAML, etc. are all visible.
+    const args: string[] = ['-rnI'];
     if (include) {
-      cmd = `grep -rn --include="${include}"`;
+      args.push(`--include=${include}`);
+    } else {
+      const EXCLUDE_DIRS = [
+        'node_modules', '.git', 'dist', 'build', 'out', 'coverage',
+        '.next', '.nuxt', '.turbo', '.cache',
+        '.venv', 'venv', '__pycache__',
+        'target', // Rust
+        'vendor', // Go / PHP / Ruby
+      ];
+      for (const d of EXCLUDE_DIRS) args.push(`--exclude-dir=${d}`);
     }
-    cmd += ` "${query.replace(/"/g, '\\"')}" "${absDir}" 2>/dev/null || true`;
+    args.push('--', query, absDir);
 
-    const output = execSync(cmd, { maxBuffer: 512 * 1024, timeout: 10000 }).toString();
+    let output = '';
+    try {
+      output = execFileSync('grep', args, {
+        maxBuffer: 512 * 1024,
+        timeout: 10000,
+        encoding: 'utf-8',
+      });
+    } catch (err: any) {
+      // grep exits 1 on "no matches" — that's not a real error, stdout is
+      // empty. Re-throw any other failure shape (missing grep, timeout).
+      if (err && typeof err.status === 'number' && err.status === 1) {
+        output = err.stdout?.toString() || '';
+      } else {
+        throw err;
+      }
+    }
 
     // Relativize paths
     const lines = output.split('\n').filter(Boolean).slice(0, 100);
@@ -781,10 +816,14 @@ function toolRunCommand(ws: string, args: Record<string, unknown>): string {
   const command = String(args.command || '');
   if (!command) throw new Error('command is required');
 
-  // Block obviously dangerous commands
-  const blocked = ['rm -rf /', 'format c:', 'del /f /s /q'];
-  if (blocked.some(b => command.toLowerCase().includes(b))) {
-    throw new Error('Command blocked for safety');
+  // BUG-02: Previously run_command had its own 3-substring blocklist
+  // ('rm -rf /', 'format c:', 'del /f /s /q') while the sibling bash_command
+  // tool had a proper regex-based pipeline. Unify them: both tools now
+  // share isBlockedCommand from bashCommand.ts, which enforces the
+  // hardened pattern set (pipe-to-shell RCE, reverse shells, credential-
+  // store writes, setuid escalation, LD_PRELOAD hijack, etc.).
+  if (isBlockedCommand(command)) {
+    throw new Error('Command blocked for safety — matched a high-risk pattern (see bashCommand BLOCKED_PATTERNS). If this is a false positive, use the multi_edit / write_file / git_* tools instead of shelling out.');
   }
 
   const cwdRel = args.cwd ? String(args.cwd) : '.';
