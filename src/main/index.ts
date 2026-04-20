@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import simpleGit, { SimpleGit } from 'simple-git';
 import { IPC_CHANNELS } from './ipc';
+import { validateIPC } from './ipc/validators';
 import { getDatabase } from './db';
 import { getSecureSettings } from './security';
 import { ClaudeProvider, DEFAULT_MODEL_ID, providerRegistry, streamChatToRenderer } from './providers';
@@ -226,6 +227,25 @@ function registerIPCHandlers(): void {
   const settings = getSecureSettings();
   const db = getDatabase();
   const github = getGitHub();
+
+  // ─── SEC-02: Global IPC input validation ───────────────
+  //
+  // Wrap every handler registered below in validateIPC(). If the channel
+  // has a zod schema in IPC_SCHEMAS (src/main/ipc/validators.ts), the
+  // incoming args are schema-parsed BEFORE the handler body runs — on
+  // failure the renderer's invoke() rejects with a structured error and
+  // the body is never entered. Channels without a schema fall through
+  // unchanged, so this patch is safe to install globally.
+  //
+  // Implemented as a narrow monkey-patch of ipcMain.handle inside this
+  // registration function (rather than mutating the prototype globally)
+  // so it only affects the handlers we own. This keeps the diff small —
+  // adding validation for a new channel is a one-line schema addition in
+  // validators.ts, no call-site churn needed.
+  const _ipcHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = ((channel: string, listener: any) => {
+    return _ipcHandle(channel, validateIPC(channel, listener));
+  }) as typeof ipcMain.handle;
 
   // ─── Settings ───────────────────────────────────────────
 
