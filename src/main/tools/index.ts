@@ -755,9 +755,29 @@ function toolSearchFiles(ws: string, args: Record<string, unknown>): string {
   if (!existsSync(absDir)) throw new Error(`Directory not found: ${searchPath}`);
 
   try {
-    let cmd = `grep -rn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.md" --include="*.css" --include="*.html"`;
+    // BUG-08: Previously the default search was hardcoded to eight
+    // web-centric extensions (*.ts, *.tsx, *.js, *.jsx, *.json, *.md, *.css,
+    // *.html) which made Python, Rust, Go, Java, Ruby, YAML, TOML, SQL,
+    // shell, .env, XML, etc. completely invisible to the agent — a serious
+    // blind spot for a tool that advertises working on "any project".
+    //
+    // New default: grep -I skips binary files automatically (the real
+    // reason the old list existed), and --exclude-dir prunes the noisy
+    // build/dep directories. `include` remains the narrowing knob when the
+    // caller really wants a specific pattern. This matches Cline's default
+    // searchFiles behaviour.
+    let cmd: string;
     if (include) {
-      cmd = `grep -rn --include="${include}"`;
+      cmd = `grep -rnI --include="${include}"`;
+    } else {
+      const EXCLUDE_DIRS = [
+        'node_modules', '.git', 'dist', 'build', 'out', 'coverage',
+        '.next', '.nuxt', '.turbo', '.cache',
+        '.venv', 'venv', '__pycache__',
+        'target', // Rust
+        'vendor', // Go / PHP / Ruby
+      ];
+      cmd = `grep -rnI ${EXCLUDE_DIRS.map(d => `--exclude-dir="${d}"`).join(' ')}`;
     }
     cmd += ` "${query.replace(/"/g, '\\"')}" "${absDir}" 2>/dev/null || true`;
 
