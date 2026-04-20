@@ -127,6 +127,9 @@ interface ChatWorkspaceProps {
   isRefreshingModels?: boolean;
   // Sprint 27: Compare workspace
   onOpenCompareWorkspace?: (sessionId: string) => void;
+  // Sprint 38 Feature 3: Optional callback used by the MCP warning banner
+  // [Manage MCP] button. Parent (App.tsx) wires this to the 'mcp' tab switch.
+  onOpenMCPSettings?: () => void;
 }
 
 interface ToolCallDisplay {
@@ -146,7 +149,7 @@ interface Message {
   streaming?: boolean;
 }
 
-export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange, worktreeContext, rateLimitSnapshot, retryState, softInputLimit, softOutputLimit, softRequestLimit, modelMetaList, defaultModel, onSetDefaultModel, apiKeyConfigured, sessionUsage, onSessionUsageUpdate, attachmentConfig, visionSupported, onRefreshModels, isRefreshingModels, onOpenCompareWorkspace }: ChatWorkspaceProps) {
+export default function ChatWorkspace({ session, repo, providerKey, executionMode, onModeChange, selectedModel, availableModels, onModelChange, worktreeContext, rateLimitSnapshot, retryState, softInputLimit, softOutputLimit, softRequestLimit, modelMetaList, defaultModel, onSetDefaultModel, apiKeyConfigured, sessionUsage, onSessionUsageUpdate, attachmentConfig, visionSupported, onRefreshModels, isRefreshingModels, onOpenCompareWorkspace, onOpenMCPSettings }: ChatWorkspaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -187,6 +190,48 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   // channel and we must flush whatever streamed text preceded it before the
   // channel overwrites/clears that text.
   const streamingContentRef = useRef('');
+
+  // ─── Sprint 38 Features 1 / 3: MCP tool accounting ───
+  // Live count of ENABLED tools across CONNECTED MCP servers. Each tool's
+  // JSON-schema definition is shipped to Anthropic on every request, so a
+  // large count pushes both the per-message token cost and the org-level
+  // rate limits. We refresh on mount, on sessionId change, and whenever the
+  // user triggers /mcp-off so the banner and the token counter stay in sync.
+  const [mcpEnabledToolCount, setMcpEnabledToolCount] = useState(0);
+  const [mcpConnectedServers, setMcpConnectedServers] = useState<Array<{ id: string; name: string; toolCount: number }>>([]);
+  const [mcpBannerDismissed, setMcpBannerDismissed] = useState(false);
+  // Sprint 38 Feature 4: /mcp-off picker visibility
+  const [mcpPickerVisible, setMcpPickerVisible] = useState(false);
+
+  // Sprint 38 Feature 5: Retry countdown. `retryState.nextRetryMs` is the
+  // wall-clock instant we should next retry. We expose the remaining seconds
+  // so the banner ticks down once per second without re-rendering the whole
+  // tree on every frame.
+  const [retryCountdownSec, setRetryCountdownSec] = useState<number | null>(null);
+
+  // Refresh MCP server list. Defined here so both the effect below and the
+  // /mcp-off slash command can reuse it.
+  const refreshMCPInfo = useCallback(async () => {
+    if (!api?.listMCPServers) return;
+    try {
+      const servers: any[] = await api.listMCPServers();
+      const connected = (servers || [])
+        .filter((s: any) => s && s.status === 'connected')
+        .map((s: any) => {
+          const tools: any[] = Array.isArray(s.tools) ? s.tools : [];
+          const enabled = tools.filter(t => t && t.enabled !== false);
+          return { id: s.id, name: s.name || s.id, toolCount: enabled.length };
+        });
+      setMcpConnectedServers(connected);
+      setMcpEnabledToolCount(connected.reduce((sum, s) => sum + s.toolCount, 0));
+    } catch (err) {
+      console.warn('[Chat] MCP info refresh failed:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMCPInfo();
+  }, [session.id, refreshMCPInfo]);
 
   // Sprint 25: Attachment state
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
@@ -231,10 +276,44 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingContent]);
 
+  // Sprint 38 Feature 5: Live countdown for retry banner.
+  // Re-computes once per second from retryState.nextRetryMs (absolute ms
+  // timestamp emitted by main/providers/retryHandler.ts via
+  // 'retry:state-update'). We derive seconds-remaining locally so the banner
+  // stays readable without main having to emit a tick event.
+  useEffect(() => {
+    if (!retryState?.isRetrying || !retryState.nextRetryMs) {
+      setRetryCountdownSec(null);
+      return;
+    }
+    const compute = () => {
+      const ms = (retryState.nextRetryMs || 0) - Date.now();
+      setRetryCountdownSec(Math.max(0, Math.ceil(ms / 1000)));
+    };
+    compute();
+    const handle = window.setInterval(compute, 1000);
+    return () => window.clearInterval(handle);
+  }, [retryState?.isRetrying, retryState?.nextRetryMs]);
+
   // Load slash commands list
   useEffect(() => {
+    // Sprint 38 Feature 4: The three client-side commands below are handled
+    // entirely in the renderer (see executeSlashCommand) but are surfaced in
+    // the dropdown alongside the backend-registered commands. Injecting them
+    // client-side avoids touching the backend slash registry / IPC shape.
+    const rendererCommands: SlashCommandInfo[] = [
+      { name: 'compact',  description: 'Summarize older messages to reclaim context window', category: 'chat' },
+      { name: 'mcp-off',  description: 'Disconnect a connected MCP server',                   category: 'workflow' },
+      { name: 'tokens',   description: 'Show the current rate-limit token budget',            category: 'info' },
+    ];
     if (api?.listSlashCommands) {
-      api.listSlashCommands().then((cmds: SlashCommandInfo[]) => setSlashCommands(cmds));
+      api.listSlashCommands().then((cmds: SlashCommandInfo[]) => {
+        const names = new Set(cmds.map(c => c.name));
+        const merged = [...cmds, ...rendererCommands.filter(c => !names.has(c.name))];
+        setSlashCommands(merged);
+      });
+    } else {
+      setSlashCommands(rendererCommands);
     }
   }, []);
 
@@ -475,6 +554,51 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     };
     setMessages(prev => [...prev, cmdMsg]);
 
+    // ─── Sprint 38 Feature 4: Renderer-side slash commands ───
+    // These three are handled entirely in the renderer — no backend IPC
+    // registration required. Each produces a 'system' role message for the
+    // transcript so the user sees a definite result.
+    if (cmdName === 'tokens') {
+      const msg: Message = {
+        id: `msg-${Date.now() + 1}`,
+        role: 'system',
+        content: formatTokenBudgetMessage(rateLimitSnapshot, softInputLimit, softOutputLimit, softRequestLimit),
+        timestamp: new Date().toISOString(),
+      };
+      setMessages(prev => [...prev, msg]);
+      return;
+    }
+
+    if (cmdName === 'compact') {
+      try {
+        if (api?.compactHistory) await api.compactHistory(session.id);
+        const msg: Message = {
+          id: `msg-${Date.now() + 1}`,
+          role: 'system',
+          content: 'Conversation compacted — older messages summarized to reclaim context window.',
+          timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, msg]);
+      } catch (err) {
+        const errMsg: Message = {
+          id: `msg-${Date.now() + 1}`,
+          role: 'system',
+          content: formatErrorMessage(err instanceof Error ? err.message : 'Compact failed'),
+          timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, errMsg]);
+      }
+      return;
+    }
+
+    if (cmdName === 'mcp-off') {
+      await refreshMCPInfo();
+      // Reveal the picker; the click handler (see JSX below) calls
+      // api.disconnectMCPServer(id) and posts a confirmation message.
+      setMcpPickerVisible(true);
+      return;
+    }
+
     if (!api?.executeSlashCommand) {
       const errMsg: Message = {
         id: `msg-${Date.now() + 1}`,
@@ -525,7 +649,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       };
       setMessages(prev => [...prev, errMsg]);
     }
-  }, [session.id, onModeChange]);
+  }, [session.id, onModeChange, rateLimitSnapshot, softInputLimit, softOutputLimit, softRequestLimit, refreshMCPInfo]);
 
   // Sprint 25: Process file for attachment
   const processFile = useCallback(async (file: File, source: AttachmentMeta['source'] = 'drag-drop') => {
@@ -807,6 +931,43 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const showSuggestions =
     messages.length === 0 && input.trim() === '' && attachments.length === 0;
 
+  // ─── Sprint 38 Feature 1: Live composer token estimate ───
+  // Total estimated tokens for the NEXT outgoing request:
+  //   estimateTokens(input) + Σ estimateTokens(message) + systemPromptTokens
+  // systemPromptTokens is approximated as a fixed baseline plus 250 tokens
+  // per connected+enabled MCP tool — the dominant variable on real installs.
+  const MCP_TOKENS_PER_TOOL = 250;
+  const BASE_SYSTEM_PROMPT_TOKENS = 3000; // Conservative GDeveloper baseline
+  const mcpToolTokenOverhead = mcpEnabledToolCount * MCP_TOKENS_PER_TOOL;
+  const systemPromptTokens = BASE_SYSTEM_PROMPT_TOKENS + mcpToolTokenOverhead;
+  const conversationHistoryTokens = messages.reduce(
+    (s, m) => s + estimateTokens(m.content),
+    0,
+  );
+  const inputTokens = estimateTokens(input);
+  const composerTokenEstimate = inputTokens + conversationHistoryTokens + systemPromptTokens;
+  const composerTokenPct = softInputLimit && softInputLimit > 0
+    ? composerTokenEstimate / softInputLimit
+    : 0;
+  // Color traffic light: green < 60%, amber 60-85%, red > 85%
+  const composerTokenColor =
+    composerTokenPct > 0.85 ? 'text-red-400'
+    : composerTokenPct > 0.6 ? 'text-yellow-400'
+    : 'text-matrix-green/60';
+
+  // ─── Sprint 38 Feature 2: Rate-limit gating for the Send button ───
+  const isRateLimited = !!(rateLimitSnapshot?.isPaused || rateLimitSnapshot?.severity === 'red');
+  const rateLimitReason = rateLimitSnapshot?.isPaused
+    ? 'Rate limited — please wait'
+    : rateLimitSnapshot?.severity === 'red'
+      ? 'Approaching rate limit — slow down'
+      : '';
+
+  // ─── Sprint 38 Feature 3: MCP banner visibility ───
+  const MCP_TOOL_BANNER_THRESHOLD = 20;
+  const mcpBannerVisible =
+    !mcpBannerDismissed && mcpEnabledToolCount > MCP_TOOL_BANNER_THRESHOLD;
+
   return (
     <div
       className="h-full flex flex-col relative"
@@ -924,6 +1085,27 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           </button>
         </div>
       )}
+
+      {/* Sprint 38 Feature 5: Retry countdown banner — driven by retryState
+          which the main process pushes via 'retry:state-update' (already wired
+          by App.tsx onto the retryState prop). Auto-disappears silently when
+          isRetrying flips false (success); explicit message when gaveUp. */}
+      {retryState?.gaveUp ? (
+        <div className="px-4 py-2 bg-red-500/10 border-b border-red-500/20 flex items-center gap-2 text-[11px] text-red-300 animate-fadeIn">
+          <span>&#x274C;</span>
+          <span>Rate limit: gave up after {retryState.maxAttempts} attempts.</span>
+        </div>
+      ) : retryState?.isRetrying ? (
+        <div className="px-4 py-2 bg-yellow-500/10 border-b border-yellow-500/20 flex items-center gap-2 text-[11px] text-yellow-300 animate-fadeIn">
+          <span>&#x23F3;</span>
+          <span>
+            Rate limited — retrying in {retryCountdownSec ?? '?'}s&hellip; (attempt {retryState.attempt} of {retryState.maxAttempts})
+          </span>
+          {retryState.reason && (
+            <span className="ml-2 text-yellow-200/50 font-mono text-[10px]">{retryState.reason}</span>
+          )}
+        </div>
+      ) : null}
 
       {/* Messages or Suggestions */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -1046,6 +1228,91 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
       {/* Input — Sprint 18/23/25: friendlier placeholder, inline model picker, attachments */}
       <div className="p-4 border-t border-matrix-border">
+        {/* Sprint 38 Feature 3: MCP high-tool-count warning banner.
+            Each tool schema costs ~250 tokens on every request, so a large
+            MCP footprint is the #1 cause of org-level 429s. Dismissable. */}
+        {mcpBannerVisible && (
+          <div className="mb-2 px-3 py-2 rounded border border-yellow-500/30 bg-yellow-500/5 flex items-start gap-2 text-[11px] text-yellow-300 animate-fadeIn">
+            <span>&#x26A0;</span>
+            <span className="flex-1">
+              <strong>{mcpEnabledToolCount} MCP tools connected</strong> &mdash; each request uses
+              &nbsp;~{Math.round(mcpToolTokenOverhead / 1000)}k tokens in tool definitions.
+              Consider disconnecting unused MCP servers to avoid rate-limit errors.
+            </span>
+            {onOpenMCPSettings && (
+              <button
+                onClick={onOpenMCPSettings}
+                className="text-[10px] px-2 py-0.5 rounded border border-yellow-500/40 text-yellow-200 hover:bg-yellow-500/10 whitespace-nowrap"
+              >
+                Manage MCP
+              </button>
+            )}
+            <button
+              onClick={() => setMcpBannerDismissed(true)}
+              className="text-yellow-300/50 hover:text-yellow-200"
+              title="Dismiss"
+            >
+              &times;
+            </button>
+          </div>
+        )}
+
+        {/* Sprint 38 Feature 4: /mcp-off sub-picker. Inline list of connected
+            MCP servers; click one to disconnect. Confirmation is posted as a
+            system message in the main transcript. */}
+        {mcpPickerVisible && (
+          <div className="mb-2 px-3 py-2 rounded border border-matrix-green/30 bg-matrix-green/5 text-[11px] animate-fadeIn">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-matrix-green font-bold">Disconnect an MCP server</span>
+              <button
+                onClick={() => setMcpPickerVisible(false)}
+                className="ml-auto text-matrix-text-muted/50 hover:text-matrix-text-dim"
+              >
+                &times;
+              </button>
+            </div>
+            {mcpConnectedServers.length === 0 ? (
+              <div className="text-matrix-text-muted/50">No connected MCP servers.</div>
+            ) : (
+              <div className="space-y-1">
+                {mcpConnectedServers.map(srv => (
+                  <button
+                    key={srv.id}
+                    onClick={async () => {
+                      try {
+                        if (api?.disconnectMCPServer) await api.disconnectMCPServer(srv.id);
+                        const msg: Message = {
+                          id: `msg-mcpoff-${Date.now()}`,
+                          role: 'system',
+                          content: `MCP server '${srv.name}' disconnected.`,
+                          timestamp: new Date().toISOString(),
+                        };
+                        setMessages(prev => [...prev, msg]);
+                        setMcpPickerVisible(false);
+                        refreshMCPInfo();
+                      } catch (err) {
+                        const errMsg: Message = {
+                          id: `msg-mcpoff-err-${Date.now()}`,
+                          role: 'system',
+                          content: formatErrorMessage(err instanceof Error ? err.message : 'Failed to disconnect MCP server'),
+                          timestamp: new Date().toISOString(),
+                        };
+                        setMessages(prev => [...prev, errMsg]);
+                        setMcpPickerVisible(false);
+                      }
+                    }}
+                    className="w-full text-left px-2 py-1 rounded border border-matrix-border/30 hover:border-matrix-green/40 hover:bg-matrix-green/5 flex items-center gap-2"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-matrix-green/50" />
+                    <span className="font-mono text-matrix-text-dim">{srv.name}</span>
+                    <span className="ml-auto text-[9px] text-matrix-text-muted/40">{srv.toolCount} tools</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Sprint 25: Attachment chips */}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-2">
@@ -1124,9 +1391,19 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           )}
           <button
             onClick={handleSend}
-            disabled={(!input.trim() && attachments.length === 0) || isLoading}
+            disabled={
+              (!input.trim() && attachments.length === 0) ||
+              isLoading ||
+              isRateLimited /* Sprint 38 Feature 2 */
+            }
             className="matrix-btn matrix-btn-primary px-4"
-            title="Send message (Enter)"
+            title={
+              /* Sprint 38 Feature 2: surface the rate-limit reason on hover
+                 when the button is disabled for that reason. */
+              isRateLimited && rateLimitReason
+                ? rateLimitReason
+                : 'Send message (Enter)'
+            }
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
           </button>
@@ -1169,9 +1446,26 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
               </div>
             )}
           </div>
-          <span className="text-[9px] text-matrix-text-muted/20">
-            {providerKey ? `${selectedModel || providerKey}` : 'No provider configured'}
-          </span>
+          <div className="flex items-center gap-2">
+            {/* Sprint 38 Feature 1: Live composer-side token estimate that
+                INCLUDES MCP tool-schema overhead. Color tracks the minute
+                rate budget so the user sees red well before the first 429. */}
+            <span
+              className={`text-[9px] font-mono ${composerTokenColor}`}
+              title={
+                `Estimated next-request tokens: input ${inputTokens.toLocaleString()} + ` +
+                `history ${conversationHistoryTokens.toLocaleString()} + ` +
+                `system+MCP ${systemPromptTokens.toLocaleString()} ` +
+                `(${mcpEnabledToolCount} MCP tools × ~${MCP_TOKENS_PER_TOOL})` +
+                (softInputLimit ? ` — ${Math.round(composerTokenPct * 100)}% of soft input limit` : '')
+              }
+            >
+              ~{composerTokenEstimate.toLocaleString()} tokens
+            </span>
+            <span className="text-[9px] text-matrix-text-muted/20">
+              {providerKey ? `${selectedModel || providerKey}` : 'No provider configured'}
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -1193,6 +1487,43 @@ function sanitizeContent(content: string): string {
     return '';
   }
   return cleaned;
+}
+
+/**
+ * Sprint 38 Features 1 / 4: Token estimation using the same chars/4 formula
+ * as src/main/providers/contextManager.ts, so renderer-side estimates line up
+ * with what main/providers/rateLimiter charges against the budget.
+ */
+function estimateTokens(str: string | null | undefined): number {
+  if (!str) return 0;
+  return Math.ceil(str.length / 4);
+}
+
+/**
+ * Sprint 38 Feature 4 (/tokens): Pretty-print the current RateLimitSnapshot
+ * against the configured soft limits. Returns a multi-line string that the
+ * renderer pushes as a 'system' role message.
+ */
+function formatTokenBudgetMessage(
+  snap: RateLimitSnapshot | null | undefined,
+  inputLimit?: number,
+  outputLimit?: number,
+  requestLimit?: number,
+): string {
+  if (!snap) {
+    return '**Token Budget**\n\nNo rate-limit snapshot available yet — try again after the first request.';
+  }
+  const inLim = inputLimit || 400_000;
+  const outLim = outputLimit || 14_000;
+  const reqLim = requestLimit || 50;
+  const pct = (used: number, limit: number) => (limit > 0 ? Math.round((used / limit) * 100) : 0);
+  return (
+    `**Token Budget (last 60s)**\n\n` +
+    `* Input: ${snap.inputTokensLast60s.toLocaleString()} / ${inLim.toLocaleString()} (${pct(snap.inputTokensLast60s, inLim)}%)\n` +
+    `* Output: ${snap.outputTokensLast60s.toLocaleString()} / ${outLim.toLocaleString()} (${pct(snap.outputTokensLast60s, outLim)}%)\n` +
+    `* Requests: ${snap.requestsLast60s} / ${reqLim} (${pct(snap.requestsLast60s, reqLim)}%)\n` +
+    `* Severity: \`${snap.severity}\`${snap.isPaused ? ' — paused' : ''}${snap.isThrottled ? ' — throttled' : ''}`
+  );
 }
 
 /**
