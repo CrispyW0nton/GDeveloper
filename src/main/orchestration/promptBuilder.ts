@@ -113,21 +113,18 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
   if (mode === 'plan') {
     sections.push(`[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`);
   }
-  if (mcpToolCount > 0) {
-    const mcpNames: string[] = [];
-    for (const s of mcpServers) {
-      if (s.status === 'connected') {
-        for (const t of s.tools) {
-          if (t.enabled) mcpNames.push(`${s.name}/${t.name}`);
-        }
-      }
-    }
-    if (mcpNames.length <= 20) {
-      sections.push(`MCP tools: ${mcpNames.join(', ')}`);
-    } else {
-      sections.push(`MCP tools: ${mcpNames.slice(0, 20).join(', ')} ... and ${mcpNames.length - 20} more`);
-    }
-  }
+  // MCP-429-08: Removed the redundant `"MCP tools: serverA/tool1,
+  // serverA/tool2, …"` enumeration from the system prompt text.
+  //
+  // The model already receives every MCP tool's full definition via the
+  // `tools` parameter on the API request body — re-emitting the tool
+  // NAMES in the system prompt body was redundant and expensive:
+  // qualified names like `github/list_repos` tokenize to ~6 tokens each,
+  // so 30 MCP tools = 180+ tokens of pure redundancy on EVERY turn of
+  // EVERY agent-loop session. The `tools available (X local + Y MCP)`
+  // summary above is enough for situational awareness.
+  //
+  // Ref: docs/AUDIT-MCP-429.md §MCP-429-08
 
   // 7. Rate limit awareness
   const rateLimiter = getRateLimiter();

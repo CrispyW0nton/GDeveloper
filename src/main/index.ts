@@ -66,7 +66,7 @@ import { setFollowupWindow } from './tools/askFollowupQuestion';
 import { getSessionUsage, resetSessionUsage } from './providers';
 import { getRetryHandler } from './providers/retryHandler';
 import { getRateLimiter } from './providers/rateLimiter';
-import { DEFAULT_TOKEN_BUDGET_CONFIG } from './providers/rateLimitConfig';
+import { DEFAULT_TOKEN_BUDGET_CONFIG, validateSoftLimits, type TokenBudgetConfig } from './providers/rateLimitConfig';
 import {
   processAttachment, processClipboardImage, loadAttachment,
   deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
@@ -518,7 +518,17 @@ function registerIPCHandlers(): void {
       }
 
       enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
-      enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(t => t.name).join(', ')}`;
+      // MCP-429-08 (scope-adjusted): The previous line here was
+      //   enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(...).join(', ')}`;
+      // which re-emitted the NAMES of every local tool in the system prompt
+      // body, redundant with the `tools` parameter the API call already
+      // carries. ~60-80 tokens/turn of pure overhead at the current local
+      // tool count. Deleted.
+      //
+      // (Note: the MCP tool-NAME enumeration flagged in the audit lives
+      // in promptBuilder.ts, which is currently dead code — that module
+      // has been cleaned up in the same commit for future-regression
+      // safety, but does not affect the live path's token cost today.)
       if (mode === 'plan') {
         enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${Array.from(WRITE_ACCESS_TOOLS).join(', ')}`;
       }
@@ -2343,6 +2353,32 @@ function registerIPCHandlers(): void {
   const rateLimiter = getRateLimiter();
   const retryHandler = getRetryHandler();
 
+  // MCP-429-12: Validate the rate-limit config at startup.
+  //
+  // The default config hardcodes `providerTier: 'tier4'` with
+  // `softInputTokensPerMinute: 400_000` — which is 10× over a Tier-1
+  // account's real 40k/min hard limit. Before this validation call,
+  // a Tier-1 user would hit 429 at ~20% of the configured soft limit
+  // and have no idea why.
+  //
+  // We log warnings but do NOT mutate the config — that requires
+  // either user confirmation (Settings dialog) or the upcoming
+  // MCP-429-04 tier-auto-detection (Slice 2). This is the alarm
+  // bell; the actual fix is downstream.
+  //
+  // Ref: docs/AUDIT-MCP-429.md §MCP-429-12
+  try {
+    const bootValidation = validateSoftLimits(rateLimiter.getConfig());
+    if (!bootValidation.valid) {
+      console.warn('[rate-limit:boot-validate]', JSON.stringify({
+        tier: rateLimiter.getConfig().providerTier,
+        warnings: bootValidation.warnings,
+      }));
+    }
+  } catch (err) {
+    console.warn('[rate-limit:boot-validate] threw:', err);
+  }
+
   // Push rate-limit snapshot to renderer whenever it changes
   rateLimiter.onChange((snapshot) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2382,8 +2418,34 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.TOKEN_BUDGET_SET, async (_event, config: any) => {
     try {
-      rateLimiter.updateConfig({ ...DEFAULT_TOKEN_BUDGET_CONFIG, ...config });
-      return { success: true };
+      const merged: TokenBudgetConfig = { ...DEFAULT_TOKEN_BUDGET_CONFIG, ...config };
+      rateLimiter.updateConfig(merged);
+
+      // MCP-429-12: Previously validateSoftLimits had ZERO call sites in
+      // the codebase, so a user could freely configure soft limits that
+      // exceeded their tier's hard limits — guaranteeing 429s.
+      // Now: run validation after every config update. Any warnings are
+      // forwarded to the renderer so the settings UI can surface them
+      // AND logged to the console. Does NOT reject the config (the user
+      // has the right to pick their own poison), but makes the
+      // consequences legible.
+      // Ref: docs/AUDIT-MCP-429.md §MCP-429-12
+      const validation = validateSoftLimits(merged);
+      if (!validation.valid) {
+        console.warn('[rate-limit:validate]', JSON.stringify({
+          tier: merged.providerTier,
+          warnings: validation.warnings,
+        }));
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('rate-limit:validation', {
+            valid: false,
+            warnings: validation.warnings,
+            tier: merged.providerTier,
+          });
+        }
+      }
+
+      return { success: true, validation };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to update token budget' };
     }
