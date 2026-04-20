@@ -612,7 +612,11 @@ function registerIPCHandlers(): void {
         messages,
         maxTurns: 25,
         maxConsecutiveMistakes: 3,
-        rateLimitCheck: () => getRateLimiter().preFlightCheck(),
+        // MCP-429-02: route through the PREDICTIVE pre-flight so the
+        // limiter can project this turn's cost against the sliding window
+        // and refuse / delay BEFORE the 429 happens. Falls through to the
+        // reactive check when no estimate is supplied.
+        rateLimitCheck: (estimate) => getRateLimiter().preFlightCheckPredictive(estimate),
         executeTool: async (tc) => {
           db.logActivity(sessionId, 'tool_call', `Tool call: ${tc.name}`, JSON.stringify(tc.input).substring(0, 200), {
             toolName: tc.name, toolCallId: tc.id, sessionId,

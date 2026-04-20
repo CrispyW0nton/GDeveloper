@@ -112,8 +112,18 @@ export interface AgentLoopOptions {
   persistMessage?: (role: string, content: string, toolCalls?: any[]) => void;
   /** Sandbox event emitter */
   emitSandboxEvent?: (event: any) => void;
-  /** Rate-limit pre-flight check */
-  rateLimitCheck?: () => { ok: boolean; reason?: string; delayMs: number };
+  /**
+   * Rate-limit pre-flight check.
+   *
+   * MCP-429-02 (Slice 3) upgraded the callback signature to accept an
+   * optional cost estimate for the request about to be sent. If the
+   * caller passes `{ inputTokens }`, the rate limiter can project the
+   * post-send state of the sliding window and either delay (to let
+   * enough old tokens age out) or refuse outright when a tier hard
+   * limit would be breached. Callbacks that don't use the estimate
+   * see the original reactive behaviour.
+   */
+  rateLimitCheck?: (estimate?: { inputTokens?: number; outputTokens?: number }) => { ok: boolean; reason?: string; delayMs: number };
 }
 
 export interface AgentLoopResult {
@@ -178,8 +188,33 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     // Rate-limit pre-flight check
+    // MCP-429-02: Compute a chars/4 estimate of THIS turn's input cost so
+    // the rate limiter can project the post-send window and either delay
+    // or refuse. If we don't pass an estimate the limiter falls back to
+    // the old reactive check. Estimate includes: system prompt + the
+    // full tool schema payload (JSON-stringified) + the running
+    // currentMessages tail. chars/4 is a known underestimate for JSON-
+    // heavy content (PERF-03 / MCP-429-03) but good enough for
+    // "would this push us off the cliff" gating — an underestimate
+    // errs on the side of sending rather than blocking, which is the
+    // fail-safe direction: false negatives = one 429, false positives
+    // = agent hangs forever.
+    const estimateTurnInputTokens = (): number => {
+      const systemChars = options.systemPrompt?.length || 0;
+      const historyChars = currentMessages.reduce(
+        (s, m) => s + (m.content?.length || 0),
+        0,
+      );
+      // JSON.stringify on the full tool array — schemas dominate cost.
+      let toolsChars = 0;
+      try {
+        toolsChars = JSON.stringify(options.tools || []).length;
+      } catch { /* noop */ }
+      return Math.ceil((systemChars + historyChars + toolsChars) / 4);
+    };
+
     if (options.rateLimitCheck) {
-      const check = options.rateLimitCheck();
+      const check = options.rateLimitCheck({ inputTokens: estimateTurnInputTokens() });
       if (!check.ok) {
         if (options.win && !options.win.isDestroyed()) {
           options.win.webContents.send('chat:stream-chunk', {

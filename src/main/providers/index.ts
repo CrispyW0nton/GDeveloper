@@ -50,14 +50,31 @@ export function truncateIfNeeded(
   messages: Array<{ role: string; content: string }>,
   systemPrompt: string,
   model: string,
-): { messages: Array<{ role: string; content: string }>; wasTruncated: boolean; originalTokens: number; truncatedTokens: number } {
+  /**
+   * MCP-429-09: The budget must include the cost of the tool schemas,
+   * which the API carries on a separate `tools` parameter. Previously
+   * the function summed only systemTokens + msgTokens, so ~15k tokens
+   * of tool schemas for 50 tools were invisible to the budget
+   * calculation — truncation thought there was headroom when the
+   * actual payload was already at the limit. That caused silent
+   * server-side truncation and occasional 400s.
+   *
+   * Callers should pass the JSON-stringified size of the `tools` array
+   * they plan to send; this is the cheapest accurate approximation of
+   * the schema overhead without hitting a tokenizer. New arg is
+   * optional so the existing callers keep compiling; when omitted it
+   * defaults to 0 and behaviour matches the pre-fix version.
+   */
+  toolSchemaTokens?: number,
+): { messages: Array<{ role: string; content: string }>; wasTruncated: boolean; originalTokens: number; truncatedTokens: number; toolSchemaTokens: number } {
   const maxTokens = getMaxAllowedSize(model);
   const systemTokens = estimateTokens(systemPrompt);
+  const toolTokens = toolSchemaTokens ?? 0;
   const msgTokens = messages.map(m => estimateTokens(m.content));
-  const totalTokens = systemTokens + msgTokens.reduce((a, b) => a + b, 0);
+  const totalTokens = systemTokens + toolTokens + msgTokens.reduce((a, b) => a + b, 0);
 
   if (totalTokens <= maxTokens) {
-    return { messages, wasTruncated: false, originalTokens: totalTokens, truncatedTokens: totalTokens };
+    return { messages, wasTruncated: false, originalTokens: totalTokens, truncatedTokens: totalTokens, toolSchemaTokens: toolTokens };
   }
 
   // Sprint 35 Fix 5: Always preserve the first user-assistant pair (the original task)
@@ -66,7 +83,9 @@ export function truncateIfNeeded(
   const rest = messages.slice(firstChunkSize);
 
   const firstChunkTokens = firstChunk.reduce((s, m) => s + estimateTokens(m.content), 0);
-  const budget = maxTokens - systemTokens - firstChunkTokens - 200; // 200 token buffer for truncation notice
+  // MCP-429-09: Subtract toolTokens too so the message-budget after
+  // truncation reflects what the API call actually has room for.
+  const budget = maxTokens - systemTokens - toolTokens - firstChunkTokens - 200; // 200 token buffer for truncation notice
 
   // Half keep
   const halfIdx = Math.floor(rest.length / 2);
@@ -89,11 +108,13 @@ export function truncateIfNeeded(
   };
 
   const truncated = [...firstChunk, truncationNotice, ...kept];
-  const truncatedTokens = systemTokens + truncated.reduce((s, m) => s + estimateTokens(m.content), 0);
+  // MCP-429-09: include toolTokens in the "after truncation" total so
+  // the reported numbers match the actual payload size.
+  const truncatedTokens = systemTokens + toolTokens + truncated.reduce((s, m) => s + estimateTokens(m.content), 0);
 
-  console.log(`[Sprint35:truncation] ${totalTokens} tokens → ${truncatedTokens} tokens (${messages.length} msgs → ${truncated.length} msgs, model=${model}, maxAllowed=${maxTokens})`);
+  console.log(`[Sprint35:truncation] ${totalTokens} tokens → ${truncatedTokens} tokens (${messages.length} msgs → ${truncated.length} msgs, tools=${toolTokens}, model=${model}, maxAllowed=${maxTokens})`);
 
-  return { messages: truncated, wasTruncated: true, originalTokens: totalTokens, truncatedTokens };
+  return { messages: truncated, wasTruncated: true, originalTokens: totalTokens, truncatedTokens, toolSchemaTokens: toolTokens };
 }
 
 /**
@@ -1146,7 +1167,16 @@ export async function streamChatToRenderer(
   }
 
   // Sprint 35 Fix 3 + Fix 5: Truncate if payload exceeds model limit, preserving first user-assistant pair
-  const truncResult = truncateIfNeeded(cleanedMessages, systemPrompt || '', modelId);
+  // MCP-429-09: Include the tool-schema tokens in the budget so
+  // truncation triggers when the real payload (system + tools + msgs)
+  // approaches the 160k limit, not just when the messages alone do.
+  let toolSchemaTokens = 0;
+  if (tools && tools.length > 0) {
+    try {
+      toolSchemaTokens = estimateTokens(JSON.stringify(tools));
+    } catch { /* fall back to 0 */ }
+  }
+  const truncResult = truncateIfNeeded(cleanedMessages, systemPrompt || '', modelId, toolSchemaTokens);
   cleanedMessages = truncResult.messages;
   if (truncResult.wasTruncated) {
     console.log(`[Sprint35:truncation] Conversation truncated: ${truncResult.originalTokens} → ${truncResult.truncatedTokens} tokens`);
