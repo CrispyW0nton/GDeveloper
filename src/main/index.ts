@@ -751,8 +751,36 @@ function registerIPCHandlers(): void {
         });
       }
 
-      // Save final assistant response to DB
-      const msgId = db.insertMessage(sessionId, 'assistant', loopResult.content, loopResult.toolCalls.length > 0 ? loopResult.toolCalls : undefined);
+      // CHAT-DUP (Phase-2 audit): Dedup the final assistant row against
+      // whatever the per-turn persistMessage callback already wrote
+      // during the agent loop.
+      //
+      // Prior behavior: this handler unconditionally inserted a "final"
+      // assistant row after the loop returned — but the agentLoop
+      // persistMessage callback had ALREADY inserted a row for the last
+      // tool-using turn. On a 3-turn session the DB ended up with 1
+      // extra duplicate assistant row; on history reload the UI
+      // rendered the final message twice and the next turn's context
+      // window included orphan tool_use IDs that triggered synthetic
+      // tool_result injection.
+      //
+      // New behavior:
+      //   1. Query the most recently inserted row for this session.
+      //   2. If its role+content match loopResult, skip the insert and
+      //      reuse its id — no duplicate.
+      //   3. Otherwise write a new row WITHOUT tool_calls (those were
+      //      already persisted per-turn by persistMessage). This path
+      //      is specifically for terminal-tool exits
+      //      (attempt_completion, ask_followup_question) whose
+      //      loopResult.content carries the extracted completion /
+      //      followup text that was NOT in any per-turn row.
+      const existingLast = db.getLastMessage(sessionId, 'assistant');
+      let msgId: string;
+      if (existingLast && existingLast.content === loopResult.content) {
+        msgId = existingLast.id;
+      } else {
+        msgId = db.insertMessage(sessionId, 'assistant', loopResult.content);
+      }
 
       if (taskId) {
         db.updateTaskStatus(taskId, 'EXECUTING', 'AI response received');
