@@ -482,6 +482,10 @@ describe('Sprint 34 — Streaming path integrity', () => {
   });
 
   it('yield { type: "done" } includes streamStopReason', () => {
-    expect(providerSrc).toContain("yield { type: 'done', stopReason: streamStopReason }");
+    // MCP-429-04 (Slice 2) expanded the done yield from a single-line
+    // literal to a multi-line object that also carries parsed rate-limit
+    // headers. The invariant is unchanged: the done chunk MUST carry
+    // stopReason from streamStopReason. Assert structurally.
+    expect(providerSrc).toMatch(/yield\s*\{[\s\S]{0,400}?type:\s*'done'[\s\S]{0,400}?stopReason:\s*streamStopReason/);
   });
 });

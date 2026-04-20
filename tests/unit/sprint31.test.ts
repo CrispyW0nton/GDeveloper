@@ -33,9 +33,16 @@ describe('Sprint 31 — Bug #1: Length-aware truncation', () => {
   });
 
   it('uses 16000 chars for structured tools', () => {
-    // The maxResultLen assignment for structured tools
+    // MCP-429-05 (Slice 2) replaced the inline
+    //   maxResultLen = STRUCTURED_TOOL_NAMES.has(tc.name) ? 16000 : 2000
+    // ternary with a branch: structured tools still take a 16000-char
+    // substring cap, non-structured tools now flow through
+    // ToolResultBudget.processToolResult for proper token-aware
+    // truncation. The 16000 upper bound for structured tools is the
+    // preserved invariant.
     expect(mainSrc).toContain('16000');
-    expect(mainSrc).toMatch(/STRUCTURED_TOOL_NAMES\.has\(tc\.name\)\s*\?\s*16000\s*:\s*2000/);
+    expect(mainSrc).toMatch(/STRUCTURED_TOOL_NAMES\.has\(tc\.name\)/);
+    expect(mainSrc).toMatch(/substring\(0,\s*16000\)/);
   });
 
   it('task_plan is in STRUCTURED_TOOL_NAMES set', () => {
@@ -151,8 +158,14 @@ describe('Sprint 31 → Sprint 32 — TaskPlanBody is lightweight', () => {
 describe('Sprint 31 — Non-structured tools still use 2 KB', () => {
   const mainSrc = readSrc('main/index.ts');
 
-  it('uses 2000 as fallback for non-structured tools', () => {
-    expect(mainSrc).toMatch(/STRUCTURED_TOOL_NAMES\.has\(tc\.name\)\s*\?\s*16000\s*:\s*2000/);
+  it('non-structured tools flow through ToolResultBudget (replacing the old 2000-char hard cap)', () => {
+    // MCP-429-05 (Slice 2): the old inline "2000 chars for non-structured"
+    // fallback was replaced with a ToolResultBudget.processToolResult call
+    // that applies proper token-aware truncation AND retains the full
+    // result in the trb ring buffer. The upper-bound 16000 char cap for
+    // STRUCTURED tools is preserved separately.
+    expect(mainSrc).toMatch(/getToolResultBudget\(\)\s*\.\s*processToolResult\s*\(/);
+    expect(mainSrc).toMatch(/trbEntry\.truncatedResult/);
   });
 
   it('read_file is NOT in STRUCTURED_TOOL_NAMES', () => {
@@ -190,8 +203,17 @@ describe('Sprint 31 — DevConsole api-traffic tool-result metadata', () => {
     expect(mainSrc).toContain('truncated: wasTruncated');
   });
 
-  it('includes maxAllowed field', () => {
-    expect(mainSrc).toContain('maxAllowed: maxResultLen');
+  it('DevConsole tool-result event includes budget-aware truncation metadata', () => {
+    // MCP-429-05 (Slice 2): the old `maxAllowed: maxResultLen` field was
+    // replaced with per-result `fullTokens` / `truncatedTokens` /
+    // `truncatedLength` / `retentionId` fields sourced from
+    // ToolResultBudget. These give the DevConsole far more useful
+    // telemetry: actual token counts (not just char counts) and a
+    // retention ID so the UI can offer "include full in next prompt".
+    expect(mainSrc).toMatch(/truncatedLength:\s*truncatedResult\.length/);
+    expect(mainSrc).toMatch(/fullTokens:\s*trbEntry\.fullTokens/);
+    expect(mainSrc).toMatch(/truncatedTokens:\s*trbEntry\.truncatedTokens/);
+    expect(mainSrc).toMatch(/retentionId:\s*trbEntry\.id/);
   });
 });
 

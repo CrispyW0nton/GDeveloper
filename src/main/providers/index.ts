@@ -15,6 +15,7 @@ import { getRateLimiter } from './rateLimiter';
 import { getRetryHandler, parseRateLimitHeaders } from './retryHandler';
 import { getToolResultBudget } from './toolResultBudget';
 import { getContextManager, estimateTokens, type ContextMessage } from './contextManager';
+import { detectTierFromHeaders } from './rateLimitConfig';
 
 // ─── Sprint 35: Context-window hygiene (ported from Cline) ─────────────────
 
@@ -224,6 +225,55 @@ let sessionUsage: SessionUsage = {
   estimatedSavings: 0,
   promptCachingEnabled: true,
 };
+
+// ─── MCP-429-04: Tier auto-detection plumbing ──────────────────
+//
+// Module-scoped because both sendMessage and streamMessage need it, and
+// we want to de-duplicate the event emission: once we've told the
+// renderer "your account is actually tier2", we shouldn't emit the
+// same mismatch on every subsequent request.
+let _lastDetectedTier: string | null = null;
+
+/**
+ * Called after every Anthropic API response. If the response's
+ * `x-ratelimit-limit-input-tokens` header implies a different tier
+ * than the rate limiter is currently configured for, emit a
+ * `rate-limit:tier-detected` event exactly once per distinct
+ * detected tier. The renderer's Settings panel is responsible for
+ * deciding whether to prompt the user — we just supply the signal.
+ *
+ * Ref: docs/AUDIT-MCP-429.md §MCP-429-04
+ */
+function observeTierFromParsedHeaders(parsed: ReturnType<typeof parseRateLimitHeaders>, win: BrowserWindow | null): void {
+  const detected = detectTierFromHeaders(parsed.inputTokensLimit);
+  if (!detected) return;
+
+  const rl = getRateLimiter();
+  const configured = rl.getConfig().providerTier;
+  if (detected === configured) {
+    // Already aligned — clear the memo so future drifts re-emit.
+    _lastDetectedTier = detected;
+    return;
+  }
+  if (_lastDetectedTier === detected) return; // dedup same mismatch
+  _lastDetectedTier = detected;
+
+  console.warn('[rate-limit:tier-detected]', JSON.stringify({
+    configuredTier: configured,
+    detectedTier: detected,
+    observedInputTokensPerMinute: parsed.inputTokensLimit,
+  }));
+
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('rate-limit:tier-detected', {
+      configuredTier: configured,
+      detectedTier: detected,
+      observedInputTokensPerMinute: parsed.inputTokensLimit,
+      observedOutputTokensPerMinute: parsed.outputTokensLimit,
+      observedRequestsPerMinute: parsed.requestsLimit,
+    });
+  }
+}
 
 export function getSessionUsage(): SessionUsage { return { ...sessionUsage }; }
 export function resetSessionUsage(): void {
@@ -809,7 +859,22 @@ export class ClaudeProvider implements ILLMProvider {
       });
     }
 
-    yield { type: 'done', stopReason: streamStopReason };
+    // MCP-429-04: Parse headers and emit a tier-detection signal. The
+    // streamMessage path previously COLLECTED headers into streamRespHeaders
+    // but never actually PARSED them. We fix both things here: parse, then
+    // observe for tier mismatch. The done-chunk is enriched with the parsed
+    // snapshot so the IPC-bridging caller can forward it to the renderer
+    // event pipeline with full window access.
+    const streamParsedHeaders = parseRateLimitHeaders(streamRespHeaders);
+
+    yield {
+      type: 'done',
+      stopReason: streamStopReason,
+      // Piggy-back parsed headers on the done chunk so the IPC-bridging
+      // caller can observe tier + emit the renderer event. Kept as `any`
+      // here because LLMStreamChunk is a shared interface.
+      rateLimitHeaders: streamParsedHeaders,
+    } as any;
   }
 
   countTokens(text: string): number {
@@ -1149,6 +1214,18 @@ export async function streamChatToRenderer(
         // Sprint 28: Capture stopReason from done chunk
         if ((chunk as any).stopReason) {
           stopReason = (chunk as any).stopReason;
+        }
+        // MCP-429-04: done-chunk now carries parsed rate-limit headers
+        // (streamMessage parses them after the stream closes). If the
+        // observed tier doesn't match the configured tier, this emits a
+        // one-shot `rate-limit:tier-detected` event to the renderer.
+        const parsedHeaders = (chunk as any).rateLimitHeaders;
+        if (parsedHeaders) {
+          try {
+            observeTierFromParsedHeaders(parsedHeaders, win);
+          } catch (err) {
+            console.warn('[rate-limit:tier-detected] observer threw:', err);
+          }
         }
         win?.webContents.send('chat:stream-chunk', {
           sessionId,

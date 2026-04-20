@@ -104,30 +104,33 @@ describe('MCP-429 / Slice 1 / MCP-429-12 — validateSoftLimits is actually call
 //  new call sites will surface to users).
 // ═══════════════════════════════════════════════════════════════════
 describe('MCP-429 / Slice 1 / MCP-429-04-sanity — validateSoftLimits correctly flags the default', () => {
-  it('DEFAULT_TOKEN_BUDGET_CONFIG declared as tier4', () => {
-    // Sanity — if someone changes the default without flipping this,
-    // the whole Slice 1 reasoning breaks.
-    expect(DEFAULT_TOKEN_BUDGET_CONFIG.providerTier).toBe('tier4');
+  it('DEFAULT_TOKEN_BUDGET_CONFIG is no longer the tier4-over-everything default', () => {
+    // Slice 2 (MCP-429-04) flipped the default from tier4 → tier2 so
+    // first-boot users get reasonable soft limits instead of silent 429s.
+    // Slice 1 is aware of this flip and tolerates either tier so long as
+    // it's NOT the legacy tier4 + 400k/min combination.
+    expect(DEFAULT_TOKEN_BUDGET_CONFIG.providerTier).not.toBe('tier4');
   });
 
-  it('validateSoftLimits passes for the default (tier4) config', () => {
-    // The default config is balanced-for-tier-4; tier-4 hard limits are
-    // high enough that BALANCED_CONFIG's 400k/min soft limit is legal.
+  it('validateSoftLimits passes for the shipped default config (no self-failure)', () => {
     const result = validateSoftLimits(DEFAULT_TOKEN_BUDGET_CONFIG);
-    expect(result.valid).toBe(true);
+    expect(result.valid, `shipped default fails its own validation: ${result.warnings.join('; ')}`).toBe(true);
     expect(result.warnings).toHaveLength(0);
   });
 
-  it('validateSoftLimits REJECTS the same 400k/min config if the tier is downgraded to tier1', () => {
-    // This is the bug MCP-429-04 causes: a tier-1 user gets the
-    // tier-4 soft limits by default, and their real 40k/min hard
-    // limit will be breached way before the soft limit trips any
-    // amber/red warning.
-    const tier1Misconfig = { ...DEFAULT_TOKEN_BUDGET_CONFIG, providerTier: 'tier1' as const };
-    const result = validateSoftLimits(tier1Misconfig);
+  it('validateSoftLimits REJECTS a tier4-scale 400k/min config on a tier1 account (the bug MCP-429-04 closes)', () => {
+    // Craft the OLD default shape explicitly so this test keeps documenting
+    // what was broken, regardless of how DEFAULT_TOKEN_BUDGET_CONFIG evolves.
+    const oldBrokenDefault = {
+      ...DEFAULT_TOKEN_BUDGET_CONFIG,
+      softInputTokensPerMinute: 400_000,
+      softOutputTokensPerMinute: 14_000,
+      softRequestsPerMinute: 45,
+      providerTier: 'tier1' as const,
+    };
+    const result = validateSoftLimits(oldBrokenDefault);
     expect(result.valid).toBe(false);
     expect(result.warnings.length).toBeGreaterThan(0);
-    // Must explicitly mention the tier and the 429 consequence
     const joined = result.warnings.join('\n');
     expect(joined).toMatch(/exceeds your tier's hard limit/i);
     expect(joined).toMatch(/429/);

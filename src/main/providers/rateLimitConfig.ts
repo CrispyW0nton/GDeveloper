@@ -148,9 +148,24 @@ export const PRESET_PROFILES: PresetProfile[] = [
 
 // ─── Default ───
 
+// MCP-429-04: Default was `providerTier: 'tier4'` with BALANCED_CONFIG's
+// softInputTokensPerMinute: 400_000 — 10× over a Tier-1 account's
+// real 40k/min hard limit. New accounts, free-tier users, and most
+// individual developers on a single paid subscription are Tier 1 or
+// Tier 2, not Tier 4. The old default meant validateSoftLimits would
+// silently pass for every tier while users continued to hit 429s.
+//
+// New default: tier-2 with tier-2-scaled soft limits. A genuine Tier-4
+// user still sees this validate cleanly (their real limit is higher
+// than our assumed tier-2 soft cap), while a Tier-1 user immediately
+// gets the validateSoftLimits warning instead of silent 429s.
+//
+// Slice 2 also auto-detects the real tier from rate-limit response
+// headers (detectTierFromHeaders below) so the correct config is
+// proposed on the user's first successful request.
 export const DEFAULT_TOKEN_BUDGET_CONFIG: TokenBudgetConfig = {
-  ...BALANCED_CONFIG,
-  providerTier: 'tier4',
+  ...getRecommendedConfigForTier('tier2'),
+  providerTier: 'tier2',
 };
 
 // ─── Helpers ───
@@ -212,6 +227,65 @@ export function validateSoftLimits(
   }
 
   return { valid: warnings.length === 0, warnings };
+}
+
+/**
+ * MCP-429-04: Infer the user's Anthropic tier from the
+ * `x-ratelimit-limit-input-tokens` response header.
+ *
+ * The Anthropic API reports the account's true per-minute input-token
+ * cap on every response. We match it against the known tier ceilings:
+ *
+ *   40k   → tier1
+ *   80k   → tier2
+ *   160k  → tier3
+ *   400k+ → tier4
+ *
+ * Tolerance: each tier matches within ±20% of its declared cap, so
+ * customer-specific negotiated limits (e.g. 50k, 90k) still pin to the
+ * nearest published tier. Returns `null` if the header is absent or
+ * unparseable — callers should leave the configured tier untouched in
+ * that case.
+ *
+ * Intended caller: the provider's response-processing path, right after
+ * parseRateLimitHeaders returns. The caller compares the detected tier
+ * against the rate-limiter's currently configured tier and, on
+ * mismatch, emits a `rate-limit:tier-detected` event so the renderer's
+ * Settings panel can prompt the user.
+ *
+ * Ref: docs/AUDIT-MCP-429.md §MCP-429-04
+ */
+export function detectTierFromHeaders(
+  inputTokensLimit: number | null | undefined,
+): AnthropicTier | null {
+  if (!inputTokensLimit || inputTokensLimit <= 0) return null;
+
+  // Sort tiers by declared inputTokensPerMinute ascending so we match
+  // each band's window correctly. Tolerance = ±20% of the tier ceiling.
+  const sortedTiers: AnthropicTier[] = (['tier1', 'tier2', 'tier3', 'tier4'] as const);
+  let best: AnthropicTier | null = null;
+  let bestDelta = Infinity;
+  for (const tier of sortedTiers) {
+    const ceiling = ANTHROPIC_TIER_LIMITS[tier].inputTokensPerMinute;
+    const delta = Math.abs(inputTokensLimit - ceiling) / ceiling;
+    if (delta <= 0.2 && delta < bestDelta) {
+      best = tier;
+      bestDelta = delta;
+    }
+  }
+
+  if (best) return best;
+
+  // No tier within ±20% — pin to the nearest tier whose ceiling does
+  // NOT exceed the observed limit (conservative — we'd rather soft-cap
+  // below an unknown real limit than above it).
+  let fallback: AnthropicTier = 'tier1';
+  for (const tier of sortedTiers) {
+    if (ANTHROPIC_TIER_LIMITS[tier].inputTokensPerMinute <= inputTokensLimit) {
+      fallback = tier;
+    }
+  }
+  return fallback;
 }
 
 /** Serialize / deserialize for localStorage persistence */

@@ -67,6 +67,7 @@ import { getSessionUsage, resetSessionUsage } from './providers';
 import { getRetryHandler } from './providers/retryHandler';
 import { getRateLimiter } from './providers/rateLimiter';
 import { DEFAULT_TOKEN_BUDGET_CONFIG, validateSoftLimits, type TokenBudgetConfig } from './providers/rateLimitConfig';
+import { getToolResultBudget } from './providers/toolResultBudget';
 import {
   processAttachment, processClipboardImage, loadAttachment,
   deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
@@ -690,14 +691,53 @@ function registerIPCHandlers(): void {
             toolName: tc.name, toolCallId: tc.id, success: !isError,
           });
 
-          // Sprint 31 Bug #1: Length-aware truncation — 16 KB for structured tools, 2 KB for others
+          // MCP-429-05: Route ALL tool results (local AND MCP) through
+          // ToolResultBudget.processToolResult instead of the previous
+          // inline substring truncation.
+          //
+          // Before: inline `toolResultContent.substring(0, maxResultLen)`
+          // applied a flat 2KB/16KB cap depending on tool name. Worked
+          // fine for local tools but MCP tools could return arbitrarily
+          // large payloads (e.g. GitHub MCP returning a file listing)
+          // which then got appended verbatim to currentMessages and
+          // inflated every subsequent turn. ToolResultBudget exists
+          // with proper token-aware truncation, a retained-result ring
+          // buffer, and an "include full in next prompt" mechanism —
+          // but nothing called it.
+          //
+          // Now: every tool call goes through trb.processToolResult,
+          // which (a) token-estimates the full result, (b) truncates
+          // if over maxToolResultTokensPerTool (from the rate-limit
+          // config), (c) retains the full result for potential
+          // later inclusion, and (d) evicts oldest entries when the
+          // retention cap is hit.
+          //
+          // The STRUCTURED_TOOL_NAMES "hard override" is preserved as
+          // an UPPER bound — task_plan / compare_* / attempt_completion /
+          // ask_followup_question return machine-readable blobs the
+          // renderer parses, and truncating those by token budget
+          // would break parsing. So we take the max() of the
+          // budget-truncated version and the full-but-length-capped
+          // version for structured tools.
+          //
+          // Ref: docs/AUDIT-MCP-429.md §MCP-429-05
           const STRUCTURED_TOOL_NAMES = new Set([
             'task_plan', 'compare_file', 'compare_folder', 'merge_3way',
             'attempt_completion', 'ask_followup_question',
           ]);
-          const maxResultLen = STRUCTURED_TOOL_NAMES.has(tc.name) ? 16000 : 2000;
-          const truncatedResult = toolResultContent.substring(0, maxResultLen);
-          const wasTruncated = toolResultContent.length > maxResultLen;
+          const trbEntry = getToolResultBudget().processToolResult(tc.name, toolResultContent, tc.id);
+          let truncatedResult: string;
+          let wasTruncated: boolean;
+          if (STRUCTURED_TOOL_NAMES.has(tc.name)) {
+            // Structured tools: enforce a length cap but don't use the
+            // token-budget truncation (which would strip JSON closing
+            // braces). 16KB char cap matches the pre-fix behaviour.
+            truncatedResult = toolResultContent.substring(0, 16000);
+            wasTruncated = toolResultContent.length > 16000;
+          } else {
+            truncatedResult = trbEntry.truncatedResult;
+            wasTruncated = trbEntry.wasTruncated;
+          }
 
           mainWindow?.webContents.send('chat:stream-chunk', {
             sessionId, type: isError ? 'tool_error' : 'tool_result',
@@ -740,11 +780,26 @@ function registerIPCHandlers(): void {
               toolCallId: tc.id,
               resultLength: toolResultContent.length,
               truncated: wasTruncated,
-              maxAllowed: maxResultLen,
+              // MCP-429-05: report both the budget-truncated length (what the
+              // agent sees) and the full original length so the DevConsole
+              // chart can show "savings" due to retention.
+              truncatedLength: truncatedResult.length,
+              fullTokens: trbEntry.fullTokens,
+              truncatedTokens: trbEntry.truncatedTokens,
+              retentionId: trbEntry.id,
             });
           }
 
-          return { content: toolResultContent, isError };
+          // MCP-429-05: Return the budget-truncated result to the agent
+          // loop (not the raw toolResultContent). The agent loop will
+          // still apply its own 16k/4k char cap as an upper bound, but
+          // in practice our trb entry is already under that for MCP
+          // payloads, so what the model sees in its next turn is the
+          // token-budget-aware version. The FULL result is still
+          // retained inside the trb ring buffer (trbEntry.fullResult)
+          // for potential later inclusion via
+          // setIncludeFullInNextPrompt.
+          return { content: truncatedResult, isError };
         },
         persistMessage: (role, content, toolCalls) => {
           db.insertMessage(sessionId, role, content, toolCalls);
