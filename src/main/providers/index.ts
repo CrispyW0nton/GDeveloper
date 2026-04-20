@@ -264,6 +264,24 @@ export interface ModelInfo {
  * The app dynamically fetches the real list from /v1/models on startup
  * and caches it. This list is ONLY used if the API call fails.
  */
+/**
+ * BUG-10: Single source of truth for the default Claude model ID.
+ *
+ * Previously the default was inconsistent: `ProviderRegistry._selectedModel`
+ * used 'claude-3-5-sonnet-20241022' while `ClaudeProvider`'s constructor
+ * defaulted to 'claude-sonnet-4-6', and half a dozen call sites in
+ * src/main/index.ts hardcoded either one or the other. If the app hit the
+ * constructor-default path on a user whose account / region hadn't been
+ * rolled out to the newer model, every request would 404.
+ *
+ * Rule: every place that needs a "safe default model" must import this
+ * constant. When we want to bump the default, we change it here and the
+ * whole app follows. The chosen value MUST also appear in
+ * SAFE_FALLBACK_MODELS below so first-boot requests have maxOutput metadata
+ * available before /v1/models discovery runs.
+ */
+export const DEFAULT_MODEL_ID = 'claude-3-5-sonnet-20241022';
+
 const SAFE_FALLBACK_MODELS: ModelInfo[] = [
   { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
   { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 8192 },
@@ -339,7 +357,7 @@ export class ClaudeProvider implements ILLMProvider {
   // message-delta events and orphaned connections.
   private activeStream: AbortController | null = null;
 
-  constructor(apiKey: string, model = 'claude-sonnet-4-6', baseUrl = 'https://api.anthropic.com') {
+  constructor(apiKey: string, model: string = DEFAULT_MODEL_ID, baseUrl = 'https://api.anthropic.com') {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl;
@@ -893,7 +911,7 @@ export class ClaudeProvider implements ILLMProvider {
 // ─── Provider Registry (Sprint 16 + Sprint 25.5: dynamic model state) ───
 class ProviderRegistry {
   private providers: Map<string, ILLMProvider> = new Map();
-  private _selectedModel: string = 'claude-3-5-sonnet-20241022';
+  private _selectedModel: string = DEFAULT_MODEL_ID;
   private _availableModels: ModelInfo[] = SAFE_FALLBACK_MODELS;
   private _modelDiscovered: boolean = false;
 

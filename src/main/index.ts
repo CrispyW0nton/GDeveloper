@@ -13,7 +13,7 @@ import simpleGit, { SimpleGit } from 'simple-git';
 import { IPC_CHANNELS } from './ipc';
 import { getDatabase } from './db';
 import { getSecureSettings } from './security';
-import { ClaudeProvider, providerRegistry, streamChatToRenderer } from './providers';
+import { ClaudeProvider, DEFAULT_MODEL_ID, providerRegistry, streamChatToRenderer } from './providers';
 import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
 import { getOrchestrationEngine } from './orchestration';
@@ -264,9 +264,9 @@ function registerIPCHandlers(): void {
         const result = await claude.validateKey();
         if (result.valid) {
           settings.setApiKey(provider, key);
-          // Sprint 25.5: Register with safe default, then discover + validate
-          const safeDefault = 'claude-3-5-sonnet-20241022';
-          const registeredProvider = new ClaudeProvider(key, safeDefault);
+          // Sprint 25.5: Register with safe default, then discover + validate.
+          // BUG-10: safeDefault now comes from the single DEFAULT_MODEL_ID constant.
+          const registeredProvider = new ClaudeProvider(key, DEFAULT_MODEL_ID);
           providerRegistry.register(registeredProvider);
           // Asynchronously discover models and pick the best one
           registeredProvider.discoverModels().then(models => {
@@ -274,7 +274,7 @@ function registerIPCHandlers(): void {
             const bestModel = providerRegistry.validateSelectedModel();
             console.log(`[Validate] Discovered ${models.length} models, best: ${bestModel}`);
           }).catch(() => {});
-          const bestModel = result.models?.[0] || safeDefault;
+          const bestModel = result.models?.[0] || DEFAULT_MODEL_ID;
           db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
         }
         return { valid: result.valid, error: result.error };
@@ -398,7 +398,7 @@ function registerIPCHandlers(): void {
     // Sprint 16: Model-tool compatibility check
     const selectedModelId = providerRegistry.selectedModel;
     if (!providerRegistry.checkModelToolSupport(selectedModelId)) {
-      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., claude-3-5-sonnet-20241022) in Settings.`;
+      const warnMsg = `Warning: Model "${selectedModelId}" may not support tool use. Agentic features (file editing, commands, search) will be unavailable. Consider switching to a model that supports tools (e.g., ${DEFAULT_MODEL_ID}) in Settings.`;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('chat:stream-chunk', {
           sessionId,
@@ -2271,9 +2271,9 @@ function registerIPCHandlers(): void {
     try {
       const settings = getSecureSettings();
       const all = settings.getSettings();
-      return (all as any).preferences?.defaultModel || 'claude-3-5-sonnet-20241022';
+      return (all as any).preferences?.defaultModel || DEFAULT_MODEL_ID;
     } catch {
-      return 'claude-3-5-sonnet-20241022';
+      return DEFAULT_MODEL_ID;
     }
   });
 
@@ -2673,9 +2673,9 @@ app.whenReady().then(() => {
   for (const providerName of configuredProviders) {
     const key = settings.getApiKey(providerName);
     if (key && providerName === 'claude') {
-      // Register immediately with a safe default model
-      const safeDefault = 'claude-3-5-sonnet-20241022';
-      const claudeInstance = new ClaudeProvider(key, safeDefault);
+      // Register immediately with a safe default model.
+      // BUG-10: safeDefault unified via the single DEFAULT_MODEL_ID constant.
+      const claudeInstance = new ClaudeProvider(key, DEFAULT_MODEL_ID);
       providerRegistry.register(claudeInstance);
 
       // Then discover available models and validate/auto-switch
