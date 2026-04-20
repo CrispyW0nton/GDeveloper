@@ -152,7 +152,14 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const [isLoading, setIsLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingToolCalls, setStreamingToolCalls] = useState<ToolCallDisplay[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(true);
+  // Sprint 38 Bug 3: `showSuggestions` is derived, not state.
+  // Suggestion cards must appear iff the transcript is empty AND the composer
+  // is empty AND no attachments are staged. Tracking it as state produced
+  // flicker bugs: /clear could set it true while the composer still held
+  // typed text, and various setters (handleSend, executeSlashCommand, history
+  // loader, handleSuggestionSelect, Fresh Chat button) drifted out of sync
+  // with the true display condition. Derived state collapses all of those
+  // into a single source of truth.
   // Sprint 32: Top-level activePlan state (Cline's currentFocusChainChecklist pattern).
   // Plan lives HERE, not inside a tool card's result field. This prevents the
   // "reverts to Waiting for plan data..." bug caused by React unmount/remount.
@@ -164,6 +171,22 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   // Slash command state
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [showSlashDropdown, setShowSlashDropdown] = useState(false);
+
+  // Sprint 38 Bug 1: Composer lock — while a send is in flight we block
+  // handleInputChange from mutating `input`, and we ensure setInput('') only
+  // runs AFTER the user message has been committed to setMessages(). This
+  // prevents (a) in-flight typing from being clobbered by a programmatic
+  // clear and (b) the user's current prompt from vanishing before they can
+  // see it committed to the transcript.
+  const isComposerLockedRef = useRef(false);
+
+  // Sprint 38 Bug 2: Keep a ref mirror of streamingContent so the IPC event
+  // handler (registered once in an effect with a stable closure) can read the
+  // CURRENT value without relying on a re-subscribed callback. Needed because
+  // attempt_completion's tool_result arrives via the same chat:stream-chunk
+  // channel and we must flush whatever streamed text preceded it before the
+  // channel overwrites/clears that text.
+  const streamingContentRef = useRef('');
 
   // Sprint 25: Attachment state
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
@@ -234,7 +257,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             timestamp: m.timestamp,
           }));
           setMessages(dbMessages);
-          setShowSuggestions(false);
+          // Sprint 38 Bug 3: no setShowSuggestions — it's derived.
         }
       }).catch((err: any) => {
         console.warn('[Chat] Failed to load history:', err);
@@ -256,6 +279,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           console.debug('[Chat] Suppressed raw tool_use JSON from text stream');
           return;
         }
+        streamingContentRef.current = content;
         setStreamingContent(content);
       } else if (data.type === 'tool_call' && data.toolCall) {
         // Sprint 32: Every tool call gets a stable toolCallId at creation (Cline ts pattern).
@@ -271,6 +295,29 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           },
         ]);
       } else if (data.type === 'tool_result' || data.type === 'tool_error') {
+        // Sprint 38 Bug 2: When attempt_completion resolves, promote any
+        // streamed text that preceded it into a finalized assistant message
+        // BEFORE the terminal-tool flush clears streamingContent. Without
+        // this the completion result (or a subsequent `done`/`text` chunk)
+        // can overwrite the in-progress streamed message and the user loses
+        // the reasoning/explanation Claude emitted before calling
+        // attempt_completion. Only runs when there's actual text to flush.
+        if (data.toolName === 'attempt_completion') {
+          const preflush = streamingContentRef.current;
+          if (preflush && preflush.trim()) {
+            const preCompletionMsg: Message = {
+              id: `msg-precompletion-${Date.now()}`,
+              role: 'assistant',
+              content: sanitizeContent(preflush),
+              timestamp: new Date().toISOString(),
+              streaming: false,
+            };
+            setMessages(prev => [...prev, preCompletionMsg]);
+            streamingContentRef.current = '';
+            setStreamingContent('');
+          }
+        }
+
         // Sprint 15.2: match by toolCallId first, then fallback to last matching name
         setStreamingToolCalls(prev => {
           // Try to match by toolCallId (exact match)
@@ -321,6 +368,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           timestamp: new Date().toISOString(),
         };
         setMessages(prev => [...prev, researchMsg]);
+        streamingContentRef.current = '';
         setStreamingContent('');
         setIsLoading(false);
       } else if (data.type === 'usage-update') {
@@ -329,8 +377,10 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           onSessionUsageUpdate(data.sessionUsage);
         }
       } else if (data.type === 'done') {
+        streamingContentRef.current = '';
         setStreamingContent('');
       } else if (data.type === 'error') {
+        streamingContentRef.current = '';
         setStreamingContent('');
         // Show error in chat with a friendly explanation
         if (data.content) {
@@ -383,6 +433,11 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
   // Handle slash command input detection
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    // Sprint 38 Bug 1: ignore DOM change events while a send is in flight so
+    // a programmatic setInput('') cannot race with the user typing the next
+    // prompt and clobber their characters.
+    if (isComposerLockedRef.current) return;
+
     const val = e.target.value;
     setInput(val);
 
@@ -419,7 +474,6 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       timestamp: new Date().toISOString(),
     };
     setMessages(prev => [...prev, cmdMsg]);
-    setShowSuggestions(false);
 
     if (!api?.executeSlashCommand) {
       const errMsg: Message = {
@@ -436,9 +490,10 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       const result = await api.executeSlashCommand(cmdName, args, session.id);
 
       // Handle clear command
+      // Sprint 38 Bug 3: no setShowSuggestions — suggestions re-derive
+      // from the now-empty messages[] + empty input + no attachments.
       if (result.data?.action === 'clear') {
         setMessages([]);
-        setShowSuggestions(true);
         return;
       }
 
@@ -602,10 +657,18 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     const trimmed = input.trim();
 
     // Check if it's a slash command (only text, no attachments)
+    // Sprint 38 Bug 1: lock → push command message → clear input, in that
+    // order, so the command is visible in the transcript before the composer
+    // empties, and typing during execution cannot be clobbered.
     if (trimmed.startsWith('/') && attachments.length === 0) {
-      setInput('');
+      isComposerLockedRef.current = true;
       setShowSlashDropdown(false);
-      await executeSlashCommand(trimmed);
+      try {
+        await executeSlashCommand(trimmed);
+        setInput('');
+      } finally {
+        isComposerLockedRef.current = false;
+      }
       return;
     }
 
@@ -629,16 +692,21 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       content: displayContent,
       timestamp: new Date().toISOString(),
     };
+
+    // Sprint 38 Bug 1: lock composer BEFORE any clears, commit userMsg to the
+    // transcript FIRST, then clear input. This guarantees the user sees their
+    // message on screen before the composer empties and prevents handleInputChange
+    // from racing setInput('') with a fresh keystroke.
+    isComposerLockedRef.current = true;
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     const sentAttachments = [...attachments];
     setAttachments([]);
     setIsLoading(true);
+    streamingContentRef.current = '';
     setStreamingContent('');
     setStreamingToolCalls([]);
-    setShowSuggestions(false);
 
-    let lastResponseContent = '';
     try {
       if (api) {
         // Sprint 25: Build content with attachments for the API
@@ -660,7 +728,6 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         }
 
         const result = await api.sendMessage(session.id, messageContent);
-        lastResponseContent = result.content || '';
 
         const assistantMsg: Message = {
           id: result.id || `msg-${Date.now() + 1}`,
@@ -693,11 +760,16 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, errMsg]);
+    } finally {
+      // Sprint 38 Bug 1: release the lock only after the API call has fully
+      // settled (success OR error). This guarantees the composer cannot be
+      // typed into during send and remains in a consistent state afterwards.
+      setIsLoading(false);
+      streamingContentRef.current = '';
+      setStreamingContent('');
+      setStreamingToolCalls([]);
+      isComposerLockedRef.current = false;
     }
-
-    setIsLoading(false);
-    setStreamingContent('');
-    setStreamingToolCalls([]);
 
     // Sprint 28: No auto-continue scheduler. Loop termination is driven by stop_reason.
   };
@@ -717,13 +789,23 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   }, [executeSlashCommand]);
 
   const handleSuggestionSelect = useCallback((prompt: string) => {
+    // Sprint 38 Bug 3: setting input to `prompt` (non-empty) is itself what
+    // dismisses the suggestion panel via the derived showSuggestions. No
+    // explicit setShowSuggestions needed.
     setInput(prompt);
-    setShowSuggestions(false);
     inputRef.current?.focus();
   }, []);
 
   // Check if there are user-visible messages (not just system)
   const hasUserMessages = messages.some(m => m.role === 'user' || m.role === 'assistant');
+
+  // Sprint 38 Bug 3: Single source of truth for the suggestion cards. Show
+  // only when the transcript AND composer AND attachment tray are all empty.
+  // This naturally hides the panel the moment the user starts typing or
+  // stages a file, and re-shows it after /clear or Fresh Chat clears the
+  // transcript (provided the composer is also empty).
+  const showSuggestions =
+    messages.length === 0 && input.trim() === '' && attachments.length === 0;
 
   return (
     <div
@@ -845,7 +927,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
       {/* Messages or Suggestions */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {showSuggestions && !hasUserMessages ? (
+        {showSuggestions ? (
           <SuggestionCards onSelect={handleSuggestionSelect} />
         ) : (
           <>
@@ -1061,7 +1143,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             {hasUserMessages && (
               <div className="flex items-center gap-1 ml-2">
                 <button
-                  onClick={() => { setMessages([]); setShowSuggestions(true); if (api?.clearChat) api.clearChat(session.id); }}
+                  onClick={() => { setMessages([]); if (api?.clearChat) api.clearChat(session.id); }}
                   className="text-[9px] px-1.5 py-0.5 rounded border border-matrix-border/20 text-matrix-text-muted/40 hover:text-matrix-text-dim hover:border-matrix-accent/30 transition-colors"
                   title="Clear chat and start fresh"
                 >
