@@ -2,6 +2,8 @@
  * Canonical Agent Loop — Sprint 28 (Cline-style semantic tool-use loop)
  * Sprint 33: Added turn-start/turn-inspection/turn-end loop events,
  * hardened no-tools-used-nudge to not fire when toolUseCount > 0.
+ * Sprint 27.5.1: Silent todo-continuation nudge + stuck_after_todo safety
+ * exit for premature end_turn after todo-only turns.
  * BUG-05 (Sprint 39): Doom-loop detection — when the model calls the same
  * tool with identical input 3+ times in a row we inject a redirection
  * nudge once; if it keeps going (5+ identical calls) we exit with
@@ -21,11 +23,17 @@
  *   5. If a terminal tool was used → exit cleanly.
  *   6. Safety cap at maxTurns (default 25).
  *
+ * Sprint 27.5.1 addition: when the previous turn only called the todo tool
+ * and the list still has incomplete items, a user-role ephemeral nudge is
+ * injected to force continuation. A safety limit of 3 consecutive nudges
+ * prevents infinite loops (exits with reason 'stuck_after_todo').
+ *
  * References:
  *   - https://github.com/cline/cline/blob/main/src/core/task/index.ts
  *   - https://github.com/cline/cline/pull/9931
  *   - https://github.com/anomalyco/opencode/pull/12623
  *   - https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+ *   - https://github.com/anthropics/claude-code/issues/10980
  */
 
 import { createHash } from 'crypto';
@@ -35,6 +43,21 @@ import { ILLMProvider, LLMResponse } from '../domain/interfaces';
 import { ToolDefinition } from '../domain/entities';
 import { streamChatToRenderer } from '../providers';
 import { formatResponse } from './formatResponse';
+import { isTodoComplete } from './todoManager';
+
+// ─── Sprint 27.5.1: Todo continuation constants ───
+
+/** Maximum consecutive todo-only end_turn nudges before giving up. */
+const MAX_TODO_NUDGES = 3;
+
+/** The nudge message injected when the model prematurely ends after a todo-only turn. */
+export const TODO_NUDGE_MESSAGE =
+  'Continue executing the in_progress task from your todo list. Do not end your turn until all tasks are completed.';
+
+/** Returns true iff the given tool calls are non-empty and all are the `todo` tool. */
+export function onlyTodoCalled(toolCalls: Array<{ name: string }>): boolean {
+  return toolCalls.length > 0 && toolCalls.every(tc => tc.name === 'todo');
+}
 
 // ─── BUG-05: Doom-loop guard constants ───
 
@@ -107,6 +130,8 @@ export interface AgentLoopResult {
     | 'no_tools'
     | 'attempt_completion'
     | 'ask_followup_question'
+    /** Sprint 27.5.1: Gave up after MAX_TODO_NUDGES consecutive end_turn following a todo-only turn */
+    | 'stuck_after_todo'
     /** BUG-05: Hard-stopped because the model kept calling the same tool with identical input */
     | 'stuck_repeat';
   completionResult?: string;
@@ -131,12 +156,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let consecutiveNoToolUse = 0;
   let lastContent = '';
 
-  // BUG-05: doom-loop tracking. A "batch" is all tool calls from one turn,
-  // hashed together with batchSignature(). We count how many consecutive
-  // turns produced the same signature. Nudge once at threshold, hard-stop
-  // past the limit. `doomLoopNudgeFired` guarantees the nudge is injected
-  // at most once per repeat-run — if the nudge itself doesn't change the
-  // model's behaviour, the EXIT_AT ceiling trips next.
+  // ─── Sprint 27.5.1: Todo continuation state ───
+  let consecutiveTodoNudges = 0;
+  let lastTurnOnlyTodo = false;
+
+  // ─── BUG-05: Doom-loop tracking ───
+  // A "batch" is all tool calls from one turn, hashed together with
+  // batchSignature(). We count how many consecutive turns produced the
+  // same signature. Nudge once at threshold, hard-stop past the limit.
+  // `doomLoopNudgeFired` guarantees the nudge is injected at most once
+  // per repeat-run — if the nudge itself doesn't change the model's
+  // behaviour, the EXIT_AT ceiling trips next.
   let lastBatchSignature: string | null = null;
   let consecutiveIdenticalBatches = 0;
   let doomLoopNudgeFired = false;
@@ -223,6 +253,57 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
       if (stopReason === 'stop_sequence') {
         return { content: lastContent, toolCalls: totalToolCalls, turns, reason: 'stop_sequence' };
+      }
+
+      // ─── Sprint 27.5.1: Silent todo-continuation check ───
+      // If the previous turn only called the `todo` tool and the todo list
+      // still has incomplete items, the model has prematurely ended its turn.
+      // Inject a user-role ephemeral nudge and continue the loop.
+      if (
+        stopReason === 'end_turn' &&
+        lastTurnOnlyTodo &&
+        !isTodoComplete(options.sessionId)
+      ) {
+        consecutiveTodoNudges++;
+
+        if (options.win && !options.win.isDestroyed()) {
+          options.win.webContents.send('agent:loop-event', {
+            event: 'todo-continuation-nudge',
+            turn: turns,
+            consecutiveNudges: consecutiveTodoNudges,
+            maxNudges: MAX_TODO_NUDGES,
+            ephemeral: true,
+          });
+        }
+
+        if (consecutiveTodoNudges >= MAX_TODO_NUDGES) {
+          // Safety: model is stuck in a todo → end_turn loop
+          if (options.win && !options.win.isDestroyed()) {
+            options.win.webContents.send('agent:loop-event', {
+              event: 'stuck-after-todo',
+              turn: turns,
+              consecutiveNudges: consecutiveTodoNudges,
+            });
+          }
+          options.persistMessage?.('assistant', result.content || '(stuck after todo)');
+          return {
+            content: lastContent,
+            toolCalls: totalToolCalls,
+            turns,
+            reason: 'stuck_after_todo',
+          };
+        }
+
+        // Sprint 35/36 pattern: persist the assistant response normally,
+        // but the nudge itself is EPHEMERAL — lives only in currentMessages,
+        // never persisted to DB or conversation history.
+        options.persistMessage?.('assistant', result.content);
+        currentMessages.push({ role: 'assistant', content: result.content });
+        currentMessages.push({ role: 'user', content: TODO_NUDGE_MESSAGE });
+
+        // Reset so we don't double-count if the very next turn also end_turns
+        lastTurnOnlyTodo = false;
+        continue;
       }
 
       // end_turn with no tools → inject noToolsUsed nudge (Cline pattern)
@@ -355,6 +436,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     options.persistMessage?.('user', toolResultMessage);
 
     currentMessages.push({ role: 'user', content: toolResultMessage });
+
+    // ─── Sprint 27.5.1: Track whether this turn was todo-only ───
+    // The flag is checked next iteration when stopReason === 'end_turn'.
+    // Reset nudge counter on any non-todo-only turn so legitimate work
+    // between todo calls doesn't trip the stuck_after_todo safety.
+    const wasOnlyTodo = onlyTodoCalled(toolCalls);
+    if (wasOnlyTodo && !isTodoComplete(options.sessionId)) {
+      lastTurnOnlyTodo = true;
+    } else {
+      lastTurnOnlyTodo = false;
+      consecutiveTodoNudges = 0;
+    }
 
     // ─── Case 3: Terminal tool used → exit ───
     // Sprint 29: Emit terminal tool event
