@@ -15,6 +15,7 @@ import { getRateLimiter } from './rateLimiter';
 import { getRetryHandler, parseRateLimitHeaders } from './retryHandler';
 import { getToolResultBudget } from './toolResultBudget';
 import { getContextManager, estimateTokens, type ContextMessage } from './contextManager';
+import { detectTierFromHeaders } from './rateLimitConfig';
 
 // ─── Sprint 35: Context-window hygiene (ported from Cline) ─────────────────
 
@@ -49,14 +50,31 @@ export function truncateIfNeeded(
   messages: Array<{ role: string; content: string }>,
   systemPrompt: string,
   model: string,
-): { messages: Array<{ role: string; content: string }>; wasTruncated: boolean; originalTokens: number; truncatedTokens: number } {
+  /**
+   * MCP-429-09: The budget must include the cost of the tool schemas,
+   * which the API carries on a separate `tools` parameter. Previously
+   * the function summed only systemTokens + msgTokens, so ~15k tokens
+   * of tool schemas for 50 tools were invisible to the budget
+   * calculation — truncation thought there was headroom when the
+   * actual payload was already at the limit. That caused silent
+   * server-side truncation and occasional 400s.
+   *
+   * Callers should pass the JSON-stringified size of the `tools` array
+   * they plan to send; this is the cheapest accurate approximation of
+   * the schema overhead without hitting a tokenizer. New arg is
+   * optional so the existing callers keep compiling; when omitted it
+   * defaults to 0 and behaviour matches the pre-fix version.
+   */
+  toolSchemaTokens?: number,
+): { messages: Array<{ role: string; content: string }>; wasTruncated: boolean; originalTokens: number; truncatedTokens: number; toolSchemaTokens: number } {
   const maxTokens = getMaxAllowedSize(model);
   const systemTokens = estimateTokens(systemPrompt);
+  const toolTokens = toolSchemaTokens ?? 0;
   const msgTokens = messages.map(m => estimateTokens(m.content));
-  const totalTokens = systemTokens + msgTokens.reduce((a, b) => a + b, 0);
+  const totalTokens = systemTokens + toolTokens + msgTokens.reduce((a, b) => a + b, 0);
 
   if (totalTokens <= maxTokens) {
-    return { messages, wasTruncated: false, originalTokens: totalTokens, truncatedTokens: totalTokens };
+    return { messages, wasTruncated: false, originalTokens: totalTokens, truncatedTokens: totalTokens, toolSchemaTokens: toolTokens };
   }
 
   // Sprint 35 Fix 5: Always preserve the first user-assistant pair (the original task)
@@ -65,7 +83,9 @@ export function truncateIfNeeded(
   const rest = messages.slice(firstChunkSize);
 
   const firstChunkTokens = firstChunk.reduce((s, m) => s + estimateTokens(m.content), 0);
-  const budget = maxTokens - systemTokens - firstChunkTokens - 200; // 200 token buffer for truncation notice
+  // MCP-429-09: Subtract toolTokens too so the message-budget after
+  // truncation reflects what the API call actually has room for.
+  const budget = maxTokens - systemTokens - toolTokens - firstChunkTokens - 200; // 200 token buffer for truncation notice
 
   // Half keep
   const halfIdx = Math.floor(rest.length / 2);
@@ -88,11 +108,13 @@ export function truncateIfNeeded(
   };
 
   const truncated = [...firstChunk, truncationNotice, ...kept];
-  const truncatedTokens = systemTokens + truncated.reduce((s, m) => s + estimateTokens(m.content), 0);
+  // MCP-429-09: include toolTokens in the "after truncation" total so
+  // the reported numbers match the actual payload size.
+  const truncatedTokens = systemTokens + toolTokens + truncated.reduce((s, m) => s + estimateTokens(m.content), 0);
 
-  console.log(`[Sprint35:truncation] ${totalTokens} tokens → ${truncatedTokens} tokens (${messages.length} msgs → ${truncated.length} msgs, model=${model}, maxAllowed=${maxTokens})`);
+  console.log(`[Sprint35:truncation] ${totalTokens} tokens → ${truncatedTokens} tokens (${messages.length} msgs → ${truncated.length} msgs, tools=${toolTokens}, model=${model}, maxAllowed=${maxTokens})`);
 
-  return { messages: truncated, wasTruncated: true, originalTokens: totalTokens, truncatedTokens };
+  return { messages: truncated, wasTruncated: true, originalTokens: totalTokens, truncatedTokens, toolSchemaTokens: toolTokens };
 }
 
 /**
@@ -224,6 +246,55 @@ let sessionUsage: SessionUsage = {
   estimatedSavings: 0,
   promptCachingEnabled: true,
 };
+
+// ─── MCP-429-04: Tier auto-detection plumbing ──────────────────
+//
+// Module-scoped because both sendMessage and streamMessage need it, and
+// we want to de-duplicate the event emission: once we've told the
+// renderer "your account is actually tier2", we shouldn't emit the
+// same mismatch on every subsequent request.
+let _lastDetectedTier: string | null = null;
+
+/**
+ * Called after every Anthropic API response. If the response's
+ * `x-ratelimit-limit-input-tokens` header implies a different tier
+ * than the rate limiter is currently configured for, emit a
+ * `rate-limit:tier-detected` event exactly once per distinct
+ * detected tier. The renderer's Settings panel is responsible for
+ * deciding whether to prompt the user — we just supply the signal.
+ *
+ * Ref: docs/AUDIT-MCP-429.md §MCP-429-04
+ */
+function observeTierFromParsedHeaders(parsed: ReturnType<typeof parseRateLimitHeaders>, win: BrowserWindow | null): void {
+  const detected = detectTierFromHeaders(parsed.inputTokensLimit);
+  if (!detected) return;
+
+  const rl = getRateLimiter();
+  const configured = rl.getConfig().providerTier;
+  if (detected === configured) {
+    // Already aligned — clear the memo so future drifts re-emit.
+    _lastDetectedTier = detected;
+    return;
+  }
+  if (_lastDetectedTier === detected) return; // dedup same mismatch
+  _lastDetectedTier = detected;
+
+  console.warn('[rate-limit:tier-detected]', JSON.stringify({
+    configuredTier: configured,
+    detectedTier: detected,
+    observedInputTokensPerMinute: parsed.inputTokensLimit,
+  }));
+
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('rate-limit:tier-detected', {
+      configuredTier: configured,
+      detectedTier: detected,
+      observedInputTokensPerMinute: parsed.inputTokensLimit,
+      observedOutputTokensPerMinute: parsed.outputTokensLimit,
+      observedRequestsPerMinute: parsed.requestsLimit,
+    });
+  }
+}
 
 export function getSessionUsage(): SessionUsage { return { ...sessionUsage }; }
 export function resetSessionUsage(): void {
@@ -809,7 +880,22 @@ export class ClaudeProvider implements ILLMProvider {
       });
     }
 
-    yield { type: 'done', stopReason: streamStopReason };
+    // MCP-429-04: Parse headers and emit a tier-detection signal. The
+    // streamMessage path previously COLLECTED headers into streamRespHeaders
+    // but never actually PARSED them. We fix both things here: parse, then
+    // observe for tier mismatch. The done-chunk is enriched with the parsed
+    // snapshot so the IPC-bridging caller can forward it to the renderer
+    // event pipeline with full window access.
+    const streamParsedHeaders = parseRateLimitHeaders(streamRespHeaders);
+
+    yield {
+      type: 'done',
+      stopReason: streamStopReason,
+      // Piggy-back parsed headers on the done chunk so the IPC-bridging
+      // caller can observe tier + emit the renderer event. Kept as `any`
+      // here because LLMStreamChunk is a shared interface.
+      rateLimitHeaders: streamParsedHeaders,
+    } as any;
   }
 
   countTokens(text: string): number {
@@ -1081,7 +1167,16 @@ export async function streamChatToRenderer(
   }
 
   // Sprint 35 Fix 3 + Fix 5: Truncate if payload exceeds model limit, preserving first user-assistant pair
-  const truncResult = truncateIfNeeded(cleanedMessages, systemPrompt || '', modelId);
+  // MCP-429-09: Include the tool-schema tokens in the budget so
+  // truncation triggers when the real payload (system + tools + msgs)
+  // approaches the 160k limit, not just when the messages alone do.
+  let toolSchemaTokens = 0;
+  if (tools && tools.length > 0) {
+    try {
+      toolSchemaTokens = estimateTokens(JSON.stringify(tools));
+    } catch { /* fall back to 0 */ }
+  }
+  const truncResult = truncateIfNeeded(cleanedMessages, systemPrompt || '', modelId, toolSchemaTokens);
   cleanedMessages = truncResult.messages;
   if (truncResult.wasTruncated) {
     console.log(`[Sprint35:truncation] Conversation truncated: ${truncResult.originalTokens} → ${truncResult.truncatedTokens} tokens`);
@@ -1149,6 +1244,18 @@ export async function streamChatToRenderer(
         // Sprint 28: Capture stopReason from done chunk
         if ((chunk as any).stopReason) {
           stopReason = (chunk as any).stopReason;
+        }
+        // MCP-429-04: done-chunk now carries parsed rate-limit headers
+        // (streamMessage parses them after the stream closes). If the
+        // observed tier doesn't match the configured tier, this emits a
+        // one-shot `rate-limit:tier-detected` event to the renderer.
+        const parsedHeaders = (chunk as any).rateLimitHeaders;
+        if (parsedHeaders) {
+          try {
+            observeTierFromParsedHeaders(parsedHeaders, win);
+          } catch (err) {
+            console.warn('[rate-limit:tier-detected] observer threw:', err);
+          }
         }
         win?.webContents.send('chat:stream-chunk', {
           sessionId,

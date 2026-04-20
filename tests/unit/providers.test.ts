@@ -31,7 +31,11 @@ describe('Providers — Sprint 28 stopReason', () => {
   });
 
   it('streamMessage yields done chunk with stopReason', () => {
-    expect(providersCode).toContain("yield { type: 'done', stopReason: streamStopReason }");
+    // MCP-429-04 broadened the done chunk from a single-line literal to a
+    // multi-line object that also carries parsed rate-limit headers.
+    // Assert on the structural invariant (type:'done' + stopReason:streamStopReason)
+    // rather than a brittle exact-string match.
+    expect(providersCode).toMatch(/yield\s*\{[\s\S]{0,400}?type:\s*'done'[\s\S]{0,400}?stopReason:\s*streamStopReason/);
   });
 
   it('streamStopReason defaults to end_turn', () => {

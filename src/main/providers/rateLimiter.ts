@@ -95,6 +95,118 @@ export class RateLimiter {
     return { ok: true, delayMs: 0 };
   }
 
+  /**
+   * MCP-429-02: Predictive pre-flight check.
+   *
+   * The basic preFlightCheck() above is REACTIVE — it inspects only the
+   * already-consumed sliding window. A request that WOULD overflow the
+   * window is sent anyway and gets 429'd at the server. This variant
+   * takes the estimated input/output cost of the request about to be
+   * sent and projects the post-send state of the window.
+   *
+   * Decisions:
+   *   - If the projected input would exceed the tier's HARD limit:
+   *     refuse outright — a 429 is guaranteed, there's no waiting
+   *     strategy that saves us.
+   *   - If the projection would exceed the configured SOFT limit:
+   *     compute the earliest time at which enough old entries age out
+   *     of the 60s window to make room. Return that as delayMs.
+   *   - If the projection comfortably fits: fall through to the reactive
+   *     preFlightCheck logic (throttle/pause) so existing behaviour is
+   *     preserved.
+   *
+   * The estimate is a rough chars/4 tally from the caller — accurate
+   * enough for "would this push us off the cliff" decisions, imprecise
+   * enough that we apply a 10% safety buffer against the soft limit.
+   *
+   * Ref: docs/AUDIT-MCP-429.md §MCP-429-02
+   */
+  preFlightCheckPredictive(
+    estimate?: { inputTokens?: number; outputTokens?: number },
+  ): { ok: boolean; delayMs: number; reason?: string } {
+    if (!estimate || !estimate.inputTokens) {
+      // No estimate — fall back to the reactive check
+      return this.preFlightCheck();
+    }
+
+    const now = Date.now();
+    this.prune(now);
+    const tierLimits = ANTHROPIC_TIER_LIMITS[this.config.providerTier];
+
+    // Current consumption over the window
+    const inputInWindow = this.entries.reduce((s, e) => s + e.inputTokens, 0);
+    const outputInWindow = this.entries.reduce((s, e) => s + e.outputTokens, 0);
+
+    const projectedInput = inputInWindow + (estimate.inputTokens || 0);
+    const projectedOutput = outputInWindow + (estimate.outputTokens || 0);
+
+    // Hard limit breach on input → refuse. No delay saves us.
+    if (projectedInput > tierLimits.inputTokensPerMinute) {
+      return {
+        ok: false,
+        delayMs: 0,
+        reason:
+          `Request would exceed your tier's hard input-token limit ` +
+          `(estimated ${projectedInput.toLocaleString()} tokens over the ` +
+          `60s window; tier ${this.config.providerTier} cap is ` +
+          `${tierLimits.inputTokensPerMinute.toLocaleString()}/min). ` +
+          `Shorten the conversation, disable unused MCP servers, or ` +
+          `switch to a higher tier.`,
+      };
+    }
+
+    // Soft limit breach → compute minimum delay for projection to fit.
+    // Find the earliest window timestamp whose prune-out would reduce
+    // inputInWindow enough that projectedInput fits under the soft limit.
+    const softInput = this.config.softInputTokensPerMinute;
+    const softBufferFactor = 0.9; // 10% safety buffer
+    const effectiveSoftInput = Math.floor(softInput * softBufferFactor);
+
+    if (projectedInput > effectiveSoftInput) {
+      // How many tokens would need to age out?
+      const excess = projectedInput - effectiveSoftInput;
+      let freed = 0;
+      let delayMs = 0;
+      // Entries are appended in time order, so the oldest is at [0]
+      for (const entry of this.entries) {
+        freed += entry.inputTokens;
+        if (freed >= excess) {
+          delayMs = Math.max(0, entry.timestamp + WINDOW_MS - now);
+          break;
+        }
+      }
+      // Cap at the window size itself — no point waiting longer
+      delayMs = Math.min(delayMs, WINDOW_MS);
+      if (delayMs > 0) {
+        return {
+          ok: true,
+          delayMs,
+          reason:
+            `Projected request (${projectedInput.toLocaleString()} input tokens) ` +
+            `would push past the ${effectiveSoftInput.toLocaleString()}/min ` +
+            `soft cap (${softInput.toLocaleString()} × 90%). ` +
+            `Delaying ${Math.round(delayMs / 1000)}s so enough tokens age ` +
+            `out of the sliding window.`,
+        };
+      }
+    }
+
+    // Same idea for output if estimate provided
+    if (estimate.outputTokens && projectedOutput > tierLimits.outputTokensPerMinute) {
+      return {
+        ok: false,
+        delayMs: 0,
+        reason:
+          `Request would exceed your tier's hard output-token limit ` +
+          `(projected ${projectedOutput.toLocaleString()} over the ` +
+          `60s window; tier cap is ${tierLimits.outputTokensPerMinute.toLocaleString()}/min).`,
+      };
+    }
+
+    // Projection fits — fall through to the reactive check for throttle/pause semantics
+    return this.preFlightCheck();
+  }
+
   /** Manually pause (e.g., after a 429 response) */
   pause(): void {
     this._isPaused = true;

@@ -66,7 +66,8 @@ import { setFollowupWindow } from './tools/askFollowupQuestion';
 import { getSessionUsage, resetSessionUsage } from './providers';
 import { getRetryHandler } from './providers/retryHandler';
 import { getRateLimiter } from './providers/rateLimiter';
-import { DEFAULT_TOKEN_BUDGET_CONFIG } from './providers/rateLimitConfig';
+import { DEFAULT_TOKEN_BUDGET_CONFIG, validateSoftLimits, type TokenBudgetConfig } from './providers/rateLimitConfig';
+import { getToolResultBudget } from './providers/toolResultBudget';
 import {
   processAttachment, processClipboardImage, loadAttachment,
   deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
@@ -518,7 +519,17 @@ function registerIPCHandlers(): void {
       }
 
       enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
-      enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(t => t.name).join(', ')}`;
+      // MCP-429-08 (scope-adjusted): The previous line here was
+      //   enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(...).join(', ')}`;
+      // which re-emitted the NAMES of every local tool in the system prompt
+      // body, redundant with the `tools` parameter the API call already
+      // carries. ~60-80 tokens/turn of pure overhead at the current local
+      // tool count. Deleted.
+      //
+      // (Note: the MCP tool-NAME enumeration flagged in the audit lives
+      // in promptBuilder.ts, which is currently dead code — that module
+      // has been cleaned up in the same commit for future-regression
+      // safety, but does not affect the live path's token cost today.)
       if (mode === 'plan') {
         enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${Array.from(WRITE_ACCESS_TOOLS).join(', ')}`;
       }
@@ -601,7 +612,11 @@ function registerIPCHandlers(): void {
         messages,
         maxTurns: 25,
         maxConsecutiveMistakes: 3,
-        rateLimitCheck: () => getRateLimiter().preFlightCheck(),
+        // MCP-429-02: route through the PREDICTIVE pre-flight so the
+        // limiter can project this turn's cost against the sliding window
+        // and refuse / delay BEFORE the 429 happens. Falls through to the
+        // reactive check when no estimate is supplied.
+        rateLimitCheck: (estimate) => getRateLimiter().preFlightCheckPredictive(estimate),
         executeTool: async (tc) => {
           db.logActivity(sessionId, 'tool_call', `Tool call: ${tc.name}`, JSON.stringify(tc.input).substring(0, 200), {
             toolName: tc.name, toolCallId: tc.id, sessionId,
@@ -680,14 +695,53 @@ function registerIPCHandlers(): void {
             toolName: tc.name, toolCallId: tc.id, success: !isError,
           });
 
-          // Sprint 31 Bug #1: Length-aware truncation — 16 KB for structured tools, 2 KB for others
+          // MCP-429-05: Route ALL tool results (local AND MCP) through
+          // ToolResultBudget.processToolResult instead of the previous
+          // inline substring truncation.
+          //
+          // Before: inline `toolResultContent.substring(0, maxResultLen)`
+          // applied a flat 2KB/16KB cap depending on tool name. Worked
+          // fine for local tools but MCP tools could return arbitrarily
+          // large payloads (e.g. GitHub MCP returning a file listing)
+          // which then got appended verbatim to currentMessages and
+          // inflated every subsequent turn. ToolResultBudget exists
+          // with proper token-aware truncation, a retained-result ring
+          // buffer, and an "include full in next prompt" mechanism —
+          // but nothing called it.
+          //
+          // Now: every tool call goes through trb.processToolResult,
+          // which (a) token-estimates the full result, (b) truncates
+          // if over maxToolResultTokensPerTool (from the rate-limit
+          // config), (c) retains the full result for potential
+          // later inclusion, and (d) evicts oldest entries when the
+          // retention cap is hit.
+          //
+          // The STRUCTURED_TOOL_NAMES "hard override" is preserved as
+          // an UPPER bound — task_plan / compare_* / attempt_completion /
+          // ask_followup_question return machine-readable blobs the
+          // renderer parses, and truncating those by token budget
+          // would break parsing. So we take the max() of the
+          // budget-truncated version and the full-but-length-capped
+          // version for structured tools.
+          //
+          // Ref: docs/AUDIT-MCP-429.md §MCP-429-05
           const STRUCTURED_TOOL_NAMES = new Set([
             'task_plan', 'compare_file', 'compare_folder', 'merge_3way',
             'attempt_completion', 'ask_followup_question',
           ]);
-          const maxResultLen = STRUCTURED_TOOL_NAMES.has(tc.name) ? 16000 : 2000;
-          const truncatedResult = toolResultContent.substring(0, maxResultLen);
-          const wasTruncated = toolResultContent.length > maxResultLen;
+          const trbEntry = getToolResultBudget().processToolResult(tc.name, toolResultContent, tc.id);
+          let truncatedResult: string;
+          let wasTruncated: boolean;
+          if (STRUCTURED_TOOL_NAMES.has(tc.name)) {
+            // Structured tools: enforce a length cap but don't use the
+            // token-budget truncation (which would strip JSON closing
+            // braces). 16KB char cap matches the pre-fix behaviour.
+            truncatedResult = toolResultContent.substring(0, 16000);
+            wasTruncated = toolResultContent.length > 16000;
+          } else {
+            truncatedResult = trbEntry.truncatedResult;
+            wasTruncated = trbEntry.wasTruncated;
+          }
 
           mainWindow?.webContents.send('chat:stream-chunk', {
             sessionId, type: isError ? 'tool_error' : 'tool_result',
@@ -730,11 +784,26 @@ function registerIPCHandlers(): void {
               toolCallId: tc.id,
               resultLength: toolResultContent.length,
               truncated: wasTruncated,
-              maxAllowed: maxResultLen,
+              // MCP-429-05: report both the budget-truncated length (what the
+              // agent sees) and the full original length so the DevConsole
+              // chart can show "savings" due to retention.
+              truncatedLength: truncatedResult.length,
+              fullTokens: trbEntry.fullTokens,
+              truncatedTokens: trbEntry.truncatedTokens,
+              retentionId: trbEntry.id,
             });
           }
 
-          return { content: toolResultContent, isError };
+          // MCP-429-05: Return the budget-truncated result to the agent
+          // loop (not the raw toolResultContent). The agent loop will
+          // still apply its own 16k/4k char cap as an upper bound, but
+          // in practice our trb entry is already under that for MCP
+          // payloads, so what the model sees in its next turn is the
+          // token-budget-aware version. The FULL result is still
+          // retained inside the trb ring buffer (trbEntry.fullResult)
+          // for potential later inclusion via
+          // setIncludeFullInNextPrompt.
+          return { content: truncatedResult, isError };
         },
         persistMessage: (role, content, toolCalls) => {
           db.insertMessage(sessionId, role, content, toolCalls);
@@ -2343,6 +2412,32 @@ function registerIPCHandlers(): void {
   const rateLimiter = getRateLimiter();
   const retryHandler = getRetryHandler();
 
+  // MCP-429-12: Validate the rate-limit config at startup.
+  //
+  // The default config hardcodes `providerTier: 'tier4'` with
+  // `softInputTokensPerMinute: 400_000` — which is 10× over a Tier-1
+  // account's real 40k/min hard limit. Before this validation call,
+  // a Tier-1 user would hit 429 at ~20% of the configured soft limit
+  // and have no idea why.
+  //
+  // We log warnings but do NOT mutate the config — that requires
+  // either user confirmation (Settings dialog) or the upcoming
+  // MCP-429-04 tier-auto-detection (Slice 2). This is the alarm
+  // bell; the actual fix is downstream.
+  //
+  // Ref: docs/AUDIT-MCP-429.md §MCP-429-12
+  try {
+    const bootValidation = validateSoftLimits(rateLimiter.getConfig());
+    if (!bootValidation.valid) {
+      console.warn('[rate-limit:boot-validate]', JSON.stringify({
+        tier: rateLimiter.getConfig().providerTier,
+        warnings: bootValidation.warnings,
+      }));
+    }
+  } catch (err) {
+    console.warn('[rate-limit:boot-validate] threw:', err);
+  }
+
   // Push rate-limit snapshot to renderer whenever it changes
   rateLimiter.onChange((snapshot) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2382,8 +2477,34 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.TOKEN_BUDGET_SET, async (_event, config: any) => {
     try {
-      rateLimiter.updateConfig({ ...DEFAULT_TOKEN_BUDGET_CONFIG, ...config });
-      return { success: true };
+      const merged: TokenBudgetConfig = { ...DEFAULT_TOKEN_BUDGET_CONFIG, ...config };
+      rateLimiter.updateConfig(merged);
+
+      // MCP-429-12: Previously validateSoftLimits had ZERO call sites in
+      // the codebase, so a user could freely configure soft limits that
+      // exceeded their tier's hard limits — guaranteeing 429s.
+      // Now: run validation after every config update. Any warnings are
+      // forwarded to the renderer so the settings UI can surface them
+      // AND logged to the console. Does NOT reject the config (the user
+      // has the right to pick their own poison), but makes the
+      // consequences legible.
+      // Ref: docs/AUDIT-MCP-429.md §MCP-429-12
+      const validation = validateSoftLimits(merged);
+      if (!validation.valid) {
+        console.warn('[rate-limit:validate]', JSON.stringify({
+          tier: merged.providerTier,
+          warnings: validation.warnings,
+        }));
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('rate-limit:validation', {
+            valid: false,
+            warnings: validation.warnings,
+            tier: merged.providerTier,
+          });
+        }
+      }
+
+      return { success: true, validation };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to update token budget' };
     }

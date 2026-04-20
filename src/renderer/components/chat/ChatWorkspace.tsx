@@ -963,8 +963,14 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       ? 'Approaching rate limit — slow down'
       : '';
 
-  // ─── Sprint 38 Feature 3: MCP banner visibility ───
-  const MCP_TOOL_BANNER_THRESHOLD = 20;
+  // ─── Sprint 38 Feature 3 + MCP-429-10: MCP banner visibility ───
+  //
+  // Threshold was 20 in Sprint 38. The MCP-429 audit (docs/AUDIT-MCP-429.md)
+  // showed that token pressure becomes significant at ~10 MCP tools, which
+  // matches Cline's own 10-tool warning threshold. Dropped to 10 so users
+  // on Tier 1 / Tier 2 accounts see the warning well before their minute
+  // budget is committed to tool-schema overhead.
+  const MCP_TOOL_BANNER_THRESHOLD = 10;
   const mcpBannerVisible =
     !mcpBannerDismissed && mcpEnabledToolCount > MCP_TOOL_BANNER_THRESHOLD;
 

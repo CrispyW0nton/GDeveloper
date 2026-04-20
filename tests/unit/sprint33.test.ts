@@ -403,9 +403,14 @@ describe('Sprint 33 — Backward compatibility', () => {
     expect(providerSrc).toContain("direction: 'response'");
   });
 
-  it('main process still uses STRUCTURED_TOOL_NAMES for truncation', () => {
+  it('main process still uses STRUCTURED_TOOL_NAMES for per-tool truncation policy', () => {
+    // MCP-429-05 (Slice 2) split the previous single-ternary into a
+    // branch: structured tools get a 16000-char substring cap,
+    // non-structured tools flow through ToolResultBudget. The
+    // STRUCTURED_TOOL_NAMES set itself is still the gating predicate.
     const mainSrc = readSrc('main/index.ts');
     expect(mainSrc).toContain('STRUCTURED_TOOL_NAMES');
-    expect(mainSrc).toMatch(/STRUCTURED_TOOL_NAMES\.has\(tc\.name\)\s*\?\s*16000\s*:\s*2000/);
+    expect(mainSrc).toMatch(/STRUCTURED_TOOL_NAMES\.has\(tc\.name\)/);
+    expect(mainSrc).toMatch(/substring\(0,\s*16000\)/);
   });
 });

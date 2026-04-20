@@ -192,7 +192,9 @@ describe('Sprint 35 — Fix 5: First user message preserved during truncation', 
 
   it('firstChunk is always included in the output (never trimmed)', () => {
     const truncFnIdx = providerSrc.indexOf('export function truncateIfNeeded');
-    const fnBody = providerSrc.substring(truncFnIdx, truncFnIdx + 2000);
+    // Window widened 2000 → 4500 to cover the MCP-429-09 signature
+    // expansion (new toolSchemaTokens arg + full docstring).
+    const fnBody = providerSrc.substring(truncFnIdx, truncFnIdx + 4500);
 
     // Must spread firstChunk into the result
     expect(fnBody).toContain('...firstChunk');
@@ -207,7 +209,8 @@ describe('Sprint 35 — Truncation preserves user-assistant pairing', () => {
 
   it('truncation uses half/quarter strategy to keep paired messages', () => {
     const truncFnIdx = providerSrc.indexOf('export function truncateIfNeeded');
-    const fnBody = providerSrc.substring(truncFnIdx, truncFnIdx + 2500);
+    // Window widened 2500 → 4500 for MCP-429-09 signature expansion.
+    const fnBody = providerSrc.substring(truncFnIdx, truncFnIdx + 4500);
 
     // Must implement half keep and quarter keep
     expect(fnBody).toContain('halfIdx');
@@ -303,7 +306,8 @@ describe('Sprint 35 — Keep strategy: half then quarter', () => {
 
   it('half keep is tried first, quarter if half still exceeds budget', () => {
     const fnIdx = providerSrc.indexOf('export function truncateIfNeeded');
-    const fnBody = providerSrc.substring(fnIdx, fnIdx + 2500);
+    // Window widened 2500 → 4500 for MCP-429-09 signature expansion.
+    const fnBody = providerSrc.substring(fnIdx, fnIdx + 4500);
 
     // Half keep should be calculated first
     const halfPos = fnBody.indexOf('halfIdx');
@@ -356,7 +360,8 @@ describe('Sprint 35 — Integration: 10-turn flow does not stall', () => {
   it('consecutive turns with growing context get truncated, preventing 200k overflow', () => {
     // The function returns wasTruncated flag
     const fnIdx = providerSrc.indexOf('export function truncateIfNeeded');
-    const fnBody = providerSrc.substring(fnIdx, fnIdx + 2500);
+    // Window widened 2500 → 4500 for MCP-429-09 signature expansion.
+    const fnBody = providerSrc.substring(fnIdx, fnIdx + 4500);
     expect(fnBody).toContain('wasTruncated: true');
     expect(fnBody).toContain('wasTruncated: false');
   });
