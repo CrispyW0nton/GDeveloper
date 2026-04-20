@@ -587,6 +587,21 @@ export class ClaudeProvider implements ILLMProvider {
     let fullStreamContent = '';
     let streamStopReason = 'end_turn';
     let _firstBlockLogged = false;
+
+    // BUG-03: Track authoritative API-reported usage separately from the
+    // post-loop string-length estimate. The SSE `message_delta` event carries
+    // actual input_tokens / output_tokens when the model stops. Previously
+    // recordSessionUsage was called TWICE per stream (once with the API
+    // numbers inside the loop, then again with estimates after the loop),
+    // double-counting every request against the per-session budget. And
+    // getRateLimiter().recordUsage() was fed ONLY the estimate, so the
+    // rate-limit snapshot was systematically off from reality. After this
+    // fix: both recorders get called exactly once, preferring the API
+    // numbers when we received them and falling back to estimates only if
+    // the stream closed without a message_delta usage payload.
+    let apiInputTokens = 0;
+    let apiOutputTokens = 0;
+    let usageRecordedFromAPI = false;
     let _toolBlockCount = 0; // Sprint 34: track tool_use blocks seen
 
     // Sprint 34: Tools that accept empty input (no required properties)
@@ -723,12 +738,17 @@ export class ClaudeProvider implements ILLMProvider {
                   toolBlocksSeen: _toolBlockCount,
                 }));
               }
-              // Sprint 24: Capture actual usage from message_delta
+              // Sprint 24 / BUG-03: Capture actual usage from message_delta
+              // but DO NOT record yet — defer to a single post-loop call so
+              // we never double-count. Track the flag so the post-loop block
+              // can choose API numbers over estimates.
               if (event.usage) {
                 const streamInput = event.usage.input_tokens || 0;
                 const streamOutput = event.usage.output_tokens || 0;
                 if (streamInput > 0 || streamOutput > 0) {
-                  recordSessionUsage(streamInput, streamOutput);
+                  apiInputTokens = streamInput;
+                  apiOutputTokens = streamOutput;
+                  usageRecordedFromAPI = true;
                 }
               }
             }
@@ -749,11 +769,23 @@ export class ClaudeProvider implements ILLMProvider {
       this.activeStream = null;
     }
 
-    // Sprint 24: Record streaming usage with estimates (message_delta may have recorded actuals)
-    const streamInputTokens = estimateTokens(filteredMessages.map(m => m.content).join(' '));
-    const streamOutputTokens = estimateTokens(fullStreamContent || '');
-    getRateLimiter().recordUsage(streamInputTokens, streamOutputTokens);
-    recordSessionUsage(streamInputTokens, streamOutputTokens);
+    // BUG-03: Single authoritative usage record per stream. Prefer the
+    // API-reported numbers from message_delta when we received them; fall
+    // back to chars/4 estimation only if the stream terminated without a
+    // usage payload (network abort, model error, etc.). Both the
+    // rate-limiter snapshot and the per-session counter now see the SAME
+    // value, exactly once.
+    let recordedInputTokens: number;
+    let recordedOutputTokens: number;
+    if (usageRecordedFromAPI) {
+      recordedInputTokens = apiInputTokens;
+      recordedOutputTokens = apiOutputTokens;
+    } else {
+      recordedInputTokens = estimateTokens(filteredMessages.map(m => m.content).join(' '));
+      recordedOutputTokens = estimateTokens(fullStreamContent || '');
+    }
+    getRateLimiter().recordUsage(recordedInputTokens, recordedOutputTokens);
+    recordSessionUsage(recordedInputTokens, recordedOutputTokens);
 
     // Sprint 24: Parse rate-limit headers from streaming response
     const streamRespHeaders: Record<string, string> = {};
