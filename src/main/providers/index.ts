@@ -346,6 +346,33 @@ export class ClaudeProvider implements ILLMProvider {
   }
 
   /**
+   * Sprint 39 / BUG-09: Resolve the max output tokens for the active model.
+   *
+   * Previously max_tokens was hardcoded to 4096 at both API call sites,
+   * which caps Sonnet / Haiku / Opus-4 class models well below their real
+   * output ceiling (8192 – 32768 depending on model). That forces the agent
+   * to take more turns to produce the same amount of code, inflating both
+   * token cost and context-window pressure.
+   *
+   * Resolution order:
+   *   1. Live model cache populated from /v1/models (authoritative: each
+   *      API model entry carries max_output when the Anthropic catalogue
+   *      provides it).
+   *   2. SAFE_FALLBACK_MODELS — our hand-curated baseline shipped with the
+   *      app so first-boot requests aren't capped before discovery runs.
+   *   3. 4096 — matches the prior hardcoded behaviour for truly unknown
+   *      models, so we never regress a request that used to work.
+   */
+  private resolveMaxOutputTokens(): number {
+    const cached = getModelCache();
+    const fromCache = cached?.find(m => m.id === this.model);
+    if (fromCache?.maxOutput) return fromCache.maxOutput;
+    const fromFallback = SAFE_FALLBACK_MODELS.find(m => m.id === this.model);
+    if (fromFallback?.maxOutput) return fromFallback.maxOutput;
+    return 4096;
+  }
+
+  /**
    * Sprint 36: Abort the currently active stream (if any).
    * Called before a new request starts, and on component unmount / tab switch.
    * Silently no-ops if no stream is active.
@@ -379,7 +406,8 @@ export class ClaudeProvider implements ILLMProvider {
 
     const body: any = {
       model: this.model,
-      max_tokens: 4096,
+      // BUG-09: resolved from model metadata, not hardcoded. See resolveMaxOutputTokens.
+      max_tokens: this.resolveMaxOutputTokens(),
       messages: filteredMessages
     };
 
@@ -472,7 +500,8 @@ export class ClaudeProvider implements ILLMProvider {
 
     const body: any = {
       model: this.model,
-      max_tokens: 4096,
+      // BUG-09: resolved from model metadata, not hardcoded. See resolveMaxOutputTokens.
+      max_tokens: this.resolveMaxOutputTokens(),
       messages: filteredMessages,
       stream: true
     };
