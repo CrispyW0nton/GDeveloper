@@ -251,7 +251,10 @@ describe('Sprint 35 — Orphan tool_result without tool_use is stripped', () => 
 
   it('ensureToolResultsFollowToolUse strips orphan tool_results', () => {
     const fnIdx = providerSrc.indexOf('export function ensureToolResultsFollowToolUse');
-    const fnBody = providerSrc.substring(fnIdx, fnIdx + 3000);
+    // Window widened 3000 -> 5000 to cover the AGL-TRUNC partial-results
+    // fix added in Phase 2, which inserts ~40 lines between the function
+    // header and the orphan-tool-stripped log call.
+    const fnBody = providerSrc.substring(fnIdx, fnIdx + 5000);
 
     expect(fnBody).toContain('orphansStripped');
     expect(fnBody).toContain('orphan-tool-stripped');

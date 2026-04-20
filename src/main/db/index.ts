@@ -146,6 +146,36 @@ export class DatabaseManager {
     }));
   }
 
+  /**
+   * CHAT-DUP (Phase-2 audit): Returns the most recently inserted row for
+   * the given session + optional role filter.
+   *
+   * Used by the CHAT_SEND handler to dedup the "final assistant row" it
+   * wants to write at end of agent loop against whatever the per-turn
+   * persistMessage callback ALREADY wrote during the loop. If they match
+   * byte-for-byte on content, we skip the duplicate insert and reuse the
+   * existing row's id — preventing duplicate assistant messages on
+   * history reload.
+   *
+   * Ordering is by rowid (autoincrement) rather than timestamp because
+   * timestamps are 1-second-resolution in SQLite and multiple inserts
+   * can share a timestamp — rowid is the only true "last inserted"
+   * oracle.
+   */
+  getLastMessage(sessionId: string, role?: string): any | null {
+    const row = role
+      ? this.db.prepare(
+          `SELECT * FROM chat_messages WHERE session_id = ? AND role = ?
+           ORDER BY rowid DESC LIMIT 1`
+        ).get(sessionId, role) as any
+      : this.db.prepare(
+          `SELECT * FROM chat_messages WHERE session_id = ?
+           ORDER BY rowid DESC LIMIT 1`
+        ).get(sessionId) as any;
+    if (!row) return null;
+    return { ...row, tool_calls: row.tool_calls ? JSON.parse(row.tool_calls) : null };
+  }
+
   /** Sprint 35: Delete all messages for a session (used by New Task / chat clear) */
   deleteMessages(sessionId: string): number {
     const result = this.db.prepare(
