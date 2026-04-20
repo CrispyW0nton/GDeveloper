@@ -2,6 +2,11 @@
  * Canonical Agent Loop — Sprint 28 (Cline-style semantic tool-use loop)
  * Sprint 33: Added turn-start/turn-inspection/turn-end loop events,
  * hardened no-tools-used-nudge to not fire when toolUseCount > 0.
+ * BUG-05 (Sprint 39): Doom-loop detection — when the model calls the same
+ * tool with identical input 3+ times in a row we inject a redirection
+ * nudge once; if it keeps going (5+ identical calls) we exit with
+ * reason 'stuck_repeat'. Port of Cline PR #9931/9933 + OpenCode PR #12623
+ * repeated-tool-call guards.
  *
  * Replaces the old regex-based autoContinue engine with a clean loop
  * driven entirely by Anthropic's stop_reason and the presence of
@@ -11,19 +16,57 @@
  *   1. Stream a turn from Claude.
  *   2. If stop_reason is 'end_turn' and no tools were used → inject noToolsUsed nudge.
  *   3. If stop_reason is 'tool_use' → execute tools, append results, continue.
- *   4. If a terminal tool was used → exit cleanly.
- *   5. Safety cap at maxTurns (default 25).
+ *   4. If the same tool+input fires 3× in a row → inject doom-loop nudge;
+ *      5× in a row → exit with 'stuck_repeat'.
+ *   5. If a terminal tool was used → exit cleanly.
+ *   6. Safety cap at maxTurns (default 25).
  *
  * References:
  *   - https://github.com/cline/cline/blob/main/src/core/task/index.ts
+ *   - https://github.com/cline/cline/pull/9931
+ *   - https://github.com/anomalyco/opencode/pull/12623
  *   - https://docs.anthropic.com/en/docs/build-with-claude/tool-use
  */
+
+import { createHash } from 'crypto';
 
 import { BrowserWindow } from 'electron';
 import { ILLMProvider, LLMResponse } from '../domain/interfaces';
 import { ToolDefinition } from '../domain/entities';
 import { streamChatToRenderer } from '../providers';
 import { formatResponse } from './formatResponse';
+
+// ─── BUG-05: Doom-loop guard constants ───
+
+/** Number of consecutive identical tool-call batches before we intervene. */
+const DOOM_LOOP_NUDGE_AT = 3;
+/** Number of consecutive identical tool-call batches before we hard-stop. */
+const DOOM_LOOP_EXIT_AT = 5;
+
+/**
+ * User-role message injected when repeated identical tool calls are detected.
+ * Intentionally directive — tells the model EXACTLY what's happening and
+ * gives it two acceptable next actions (change approach, or call
+ * attempt_completion to report progress).
+ */
+export const DOOM_LOOP_NUDGE_MESSAGE =
+  'You are calling the same tool repeatedly with identical arguments. This indicates you are stuck in a loop. Please try a different approach — use a different tool, call the same tool with different arguments, or call attempt_completion to report whatever progress you have made so far.';
+
+/**
+ * Build a stable signature for a batch of tool calls.
+ * Used to detect "identical batch repeated" patterns in the agent loop.
+ * JSON.stringify on input is intentional: the Anthropic API emits consistent
+ * key ordering for objects, so if the model produces the same object twice,
+ * stringification will match byte-for-byte. Falling back to sha1 keeps the
+ * in-memory history compact even if individual tool_use.input payloads are
+ * large (patch_file / multi_edit can carry 10+ KB each).
+ */
+export function batchSignature(toolCalls: Array<{ name: string; input: any }>): string {
+  const serialized = toolCalls
+    .map(tc => `${tc.name}::${JSON.stringify(tc.input ?? {})}`)
+    .join('||');
+  return createHash('sha1').update(serialized).digest('hex');
+}
 
 // ─── Types ───
 
@@ -54,7 +97,18 @@ export interface AgentLoopResult {
   content: string;
   toolCalls: any[];
   turns: number;
-  reason: 'end_turn' | 'max_turns' | 'max_tokens' | 'stop_sequence' | 'error' | 'aborted' | 'no_tools' | 'attempt_completion' | 'ask_followup_question';
+  reason:
+    | 'end_turn'
+    | 'max_turns'
+    | 'max_tokens'
+    | 'stop_sequence'
+    | 'error'
+    | 'aborted'
+    | 'no_tools'
+    | 'attempt_completion'
+    | 'ask_followup_question'
+    /** BUG-05: Hard-stopped because the model kept calling the same tool with identical input */
+    | 'stuck_repeat';
   completionResult?: string;
   followupQuestion?: string;
 }
@@ -76,6 +130,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let turns = 0;
   let consecutiveNoToolUse = 0;
   let lastContent = '';
+
+  // BUG-05: doom-loop tracking. A "batch" is all tool calls from one turn,
+  // hashed together with batchSignature(). We count how many consecutive
+  // turns produced the same signature. Nudge once at threshold, hard-stop
+  // past the limit. `doomLoopNudgeFired` guarantees the nudge is injected
+  // at most once per repeat-run — if the nudge itself doesn't change the
+  // model's behaviour, the EXIT_AT ceiling trips next.
+  let lastBatchSignature: string | null = null;
+  let consecutiveIdenticalBatches = 0;
+  let doomLoopNudgeFired = false;
 
   while (turns < maxTurns) {
     // Check abort signal
@@ -318,6 +382,57 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         reason: 'ask_followup_question',
         followupQuestion,
       };
+    }
+
+    // ─── BUG-05: Doom-loop detection ───
+    // Classify this turn's tool batch. If the signature matches the previous
+    // turn's, we're watching the model invoke the exact same tools with the
+    // exact same inputs again — it's stuck. Nudge once at the threshold;
+    // hard-stop at the ceiling to bound wasted tokens.
+    const thisBatchSig = batchSignature(toolCalls);
+    if (thisBatchSig === lastBatchSignature) {
+      consecutiveIdenticalBatches++;
+    } else {
+      consecutiveIdenticalBatches = 1;
+      lastBatchSignature = thisBatchSig;
+      doomLoopNudgeFired = false;
+    }
+
+    if (consecutiveIdenticalBatches >= DOOM_LOOP_EXIT_AT) {
+      if (options.win && !options.win.isDestroyed()) {
+        options.win.webContents.send('agent:loop-event', {
+          event: 'doom-loop-hard-stop',
+          turn: turns,
+          consecutiveIdentical: consecutiveIdenticalBatches,
+          threshold: DOOM_LOOP_EXIT_AT,
+          toolNames: toolCalls.map((tc: any) => tc.name),
+        });
+      }
+      return {
+        content: lastContent,
+        toolCalls: totalToolCalls,
+        turns,
+        reason: 'stuck_repeat',
+      };
+    }
+
+    if (consecutiveIdenticalBatches >= DOOM_LOOP_NUDGE_AT && !doomLoopNudgeFired) {
+      // Nudge is EPHEMERAL — it goes to currentMessages so the NEXT API turn
+      // sees it, but is NOT persisted via options.persistMessage (same
+      // pattern as the no-tools-used nudge — preserving DB/history hygiene
+      // from Sprint 35/36 Fix 2+3).
+      currentMessages.push({ role: 'user', content: DOOM_LOOP_NUDGE_MESSAGE });
+      doomLoopNudgeFired = true;
+      if (options.win && !options.win.isDestroyed()) {
+        options.win.webContents.send('agent:loop-event', {
+          event: 'doom-loop-detected',
+          turn: turns,
+          consecutiveIdentical: consecutiveIdenticalBatches,
+          threshold: DOOM_LOOP_NUDGE_AT,
+          toolNames: toolCalls.map((tc: any) => tc.name),
+          ephemeral: true,
+        });
+      }
     }
 
     // ─── Case 4: stop_reason is not tool_use → something unexpected ───
