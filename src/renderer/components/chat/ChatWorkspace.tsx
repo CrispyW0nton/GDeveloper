@@ -267,10 +267,40 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           visible: true,
         });
         setTimeout(() => setNudgeBanner(prev => ({ ...prev, visible: false })), 4000);
+      } else if (data.event === 'session-compacted' || data.event === 'session-summarized') {
+        // AUDIT-ROUND-4 / CTX-COMPACT-STUB: main rewrote the DB rows for
+        // this session. Reload the transcript from the fresh DB state
+        // so the UI matches what the agent loop will actually see on
+        // the next send. Also surface a banner with the counts so the
+        // user can tell it actually ran (it was silently a no-op before).
+        if (data.sessionId === session.id && api?.getChatHistory) {
+          api.getChatHistory(session.id).then((history: any[]) => {
+            const dbMessages: Message[] = (history || []).map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: sanitizeContent(m.content),
+              toolCalls: m.tool_calls?.map((tc: any) => ({
+                name: tc.name,
+                description: `Called ${tc.name}`,
+                status: 'success' as const,
+                input: tc.input || undefined,
+                result: tc.result || undefined,
+              })),
+              timestamp: m.timestamp,
+            }));
+            setMessages(dbMessages);
+          }).catch(() => { /* noop */ });
+        }
+        const label = data.event === 'session-compacted' ? 'Compacted' : 'Summarized';
+        setNudgeBanner({
+          message: `${label} conversation: trimmed ${data.trimmedCount ?? '?'}, kept ${data.keptCount ?? '?'}.`,
+          visible: true,
+        });
+        setTimeout(() => setNudgeBanner(prev => ({ ...prev, visible: false })), 5000);
       }
     });
     return () => { if (unsubscribe) unsubscribe(); };
-  }, []);
+  }, [session.id]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -456,6 +486,34 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           onSessionUsageUpdate(data.sessionUsage);
         }
       } else if (data.type === 'done') {
+        // AUDIT-ROUND-4 / TURN-OVERWRITE: Before this fix, a `done`
+        // chunk just cleared streamingContent. In a multi-turn agent
+        // loop this meant turn-1's streamed reasoning vanished from
+        // the UI the moment turn-2 started, and only the final turn's
+        // content was committed as an assistant message when
+        // api.sendMessage resolved. The user reported this as
+        // "I asked something, got a good answer, then it got
+        // overwritten by a follow-up message."
+        //
+        // Now: on `done` with non-empty streamingContent, materialise
+        // the current buffer as a committed assistant message in the
+        // transcript BEFORE clearing. The final assistant-push in
+        // handleSend dedupes against this (so we don't double-render
+        // the last turn).
+        const toFlush = streamingContentRef.current;
+        if (toFlush && toFlush.trim()) {
+          const cleaned = sanitizeContent(toFlush);
+          if (cleaned) {
+            const turnMsg: Message = {
+              id: `msg-turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              role: 'assistant',
+              content: cleaned,
+              timestamp: new Date().toISOString(),
+              streaming: false,
+            };
+            setMessages(prev => [...prev, turnMsg]);
+          }
+        }
         streamingContentRef.current = '';
         setStreamingContent('');
       } else if (data.type === 'error') {
@@ -570,12 +628,21 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     }
 
     if (cmdName === 'compact') {
+      // AUDIT-ROUND-4 / CTX-COMPACT-STUB: the handler now returns real
+      // counts (trimmedCount / keptCount). The `session-compacted`
+      // agent:loop-event fires from main and triggers a history
+      // reload above; we just surface the counts in the transcript
+      // so the user has concrete feedback that the operation ran.
       try {
-        if (api?.compactHistory) await api.compactHistory(session.id);
+        const result = api?.compactHistory
+          ? await api.compactHistory(session.id)
+          : { success: false, message: 'compactHistory IPC not available' };
         const msg: Message = {
           id: `msg-${Date.now() + 1}`,
           role: 'system',
-          content: 'Conversation compacted — older messages summarized to reclaim context window.',
+          content: result.success
+            ? (result.message || 'History compacted.')
+            : `Compact failed: ${result.message || 'unknown error'}`,
           timestamp: new Date().toISOString(),
         };
         setMessages(prev => [...prev, msg]);
@@ -852,21 +919,62 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         }
 
         const result = await api.sendMessage(session.id, messageContent);
+        const finalContent = sanitizeContent(result.content);
+        const finalToolCalls = result.toolCalls?.map((tc: any) => ({
+          name: tc.name,
+          description: `Called ${tc.name}`,
+          status: 'success' as const,
+          input: tc.input || undefined,
+          result: tc.result || undefined,
+        }));
 
-        const assistantMsg: Message = {
-          id: result.id || `msg-${Date.now() + 1}`,
-          role: 'assistant',
-          content: sanitizeContent(result.content),
-          toolCalls: result.toolCalls?.map((tc: any) => ({
-            name: tc.name,
-            description: `Called ${tc.name}`,
-            status: 'success' as const,
-            input: tc.input || undefined,
-            result: tc.result || undefined,
-          })),
-          timestamp: new Date().toISOString(),
-        };
-        setMessages(prev => [...prev, assistantMsg]);
+        // AUDIT-ROUND-4 / BLANK-ASSISTANT-MSG: when the agent loop
+        // exits with no text content (stuck_repeat, stuck_after_todo,
+        // no_tools, tool-only final turn, max_tokens mid-stream), the
+        // old code still pushed an empty assistant bubble. Replace
+        // that with a system-role diagnostic so the user sees WHY no
+        // output came back and what to do about it.
+        if ((!finalContent || !finalContent.trim()) && (!finalToolCalls || finalToolCalls.length === 0)) {
+          const reasonLabel = (result as any).exitReason || 'no output';
+          const hint = reasonLabel === 'stuck_repeat'
+            ? ' The model was calling the same tool repeatedly. Try rephrasing or narrowing the task.'
+            : reasonLabel === 'stuck_after_todo'
+              ? ' The model stopped after planning without executing the todo list. Try asking it to "continue" or restart with a simpler task.'
+              : reasonLabel === 'no_tools'
+                ? ' The model gave text-only responses three turns in a row. It may not understand the tools available; try simplifying the request.'
+                : reasonLabel === 'max_turns'
+                  ? ' The agent hit the 25-turn safety cap without completing. Try breaking the task into smaller steps.'
+                  : reasonLabel === 'max_tokens'
+                    ? ' The model hit the output-token cap mid-stream. Try a shorter task or raise max_tokens in Settings.'
+                    : '';
+          const diag: Message = {
+            id: `msg-empty-${Date.now()}`,
+            role: 'system',
+            content: `GDeveloper returned without output (reason: \`${reasonLabel}\`).${hint}`,
+            timestamp: new Date().toISOString(),
+          };
+          setMessages(prev => [...prev, diag]);
+        } else {
+          // AUDIT-ROUND-4 / TURN-OVERWRITE dedup: the done-chunk
+          // handler may have already committed this turn's content as
+          // an assistant message. If the previously-committed message
+          // is this same content, don't push again.
+          setMessages(prev => {
+            const lastAssistant = [...prev].reverse().find(m => m.role === 'assistant');
+            if (lastAssistant && lastAssistant.content === finalContent && !lastAssistant.toolCalls?.length && (!finalToolCalls || finalToolCalls.length === 0)) {
+              // Dedup hit — the turn-flush already rendered it.
+              return prev;
+            }
+            const assistantMsg: Message = {
+              id: result.id || `msg-${Date.now() + 1}`,
+              role: 'assistant',
+              content: finalContent,
+              toolCalls: finalToolCalls,
+              timestamp: new Date().toISOString(),
+            };
+            return [...prev, assistantMsg];
+          });
+        }
       } else {
         const assistantMsg: Message = {
           id: `msg-${Date.now() + 1}`,

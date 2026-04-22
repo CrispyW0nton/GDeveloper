@@ -313,7 +313,13 @@ function recordSessionUsage(input: number, output: number, contextMax?: number):
   sessionUsage.cumulativeInputTokens += input;
   sessionUsage.cumulativeOutputTokens += output;
   sessionUsage.cumulativeRequests += 1;
-  sessionUsage.contextWindowUsed = sessionUsage.cumulativeInputTokens;
+  // AUDIT-ROUND-4 / TOKEN-CUMULATIVE-MISMATCH: previously this stored the
+  // RUNNING SUM of every input-token ever sent in the session, which made
+  // TokenCounter show 100% "context full" after a multi-turn agent run
+  // even though each individual request was small. Now it tracks the
+  // CURRENT request's input-token size — which is what "context window
+  // used" actually means for the NEXT request planning.
+  sessionUsage.contextWindowUsed = input;
   if (contextMax) sessionUsage.contextWindowMax = contextMax;
 }
 

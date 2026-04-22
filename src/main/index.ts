@@ -68,6 +68,7 @@ import { getRetryHandler } from './providers/retryHandler';
 import { getRateLimiter } from './providers/rateLimiter';
 import { DEFAULT_TOKEN_BUDGET_CONFIG, validateSoftLimits, type TokenBudgetConfig } from './providers/rateLimitConfig';
 import { getToolResultBudget } from './providers/toolResultBudget';
+import { getContextManager, type ContextMessage } from './providers/contextManager';
 import {
   processAttachment, processClipboardImage, loadAttachment,
   deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
@@ -861,6 +862,33 @@ function registerIPCHandlers(): void {
         contentLength: loopResult.content.length, toolCalls: loopResult.toolCalls.length,
         turns: loopResult.turns, reason: loopResult.reason,
       });
+
+      // AUDIT-ROUND-4 / TOKEN-CUMULATIVE-MISMATCH auto-consolidation:
+      // If this turn's actual input-token count crossed 80% of the
+      // model's safe budget, queue a background compact so the NEXT
+      // send ships a smaller payload. Don't block the current return;
+      // fire-and-forget. Only triggers for sessions with enough rows
+      // to benefit (>= 12; compact keeps last 10).
+      try {
+        const lastInput = getSessionUsage().lastInputTokens;
+        const safeBudget = 160_000; // matches getMaxAllowedSize for Claude; conservative for unknown models
+        const triggerThreshold = Math.floor(safeBudget * 0.8);
+        if (lastInput >= triggerThreshold) {
+          const rowCount = db.getMessages(sessionId).length;
+          if (rowCount >= 12) {
+            console.log(`[chat-send:auto-compact] lastInput=${lastInput} threshold=${triggerThreshold} rows=${rowCount} — triggering compact`);
+            // setImmediate so the return value isn't blocked.
+            setImmediate(() => {
+              performHistoryRewrite(sessionId, 'compact').catch(err => {
+                console.warn('[chat-send:auto-compact] compact failed', err);
+              });
+            });
+          }
+        }
+      } catch (err) {
+        // Auto-compact is best-effort; never let it break the send.
+        console.warn('[chat-send:auto-compact] threw', err);
+      }
 
       return {
         id: msgId,
@@ -2514,12 +2542,128 @@ function registerIPCHandlers(): void {
     return retryHandler.getState();
   });
 
-  ipcMain.handle(IPC_CHANNELS.CONTEXT_SUMMARIZE, async (_event, _sessionId: string) => {
-    return { success: true, message: 'Context summarized' };
+  // ─── AUDIT-ROUND-4 / CTX-COMPACT-STUB ─────────────────────────
+  //
+  // Before: these handlers took a sessionId argument and returned
+  // { success: true } without doing ANY work. The /compact slash
+  // command and the composer's Compact button silently appeared to
+  // succeed but the DB was untouched.
+  //
+  // Now: real implementations that route through ContextManager's
+  // compactHistory / summariseConversation helpers (which had been
+  // defined but never called from the IPC layer). The session's DB
+  // rows are REPLACED with [summary, ...kept-last-N] — destructive
+  // per user confirmation. Returns counts so the renderer can report
+  // what actually happened.
+  //
+  // Ref: docs/AUDIT-ROUND-4.md §CTX-COMPACT-STUB
+
+  /** Internal helper shared by CONTEXT_COMPACT + CONTEXT_SUMMARIZE. */
+  async function performHistoryRewrite(
+    sessionId: string,
+    mode: 'compact' | 'summarize',
+  ): Promise<{ success: boolean; message: string; trimmedCount?: number; keptCount?: number }> {
+    const rows = db.getMessages(sessionId);
+    if (rows.length === 0) {
+      return { success: true, message: 'No history to compact.', trimmedCount: 0, keptCount: 0 };
+    }
+
+    // Map DB rows → ContextMessage
+    const messages: ContextMessage[] = rows.map((r: any) => ({
+      role:
+        r.role === 'assistant' ? 'assistant'
+        : r.role === 'user' ? 'user'
+        : r.role === 'tool' ? 'tool'
+        : 'system',
+      content: typeof r.content === 'string' ? r.content : String(r.content ?? ''),
+      timestamp: r.timestamp,
+    }));
+
+    const cm = getContextManager();
+    let summary: ContextMessage;
+    let kept: ContextMessage[];
+    let trimmedCount: number;
+
+    if (mode === 'compact') {
+      // Keep the last 10 messages verbatim, summarise older ones.
+      const result = cm.compactHistory(messages, 10);
+      summary = result.summary;
+      kept = result.kept;
+      trimmedCount = result.trimmedCount;
+      if (trimmedCount === 0) {
+        return { success: true, message: 'Already under the compact threshold (≤10 messages).', trimmedCount: 0, keptCount: messages.length };
+      }
+    } else {
+      // Summarize EVERYTHING into a single system row.
+      summary = cm.summariseConversation(messages);
+      kept = [];
+      trimmedCount = messages.length;
+    }
+
+    // Destructive: delete old rows, insert [summary, ...kept]
+    db.deleteMessages(sessionId);
+    if (summary.content) {
+      db.insertMessage(sessionId, 'system', summary.content);
+    }
+    for (const m of kept) {
+      const toolCallsField = undefined; // kept rows are replayed without tool_calls (they were already consumed)
+      db.insertMessage(sessionId, m.role, m.content, toolCallsField);
+    }
+
+    // Reset per-session usage so the token counter reflects the new,
+    // smaller conversation.
+    resetSessionUsage();
+
+    // Tell the renderer to reload history + clear any displayed plan
+    // card that was tied to the now-deleted rows.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('agent:loop-event', {
+        event: mode === 'compact' ? 'session-compacted' : 'session-summarized',
+        sessionId,
+        trimmedCount,
+        keptCount: kept.length,
+        timestamp: Date.now(),
+      });
+      mainWindow.webContents.send('chat:active-plan-update', {
+        sessionId,
+        planId: null,
+        plan: null,
+        action: 'clear',
+        reason: `session-${mode === 'compact' ? 'compacted' : 'summarized'}`,
+        ts: Date.now(),
+      });
+    }
+
+    db.logActivity(sessionId, 'chat_compacted', `History ${mode}ed`, `Trimmed ${trimmedCount}, kept ${kept.length}`, {
+      mode, trimmedCount, keptCount: kept.length,
+    });
+
+    return {
+      success: true,
+      message: mode === 'compact'
+        ? `Compacted ${trimmedCount} older messages; kept last ${kept.length}.`
+        : `Summarized all ${trimmedCount} messages into a single checkpoint.`,
+      trimmedCount,
+      keptCount: kept.length,
+    };
+  }
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_SUMMARIZE, async (_event, sessionId: string) => {
+    try {
+      return await performHistoryRewrite(sessionId, 'summarize');
+    } catch (err) {
+      console.error('[context:summarize] failed', err);
+      return { success: false, message: err instanceof Error ? err.message : 'Summarize failed' };
+    }
   });
 
-  ipcMain.handle(IPC_CHANNELS.CONTEXT_COMPACT, async (_event, _sessionId: string) => {
-    return { success: true, message: 'History compacted' };
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_COMPACT, async (_event, sessionId: string) => {
+    try {
+      return await performHistoryRewrite(sessionId, 'compact');
+    } catch (err) {
+      console.error('[context:compact] failed', err);
+      return { success: false, message: err instanceof Error ? err.message : 'Compact failed' };
+    }
   });
 
   // Sprint 24: Session-level usage
