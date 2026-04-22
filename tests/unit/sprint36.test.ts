@@ -46,7 +46,7 @@ describe('Sprint 36 — Fix 1: CHAT_CLEAR emits plan:null to renderer', () => {
   it('CHAT_CLEAR handler sends chat:active-plan-update with plan: null', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
     expect(chatClearIdx).toBeGreaterThan(0);
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1200);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
 
     // Must emit plan update with null plan
     expect(handlerBody).toContain("'chat:active-plan-update'");
@@ -55,14 +55,14 @@ describe('Sprint 36 — Fix 1: CHAT_CLEAR emits plan:null to renderer', () => {
 
   it('CHAT_CLEAR plan update includes action: clear', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1200);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
 
     expect(handlerBody).toContain("action: 'clear'");
   });
 
   it('plan:null is emitted BEFORE session-cleared event', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1200);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
 
     const planNullPos = handlerBody.indexOf('plan: null');
     const sessionClearedPos = handlerBody.indexOf("'session-cleared'");
@@ -72,7 +72,7 @@ describe('Sprint 36 — Fix 1: CHAT_CLEAR emits plan:null to renderer', () => {
 
   it('planId is set to null in the plan update', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1200);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
     expect(handlerBody).toContain('planId: null');
   });
 });
@@ -250,7 +250,7 @@ describe('Sprint 36 — Backward compat: Sprint 35 features preserved', () => {
 
   it('Sprint 35 deleteMessages still present in CHAT_CLEAR', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1200);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
     expect(handlerBody).toContain('deleteMessages');
     expect(handlerBody).toContain('resetSessionUsage');
     expect(handlerBody).toContain('clearActivePlan');

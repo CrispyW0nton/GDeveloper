@@ -71,20 +71,23 @@ describe('Sprint 35 — Fix 1: CHAT_CLEAR deletes messages', () => {
     expect(chatClearIdx).toBeGreaterThan(0);
 
     // Find the handler body after CHAT_CLEAR
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 800);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
     expect(handlerBody).toContain('deleteMessages');
     expect(handlerBody).toContain('sessionId');
   });
 
   it('CHAT_CLEAR handler resets session usage', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 800);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
     expect(handlerBody).toContain('resetSessionUsage');
   });
 
   it('CHAT_CLEAR handler clears activePlan state', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 800);
+    // Window widened 800 → 1800 to cover the AUDIT-ROUND-4 Chunk B
+    // additions (rateLimiter.reset() + retryHandler.reset() try/catch
+    // blocks with comments) inserted before clearActivePlan.
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
     expect(handlerBody).toContain('clearActivePlan');
   });
 });
@@ -381,7 +384,7 @@ describe('Sprint 35 — Session isolation: New Task clears history', () => {
 
   it('CHAT_CLEAR handler deletes all messages for the session', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 800);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1800);
 
     // Must call deleteMessages which does DELETE FROM chat_messages WHERE session_id = ?
     expect(handlerBody).toContain('deleteMessages');
@@ -389,7 +392,8 @@ describe('Sprint 35 — Session isolation: New Task clears history', () => {
 
   it('CHAT_CLEAR emits session-cleared event', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1500);
+    // Window widened 1500 → 2500 for AUDIT-ROUND-4 Chunk B additions.
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 2500);
     expect(handlerBody).toContain('session-cleared');
   });
 });
@@ -530,7 +534,7 @@ describe('Sprint 35 — session-cleared event emitted from CHAT_CLEAR', () => {
 
   it('CHAT_CLEAR emits agent:loop-event with session-cleared', () => {
     const chatClearIdx = indexSrc.indexOf('CHAT_CLEAR');
-    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 1500);
+    const handlerBody = indexSrc.substring(chatClearIdx, chatClearIdx + 2500);
 
     expect(handlerBody).toContain("'agent:loop-event'");
     expect(handlerBody).toContain("'session-cleared'");
