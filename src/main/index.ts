@@ -936,6 +936,16 @@ function registerIPCHandlers(): void {
     // Reset cumulative session usage so token counter starts fresh
     resetSessionUsage();
 
+    // AUDIT-ROUND-4 / FRESH-CHAT-DOES-NOT-RESET-RATE-LIMITER:
+    // Before, CHAT_CLEAR only reset the per-session usage counter.
+    // The rate-limiter's sliding-window entries and the retry-handler's
+    // last-429 state kept charging from the prior conversation. "Fresh
+    // chat" has to mean fresh RATE state too, or users see the
+    // previous chat's tokens-in-last-60s counting against the new one.
+    // Best-effort — never let reset failures break the CHAT_CLEAR IPC.
+    try { getRateLimiter().reset(); } catch (err) { console.warn('[CHAT_CLEAR] rateLimiter.reset failed', err); }
+    try { getRetryHandler().reset?.(); } catch (err) { console.warn('[CHAT_CLEAR] retryHandler.reset failed', err); }
+
     // Clear the active plan state for this session
     clearActivePlan(sessionId);
 
@@ -2672,7 +2682,14 @@ function registerIPCHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.SESSION_USAGE_RESET, async () => {
+    // AUDIT-ROUND-4 / FRESH-CHAT-DOES-NOT-RESET: renderer calls this
+    // on session switch. In addition to wiping per-session usage
+    // counters, also reset the rate-limiter sliding window and the
+    // retry state so moving from one chat to another starts with a
+    // clean budget display and no stale "retrying..." banner.
     resetSessionUsage();
+    try { getRateLimiter().reset(); } catch (err) { console.warn('[session-usage:reset] rateLimiter.reset failed', err); }
+    try { getRetryHandler().reset(); } catch (err) { console.warn('[session-usage:reset] retryHandler.reset failed', err); }
     return { success: true };
   });
 

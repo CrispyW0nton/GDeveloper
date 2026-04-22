@@ -275,19 +275,27 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         // user can tell it actually ran (it was silently a no-op before).
         if (data.sessionId === session.id && api?.getChatHistory) {
           api.getChatHistory(session.id).then((history: any[]) => {
-            const dbMessages: Message[] = (history || []).map((m: any) => ({
-              id: m.id,
-              role: m.role,
-              content: sanitizeContent(m.content),
-              toolCalls: m.tool_calls?.map((tc: any) => ({
-                name: tc.name,
-                description: `Called ${tc.name}`,
-                status: 'success' as const,
-                input: tc.input || undefined,
-                result: tc.result || undefined,
-              })),
-              timestamp: m.timestamp,
-            }));
+            const dbMessages: Message[] = (history || [])
+              // AUDIT-ROUND-4 / TOOLRESULT-AS-USER-ON-RELOAD (same filter
+              // as the initial history loader): drop user rows that are
+              // actually tool_result markers so they don't show as "You"
+              // bubbles. DB rows remain untouched.
+              .filter((m: any) =>
+                !(m.role === 'user' && typeof m.content === 'string' && m.content.trim().startsWith('[Tool Result:'))
+              )
+              .map((m: any) => ({
+                id: m.id,
+                role: m.role,
+                content: sanitizeContent(m.content),
+                toolCalls: m.tool_calls?.map((tc: any) => ({
+                  name: tc.name,
+                  description: `Called ${tc.name}`,
+                  status: 'success' as const,
+                  input: tc.input || undefined,
+                  result: tc.result || undefined,
+                })),
+                timestamp: m.timestamp,
+              }));
             setMessages(dbMessages);
           }).catch(() => { /* noop */ });
         }
@@ -347,12 +355,43 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     }
   }, []);
 
-  // Load chat history from DB on mount
+  // Load chat history from DB on mount / session switch
   useEffect(() => {
-    if (api && session.id) {
-      api.getChatHistory(session.id).then((history: any[]) => {
-        if (history && history.length > 0) {
-          const dbMessages: Message[] = history.map((m: any) => ({
+    if (!api || !session.id) return;
+
+    // AUDIT-ROUND-4 / FRESH-CHAT-DOES-NOT-RESET: switching sessions
+    // now resets the per-session token counter AND the rate-limiter
+    // sliding window AND any lingering retry state from the previous
+    // chat. The main-process handler for session-usage:reset does all
+    // three atomically (see main/index.ts SESSION_USAGE_RESET).
+    // Clear local UI state first, then fire the reset and the history
+    // load. Errors are non-fatal.
+    setMessages([]);
+    streamingContentRef.current = '';
+    setStreamingContent('');
+    setStreamingToolCalls([]);
+    if (api.resetSessionUsage) {
+      api.resetSessionUsage().catch((err: any) => {
+        console.warn('[Chat] session-usage:reset failed on session switch', err);
+      });
+    }
+
+    api.getChatHistory(session.id).then((history: any[]) => {
+      if (history && history.length > 0) {
+        const dbMessages: Message[] = history
+          // AUDIT-ROUND-4 / TOOLRESULT-AS-USER-ON-RELOAD: the agent
+          // loop persists tool-result messages as role='user' in the
+          // DB (required for Anthropic's tool-result format), but
+          // they are NOT things the human said. Rendering them as
+          // "You" bubbles on history reload is the "AI posts as me"
+          // symptom the user reported. Filter them out of the
+          // displayed transcript. The DB rows stay — the agent loop
+          // still reads them when reconstructing the context on the
+          // next send.
+          .filter((m: any) =>
+            !(m.role === 'user' && typeof m.content === 'string' && m.content.trim().startsWith('[Tool Result:'))
+          )
+          .map((m: any) => ({
             id: m.id,
             role: m.role,
             content: sanitizeContent(m.content),
@@ -365,13 +404,12 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             })),
             timestamp: m.timestamp,
           }));
-          setMessages(dbMessages);
-          // Sprint 38 Bug 3: no setShowSuggestions — it's derived.
-        }
-      }).catch((err: any) => {
-        console.warn('[Chat] Failed to load history:', err);
-      });
-    }
+        setMessages(dbMessages);
+        // Sprint 38 Bug 3: no setShowSuggestions — it's derived.
+      }
+    }).catch((err: any) => {
+      console.warn('[Chat] Failed to load history:', err);
+    });
   }, [session.id]);
 
   // Listen for streaming chunks
