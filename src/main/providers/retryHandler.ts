@@ -227,6 +227,20 @@ export class RetryHandler {
       gaveUp: false,
     };
   }
+
+  /**
+   * AUDIT-ROUND-4 / FRESH-CHAT-DOES-NOT-RESET: public reset API so
+   * CHAT_CLEAR / session switches can wipe any lingering retry state
+   * (e.g. `isRetrying: true, gaveUp: true` from the previous chat's
+   * last 429) before a fresh chat starts. Also notifies listeners so
+   * the retry-countdown banner in the UI clears immediately.
+   */
+  reset(): void {
+    this.resetState();
+    for (const l of this.listeners) {
+      try { l(this.currentState); } catch { /* swallow */ }
+    }
+  }
 }
 
 // ─── Singleton ───

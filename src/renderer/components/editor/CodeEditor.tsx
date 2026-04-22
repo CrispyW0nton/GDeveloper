@@ -114,6 +114,24 @@ export default function CodeEditor({
     setContent(file.content);
   }, [file.content, file.filePath]);
 
+  // AUDIT-ROUND-4 / EDITOR-FOCUS: Auto-focus the textarea whenever the
+  // user opens a new file so they can start typing immediately.
+  // Before this, clicking a file in the tree opened the editor pane
+  // but the textarea never gained focus — the user had to click
+  // INTO the editor before typing worked. The setTimeout(0) defers
+  // past React's commit phase so the textarea is actually in the
+  // DOM when we call focus(). Inline the editable check because
+  // the `isEditable` const is declared lower in the function body
+  // (past this effect in source order) — we don't want a TDZ reference.
+  useEffect(() => {
+    const editable = !file.isBinary && !file.isLockFile && !file.isReadOnly && !file.isOutsideWorktree && !file.isTooLarge;
+    if (!editable || file.isBeingEditedByAI) return;
+    const t = window.setTimeout(() => {
+      editorRef.current?.focus();
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [file.filePath, file.isBinary, file.isLockFile, file.isReadOnly, file.isOutsideWorktree, file.isTooLarge, file.isBeingEditedByAI]);
+
   // Track find matches
   useEffect(() => {
     if (!findText) { setFindMatchCount(0); return; }

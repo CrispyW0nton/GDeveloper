@@ -63,8 +63,15 @@ export default function TokenCounter({
     contextWindowMax: maxContextTokens,
   };
 
+  // AUDIT-ROUND-4 / TOKEN-CUMULATIVE-MISMATCH: use contextWindowUsed (the
+  // CURRENT request's input-token size) instead of cumulativeInputTokens
+  // (the running sum of every input ever sent in the session). The old
+  // semantics caused the bar to report "context nearly full!" after a
+  // multi-turn agent run even when each individual request was small.
+  // Fallback to 0 if the main process hasn't reported yet.
   const contextMax = usage.contextWindowMax || maxContextTokens;
-  const contextPercent = contextMax > 0 ? usage.cumulativeInputTokens / contextMax : 0;
+  const currentContext = usage.contextWindowUsed ?? 0;
+  const contextPercent = contextMax > 0 ? currentContext / contextMax : 0;
   const contextPctClamped = Math.min(contextPercent, 1);
   const isContextWarning = contextPercent >= 0.8;
   const isContextCritical = contextPercent >= 0.95;
@@ -81,10 +88,10 @@ export default function TokenCounter({
               ? 'bg-yellow-500/5 border-yellow-500/20 text-yellow-400'
               : 'bg-matrix-bg-hover/50 border-matrix-border/20 text-matrix-text-muted/50'
         }`}
-        title={`Tokens: ${formatTokens(usage.cumulativeInputTokens)} in / ${formatTokens(usage.cumulativeOutputTokens)} out | Context: ${Math.round(contextPercent * 100)}% of ${formatTokens(contextMax)}`}
+        title={`Context: ${formatTokens(currentContext)} of ${formatTokens(contextMax)} (${Math.round(contextPercent * 100)}%)  |  Session totals: ${formatTokens(usage.cumulativeInputTokens)} in / ${formatTokens(usage.cumulativeOutputTokens)} out across ${usage.cumulativeRequests} request${usage.cumulativeRequests === 1 ? '' : 's'}`}
       >
         {isContextWarning && <span className="text-[8px]">{isContextCritical ? '\u26A0\uFE0F' : '\u26A0'}</span>}
-        <span>{formatTokens(usage.cumulativeInputTokens)}</span>
+        <span>{formatTokens(currentContext)}</span>
         <span className="text-matrix-text-muted/25">/</span>
         <span>{formatTokens(contextMax)}</span>
       </button>
@@ -111,9 +118,9 @@ export default function TokenCounter({
       {/* Context Window Bar */}
       <div>
         <div className="flex justify-between text-[9px] text-matrix-text-muted/50 mb-0.5">
-          <span>Context Window</span>
+          <span>Current context (last request)</span>
           <span className={isContextWarning ? (isContextCritical ? 'text-red-400' : 'text-yellow-400') : ''}>
-            {formatTokens(usage.cumulativeInputTokens)} / {formatTokens(contextMax)} ({Math.round(contextPercent * 100)}%)
+            {formatTokens(currentContext)} / {formatTokens(contextMax)} ({Math.round(contextPercent * 100)}%)
           </span>
         </div>
         <div className="h-1.5 bg-matrix-bg-hover rounded-full overflow-hidden">
