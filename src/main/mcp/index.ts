@@ -26,14 +26,40 @@ import { MCPTransportType, MCPServerStatus } from '../domain/enums';
 import { IMCPClientManager } from '../domain/interfaces';
 import { getDatabase } from '../db';
 
+export interface MCPServerHealthSnapshot {
+  id: string;
+  name: string;
+  status: MCPServerStatus;
+  transport: MCPServerConfig['transport'];
+  toolCount: number;
+  lastConnected: string | null;
+  lastHeartbeatAt: string | null;
+  healthy: boolean;
+  heartbeatFailureCount: number;
+  reconnectAttempts: number;
+  lastError: string | null;
+  url: string | null;
+  command: string | null;
+}
+
 export class MCPClientManager implements IMCPClientManager {
   private servers: Map<string, MCPServerConfig> = new Map();
   /** Active MCP SDK Client instances, keyed by server id */
   private mcpClients: Map<string, Client> = new Map();
   private listeners: Array<(event: MCPEvent) => void> = [];
+  private readonly heartbeatIntervalMs = 30_000;
+  private readonly heartbeatTimeoutMs = 7_000;
+  private readonly maxReconnectAttempts = 3;
+  private readonly reconnectBaseDelayMs = 2_000;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
+  private reconnectAttempts: Map<string, number> = new Map();
+  private heartbeatInFlight: Set<string> = new Set();
+  private health: Map<string, MCPServerHealthSnapshot> = new Map();
 
   constructor() {
     this.loadFromDB();
+    this.startHeartbeatLoop();
   }
 
   private loadFromDB(): void {
@@ -41,14 +67,192 @@ export class MCPClientManager implements IMCPClientManager {
       const db = getDatabase();
       const servers = db.getMCPServers();
       for (const server of servers) {
-        this.servers.set(server.id, {
+        const hydrated: MCPServerConfig = {
           ...server,
           status: MCPServerStatus.DISCONNECTED,
           autoStart: false
+        };
+        this.servers.set(server.id, hydrated);
+        this.health.set(server.id, {
+          id: server.id,
+          name: server.name,
+          status: MCPServerStatus.DISCONNECTED,
+          transport: server.transport,
+          toolCount: server.tools?.length || 0,
+          lastConnected: server.lastConnected || null,
+          lastHeartbeatAt: null,
+          healthy: false,
+          heartbeatFailureCount: 0,
+          reconnectAttempts: 0,
+          lastError: null,
+          url: server.url || null,
+          command: server.command || null,
         });
       }
     } catch (err) {
       console.error('[MCP] Failed to load servers from DB:', err);
+    }
+  }
+
+  private startHeartbeatLoop(): void {
+    if (this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => {
+      void this.runHeartbeatTick();
+    }, this.heartbeatIntervalMs);
+  }
+
+  private stopHeartbeatLoop(): void {
+    if (!this.heartbeatTimer) return;
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  private async runHeartbeatTick(): Promise<void> {
+    for (const [id, server] of this.servers.entries()) {
+      if (server.status !== MCPServerStatus.CONNECTED) continue;
+      const client = this.mcpClients.get(id);
+      if (!client || this.heartbeatInFlight.has(id)) continue;
+
+      this.heartbeatInFlight.add(id);
+      try {
+        await this.withTimeout(client.listTools(), this.heartbeatTimeoutMs, `Heartbeat timeout after ${this.heartbeatTimeoutMs}ms`);
+        this.markServerHealthy(id);
+      } catch (error) {
+        this.handleHeartbeatFailure(id, error);
+      } finally {
+        this.heartbeatInFlight.delete(id);
+      }
+    }
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    return Promise.race<T>([
+      promise,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)),
+    ]);
+  }
+
+  private markServerHealthy(serverId: string): void {
+    const server = this.servers.get(serverId);
+    if (!server) return;
+
+    const prev = this.health.get(serverId);
+    this.health.set(serverId, {
+      id: server.id,
+      name: server.name,
+      status: server.status,
+      transport: server.transport,
+      toolCount: server.tools.length,
+      lastConnected: server.lastConnected || null,
+      lastHeartbeatAt: new Date().toISOString(),
+      healthy: true,
+      heartbeatFailureCount: 0,
+      reconnectAttempts: this.reconnectAttempts.get(serverId) || 0,
+      lastError: null,
+      url: server.url || null,
+      command: server.command || null,
+    });
+
+    if (prev?.healthy === false) {
+      this.emit({ type: 'server_recovered', serverId, status: server.status });
+    }
+  }
+
+  private handleHeartbeatFailure(serverId: string, error: unknown): void {
+    const server = this.servers.get(serverId);
+    if (!server) return;
+
+    const message = error instanceof Error ? error.message : String(error);
+    const previous = this.health.get(serverId);
+
+    server.status = MCPServerStatus.ERROR;
+    this.health.set(serverId, {
+      id: server.id,
+      name: server.name,
+      status: MCPServerStatus.ERROR,
+      transport: server.transport,
+      toolCount: server.tools.length,
+      lastConnected: server.lastConnected || null,
+      lastHeartbeatAt: new Date().toISOString(),
+      healthy: false,
+      heartbeatFailureCount: (previous?.heartbeatFailureCount || 0) + 1,
+      reconnectAttempts: this.reconnectAttempts.get(serverId) || 0,
+      lastError: message,
+      url: server.url || null,
+      command: server.command || null,
+    });
+
+    const client = this.mcpClients.get(serverId);
+    if (client) {
+      client.close().catch(() => { /* ignore */ });
+      this.mcpClients.delete(serverId);
+    }
+
+    this.persistServer(server);
+    this.emit({ type: 'server_error', serverId, error: `Heartbeat failed: ${message}` });
+    this.scheduleReconnect(serverId);
+  }
+
+  private clearReconnectTimer(serverId: string): void {
+    const timer = this.reconnectTimers.get(serverId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.reconnectTimers.delete(serverId);
+  }
+
+  private clearReconnectState(serverId: string): void {
+    this.clearReconnectTimer(serverId);
+    this.reconnectAttempts.delete(serverId);
+  }
+
+  private scheduleReconnect(serverId: string): void {
+    const server = this.servers.get(serverId);
+    if (!server || !server.enabled) return;
+
+    const attempt = (this.reconnectAttempts.get(serverId) || 0) + 1;
+    this.reconnectAttempts.set(serverId, attempt);
+
+    if (attempt > this.maxReconnectAttempts) {
+      this.emit({
+        type: 'server_error',
+        serverId,
+        error: `Auto-reconnect exhausted after ${this.maxReconnectAttempts} attempts`,
+      });
+      return;
+    }
+
+    this.clearReconnectTimer(serverId);
+    const delayMs = Math.min(this.reconnectBaseDelayMs * (2 ** (attempt - 1)), 30_000);
+
+    this.reconnectTimers.set(serverId, setTimeout(() => {
+      this.reconnectTimers.delete(serverId);
+      void this.attemptReconnect(serverId, attempt);
+    }, delayMs));
+
+    this.emit({ type: 'server_reconnect_scheduled', serverId, attempt, delayMs });
+  }
+
+  private async attemptReconnect(serverId: string, attempt: number): Promise<void> {
+    const server = this.servers.get(serverId);
+    if (!server || !server.enabled) return;
+
+    try {
+      await this.connectServer(serverId);
+      this.clearReconnectState(serverId);
+      this.emit({ type: 'server_reconnected', serverId, attempt });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({ type: 'server_reconnect_failed', serverId, attempt, error: message });
+      this.scheduleReconnect(serverId);
+    }
+  }
+
+  private persistServer(server: MCPServerConfig): void {
+    try {
+      const db = getDatabase();
+      db.saveMCPServer(server);
+    } catch (err) {
+      console.warn(`[MCP:${server.name}] Failed to persist server state:`, err);
     }
   }
 
@@ -71,6 +275,21 @@ export class MCPClientManager implements IMCPClientManager {
 
     const server: MCPServerConfig = { ...config, status: MCPServerStatus.DISCONNECTED };
     this.servers.set(config.id, server);
+    this.health.set(config.id, {
+      id: config.id,
+      name: config.name,
+      status: MCPServerStatus.DISCONNECTED,
+      transport: config.transport,
+      toolCount: 0,
+      lastConnected: null,
+      lastHeartbeatAt: null,
+      healthy: false,
+      heartbeatFailureCount: 0,
+      reconnectAttempts: 0,
+      lastError: null,
+      url: config.url || null,
+      command: config.command || null,
+    });
     try {
       const db = getDatabase();
       db.saveMCPServer(config);
@@ -87,7 +306,9 @@ export class MCPClientManager implements IMCPClientManager {
       if (server.status === MCPServerStatus.CONNECTED || server.status === MCPServerStatus.CONNECTING) {
         await this.disconnectServer(id);
       }
+      this.clearReconnectState(id);
       this.servers.delete(id);
+      this.health.delete(id);
       try {
         const db = getDatabase();
         db.removeMCPServer(id);
@@ -109,6 +330,7 @@ export class MCPClientManager implements IMCPClientManager {
       await this.disconnectServer(id);
     }
 
+    this.clearReconnectTimer(id);
     server.status = MCPServerStatus.CONNECTING;
     this.emit({ type: 'server_connecting', serverId: id });
 
@@ -142,23 +364,37 @@ export class MCPClientManager implements IMCPClientManager {
 
       server.status = MCPServerStatus.CONNECTED;
       server.lastConnected = new Date().toISOString();
+      this.markServerHealthy(id);
       this.emit({ type: 'server_connected', serverId: id, tools: server.tools });
 
       // Persist updated tools to DB
-      try {
-        const db = getDatabase();
-        db.saveMCPServer(server);
-      } catch (err) {
-        console.warn('[MCP] Failed to persist server tools to DB:', err);
-      }
+      this.persistServer(server);
 
     } catch (error) {
       console.error(`[MCP:${server.name}] Connection failed:`, error);
+      const message = error instanceof Error ? error.message : String(error);
       server.status = MCPServerStatus.ERROR;
+      const existing = this.health.get(id);
+      this.health.set(id, {
+        id: server.id,
+        name: server.name,
+        status: MCPServerStatus.ERROR,
+        transport: server.transport,
+        toolCount: server.tools.length,
+        lastConnected: server.lastConnected || null,
+        lastHeartbeatAt: new Date().toISOString(),
+        healthy: false,
+        heartbeatFailureCount: existing?.heartbeatFailureCount || 0,
+        reconnectAttempts: this.reconnectAttempts.get(id) || 0,
+        lastError: `Connection failed: ${message}`,
+        url: server.url || null,
+        command: server.command || null,
+      });
+      this.persistServer(server);
       this.emit({
         type: 'server_error',
         serverId: id,
-        error: `Connection failed: ${error instanceof Error ? error.message : String(error)}`
+        error: `Connection failed: ${message}`
       });
       throw error;
     }
@@ -297,6 +533,8 @@ export class MCPClientManager implements IMCPClientManager {
     const server = this.servers.get(id);
     if (!server) return;
 
+    this.clearReconnectState(id);
+
     // Close the SDK client (handles transport cleanup internally)
     const client = this.mcpClients.get(id);
     if (client) {
@@ -309,6 +547,23 @@ export class MCPClientManager implements IMCPClientManager {
     }
 
     server.status = MCPServerStatus.DISCONNECTED;
+    const existing = this.health.get(id);
+    this.health.set(id, {
+      id: server.id,
+      name: server.name,
+      status: MCPServerStatus.DISCONNECTED,
+      transport: server.transport,
+      toolCount: server.tools.length,
+      lastConnected: server.lastConnected || null,
+      lastHeartbeatAt: existing?.lastHeartbeatAt || null,
+      healthy: false,
+      heartbeatFailureCount: 0,
+      reconnectAttempts: 0,
+      lastError: null,
+      url: server.url || null,
+      command: server.command || null,
+    });
+    this.persistServer(server);
     this.emit({ type: 'server_disconnected', serverId: id });
   }
 
@@ -346,6 +601,27 @@ export class MCPClientManager implements IMCPClientManager {
   async getServerTools(id: string): Promise<MCPToolInfo[]> {
     const server = this.servers.get(id);
     return server?.tools || [];
+  }
+
+  getHealthStatus(): MCPServerHealthSnapshot[] {
+    return Array.from(this.servers.values()).map((server) => {
+      const existing = this.health.get(server.id);
+      return {
+        id: server.id,
+        name: server.name,
+        status: server.status,
+        transport: server.transport,
+        toolCount: server.tools.length,
+        lastConnected: server.lastConnected || null,
+        lastHeartbeatAt: existing?.lastHeartbeatAt || null,
+        healthy: existing?.healthy || false,
+        heartbeatFailureCount: existing?.heartbeatFailureCount || 0,
+        reconnectAttempts: this.reconnectAttempts.get(server.id) || existing?.reconnectAttempts || 0,
+        lastError: existing?.lastError || null,
+        url: server.url || null,
+        command: server.command || null,
+      };
+    });
   }
 
   // --- Test Connection ----------------------------------------------------
@@ -403,10 +679,7 @@ export class MCPClientManager implements IMCPClientManager {
     const server = this.servers.get(id);
     if (server) {
       Object.assign(server, updates);
-      try {
-        const db = getDatabase();
-        db.saveMCPServer(server);
-      } catch { /* ignore */ }
+      this.persistServer(server);
     }
   }
 
@@ -430,6 +703,10 @@ export class MCPClientManager implements IMCPClientManager {
   // --- Lifecycle ----------------------------------------------------------
 
   cleanup(): void {
+    this.stopHeartbeatLoop();
+    for (const [id] of this.reconnectTimers) {
+      this.clearReconnectTimer(id);
+    }
     for (const [id] of this.mcpClients) {
       this.disconnectServer(id).catch(() => { /* ignore */ });
     }

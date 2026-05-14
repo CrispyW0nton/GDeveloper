@@ -1766,17 +1766,7 @@ function registerIPCHandlers(): void {
   // ─── Sprint 13: MCP Health ──────────────────────
 
   ipcMain.handle(IPC_CHANNELS.MCP_HEALTH, async () => {
-    const servers = mcp.getServers();
-    return servers.map(s => ({
-      id: s.id,
-      name: s.name,
-      status: s.status,
-      transport: s.transport,
-      toolCount: s.tools.length,
-      lastConnected: s.lastConnected || null,
-      url: s.url || null,
-      command: s.command || null,
-    }));
+    return mcp.getHealthStatus();
   });
 
   // ─── Sprint 13: GitHub Auth Status ───────────────

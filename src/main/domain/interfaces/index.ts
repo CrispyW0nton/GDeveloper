@@ -99,6 +99,21 @@ export interface IMCPClientManager {
   disconnectServer(id: string): Promise<void>;
   getServers(): MCPServerConfig[];
   getServerTools(id: string): Promise<MCPServerConfig['tools']>;
+  getHealthStatus(): Array<{
+    id: string;
+    name: string;
+    status: string;
+    healthy: boolean;
+    heartbeatFailureCount: number;
+    reconnectAttempts: number;
+    lastHeartbeatAt: string | null;
+    lastError: string | null;
+    transport: string;
+    toolCount: number;
+    lastConnected: string | null;
+    url: string | null;
+    command: string | null;
+  }>;
   testConnection(id: string): Promise<{ reachable: boolean; mcpReady: boolean; error?: string }>;
   executeTool(serverId: string, toolName: string, args: Record<string, unknown>): Promise<any>;
 }

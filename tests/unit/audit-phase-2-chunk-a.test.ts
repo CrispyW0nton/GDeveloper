@@ -27,6 +27,7 @@ import { resolve } from 'path';
 const indexCode = readFileSync(resolve(__dirname, '../../src/main/index.ts'), 'utf-8');
 const providersCode = readFileSync(resolve(__dirname, '../../src/main/providers/index.ts'), 'utf-8');
 const dbCode = readFileSync(resolve(__dirname, '../../src/main/db/index.ts'), 'utf-8');
+const mcpCode = readFileSync(resolve(__dirname, '../../src/main/mcp/index.ts'), 'utf-8');
 
 // ═══════════════════════════════════════════════════════════════════
 //  CHAT-DUP — Final assistant row no longer double-inserted
@@ -316,12 +317,38 @@ describe('Audit Phase 2 / MCP-TOGGLE — tool toggle persistence', () => {
   });
 
   it('MCPClientManager.toggleTool persists the server after mutation', () => {
-    const mcpCode = readFileSync(resolve(__dirname, '../../src/main/mcp/index.ts'), 'utf-8');
     const start = mcpCode.indexOf('toggleTool(serverId: string, toolName: string, enabled: boolean): void');
     expect(start).toBeGreaterThan(0);
     const block = mcpCode.substring(start, start + 900);
     expect(block).toContain('tool.enabled = enabled');
     expect(block).toContain('db.saveMCPServer(server)');
     expect(block).toContain("type: 'tool_toggled'");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  P1 — MCP heartbeat/liveness + auto-reconnect
+// ═══════════════════════════════════════════════════════════════════
+describe('Audit Phase 2 / MCP-HEARTBEAT — liveness + auto reconnect', () => {
+  it('MCPClientManager starts a heartbeat interval and probes listTools with timeout', () => {
+    expect(mcpCode).toMatch(/heartbeatIntervalMs\s*=\s*30_000/);
+    expect(mcpCode).toMatch(/startHeartbeatLoop\(\)/);
+    expect(mcpCode).toMatch(/setInterval\(\(\)\s*=>\s*\{\s*void\s+this\.runHeartbeatTick\(\)/);
+    expect(mcpCode).toMatch(/withTimeout\(client\.listTools\(\),\s*this\.heartbeatTimeoutMs/);
+  });
+
+  it('heartbeat failure transitions server to error and schedules bounded reconnect', () => {
+    expect(mcpCode).toMatch(/server\.status\s*=\s*MCPServerStatus\.ERROR/);
+    expect(mcpCode).toMatch(/scheduleReconnect\(serverId\)/);
+    expect(mcpCode).toMatch(/maxReconnectAttempts\s*=\s*3/);
+    expect(mcpCode).toMatch(/type:\s*'server_reconnect_scheduled'/);
+  });
+
+  it('MCP_HEALTH IPC handler returns manager health snapshots via getHealthStatus', () => {
+    const healthIdx = indexCode.indexOf('IPC_CHANNELS.MCP_HEALTH');
+    expect(healthIdx).toBeGreaterThan(0);
+    const block = indexCode.substring(healthIdx, healthIdx + 500);
+    expect(block).toContain('return mcp.getHealthStatus()');
+    expect(mcpCode).toContain('getHealthStatus(): MCPServerHealthSnapshot[]');
   });
 });
