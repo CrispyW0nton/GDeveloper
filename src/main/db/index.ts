@@ -281,18 +281,45 @@ export class DatabaseManager {
   saveMCPServer(config: any): string {
     const id = config.id || uuid();
     const existing = this.db.prepare(`SELECT id FROM mcp_servers WHERE id = ?`).get(id);
+    const toolsJson = JSON.stringify(config.tools || []);
+    const status = config.status || 'disconnected';
+    const lastConnected = config.lastConnected || null;
+
     if (existing) {
       this.db.prepare(
-        `UPDATE mcp_servers SET name=?, transport=?, command=?, args=?, env=?, url=?, enabled=? WHERE id=?`
-      ).run(config.name, config.transport, config.command, JSON.stringify(config.args || []),
-            JSON.stringify(config.env || {}), config.url || null, config.enabled ? 1 : 0, id);
+        `UPDATE mcp_servers
+         SET name=?, transport=?, command=?, args=?, env=?, url=?, enabled=?, status=?, tools=?, last_connected=?
+         WHERE id=?`
+      ).run(
+        config.name,
+        config.transport,
+        config.command,
+        JSON.stringify(config.args || []),
+        JSON.stringify(config.env || {}),
+        config.url || null,
+        config.enabled ? 1 : 0,
+        status,
+        toolsJson,
+        lastConnected,
+        id,
+      );
     } else {
       this.db.prepare(
-        `INSERT INTO mcp_servers (id, name, transport, command, args, env, url, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(id, config.name, config.transport, config.command,
-            JSON.stringify(config.args || []), JSON.stringify(config.env || {}),
-            config.url || null, config.enabled !== false ? 1 : 0);
+        `INSERT INTO mcp_servers (id, name, transport, command, args, env, url, enabled, status, tools, last_connected)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        config.name,
+        config.transport,
+        config.command,
+        JSON.stringify(config.args || []),
+        JSON.stringify(config.env || {}),
+        config.url || null,
+        config.enabled !== false ? 1 : 0,
+        status,
+        toolsJson,
+        lastConnected,
+      );
     }
     return id;
   }

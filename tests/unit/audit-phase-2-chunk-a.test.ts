@@ -305,3 +305,23 @@ describe('Audit Phase 2 / AGL-TRUNC — functional fixture', () => {
     expect(post.orphansStripped).toBe(0);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+//  P1 — MCP-TOGGLE: tool enable/disable persists across restarts
+// ═══════════════════════════════════════════════════════════════════
+describe('Audit Phase 2 / MCP-TOGGLE — tool toggle persistence', () => {
+  it('DatabaseManager.saveMCPServer updates tools/status/last_connected columns', () => {
+    expect(dbCode).toMatch(/SET name=\?, transport=\?, command=\?, args=\?, env=\?, url=\?, enabled=\?, status=\?, tools=\?, last_connected=\?/);
+    expect(dbCode).toMatch(/INSERT INTO mcp_servers \(id, name, transport, command, args, env, url, enabled, status, tools, last_connected\)/);
+  });
+
+  it('MCPClientManager.toggleTool persists the server after mutation', () => {
+    const mcpCode = readFileSync(resolve(__dirname, '../../src/main/mcp/index.ts'), 'utf-8');
+    const start = mcpCode.indexOf('toggleTool(serverId: string, toolName: string, enabled: boolean): void');
+    expect(start).toBeGreaterThan(0);
+    const block = mcpCode.substring(start, start + 900);
+    expect(block).toContain('tool.enabled = enabled');
+    expect(block).toContain('db.saveMCPServer(server)');
+    expect(block).toContain("type: 'tool_toggled'");
+  });
+});

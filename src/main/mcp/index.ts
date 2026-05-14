@@ -416,6 +416,13 @@ export class MCPClientManager implements IMCPClientManager {
       const tool = server.tools.find(t => t.name === toolName);
       if (tool) {
         tool.enabled = enabled;
+        try {
+          const db = getDatabase();
+          db.saveMCPServer(server);
+        } catch (err) {
+          console.warn(`[MCP:${server.name}] Failed to persist tool toggle for ${toolName}:`, err);
+        }
+        this.emit({ type: 'tool_toggled', serverId, toolName, enabled });
       }
     }
   }
