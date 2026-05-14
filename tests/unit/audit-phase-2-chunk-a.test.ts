@@ -352,3 +352,31 @@ describe('Audit Phase 2 / MCP-HEARTBEAT — liveness + auto reconnect', () => {
     expect(mcpCode).toContain('getHealthStatus(): MCPServerHealthSnapshot[]');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+//  P1 — CACHE-DEAD: prompt cache markers + usage accounting wired
+// ═══════════════════════════════════════════════════════════════════
+describe('Audit Phase 2 / CACHE-DEAD — prompt caching wiring', () => {
+  it('sendMessage and streamMessage attach cache_control markers when caching is enabled', () => {
+    expect(providersCode).toMatch(/const\s+promptCachingEnabled\s*=\s*isPromptCachingEnabled\(\)/);
+    expect(providersCode).toMatch(/cache_control:\s*\{\s*type:\s*'ephemeral'/);
+    expect(providersCode).toMatch(/body\.system\s*=\s*promptCachingEnabled/);
+  });
+
+  it('sendMessage records cache metrics from Anthropic usage payload', () => {
+    const sendIdx = providersCode.indexOf('async sendMessage(');
+    expect(sendIdx).toBeGreaterThan(0);
+    const streamIdx = providersCode.indexOf('async *streamMessage(', sendIdx);
+    expect(streamIdx).toBeGreaterThan(sendIdx);
+    const block = providersCode.substring(sendIdx, streamIdx);
+    expect(block).toContain('recordCacheUsage(data.usage)');
+  });
+
+  it('streamMessage records cache metrics from streaming usage payload', () => {
+    const streamIdx = providersCode.indexOf('async *streamMessage(');
+    expect(streamIdx).toBeGreaterThan(0);
+    const block = providersCode.substring(streamIdx);
+    expect(block).toContain('latestUsagePayload = event.usage');
+    expect(block).toContain('recordCacheUsage(latestUsagePayload)');
+  });
+});

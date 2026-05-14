@@ -493,10 +493,12 @@ export class ClaudeProvider implements ILLMProvider {
     tools?: ToolDefinition[],
     systemPrompt?: string
   ): Promise<LLMResponse> {
+    const promptCachingEnabled = isPromptCachingEnabled();
     const anthropicTools = tools?.map(t => ({
       name: t.name,
       description: t.description,
-      input_schema: t.inputSchema
+      input_schema: t.inputSchema,
+      ...(promptCachingEnabled ? { cache_control: { type: 'ephemeral' as const } } : {}),
     }));
 
     // Build proper Anthropic messages (system goes in system param, not in messages)
@@ -518,7 +520,9 @@ export class ClaudeProvider implements ILLMProvider {
     const systemMessages = messages.filter(m => m.role === 'system').map(m => m.content);
     const allSystem = [systemPrompt, ...systemMessages].filter(Boolean).join('\n\n');
     if (allSystem) {
-      body.system = allSystem;
+      body.system = promptCachingEnabled
+        ? [{ type: 'text', text: allSystem, cache_control: { type: 'ephemeral' as const } }]
+        : allSystem;
     }
 
     if (anthropicTools?.length) {
@@ -564,6 +568,8 @@ export class ClaudeProvider implements ILLMProvider {
     const outputTokens = data.usage?.output_tokens || 0;
     getRateLimiter().recordUsage(inputTokens, outputTokens);
     recordSessionUsage(inputTokens, outputTokens);
+    // CACHE-DEAD (Phase 2 audit): keep session cache counters in sync with Anthropic usage payload.
+    recordCacheUsage(data.usage);
 
     // Sprint 24: Parse rate-limit headers from response for authoritative tracking
     const responseHeaders: Record<string, string> = {};
@@ -588,10 +594,12 @@ export class ClaudeProvider implements ILLMProvider {
     tools?: ToolDefinition[],
     systemPrompt?: string
   ): AsyncGenerator<LLMStreamChunk> {
+    const promptCachingEnabled = isPromptCachingEnabled();
     const anthropicTools = tools?.map(t => ({
       name: t.name,
       description: t.description,
-      input_schema: t.inputSchema
+      input_schema: t.inputSchema,
+      ...(promptCachingEnabled ? { cache_control: { type: 'ephemeral' as const } } : {}),
     }));
 
     const filteredMessages = messages
@@ -612,7 +620,9 @@ export class ClaudeProvider implements ILLMProvider {
     const systemMessages = messages.filter(m => m.role === 'system').map(m => m.content);
     const allSystem = [systemPrompt, ...systemMessages].filter(Boolean).join('\n\n');
     if (allSystem) {
-      body.system = allSystem;
+      body.system = promptCachingEnabled
+        ? [{ type: 'text', text: allSystem, cache_control: { type: 'ephemeral' as const } }]
+        : allSystem;
     }
 
     if (anthropicTools?.length) {
@@ -687,6 +697,7 @@ export class ClaudeProvider implements ILLMProvider {
     let apiInputTokens = 0;
     let apiOutputTokens = 0;
     let usageRecordedFromAPI = false;
+    let latestUsagePayload: any = null;
     let _toolBlockCount = 0; // Sprint 34: track tool_use blocks seen
 
     // Sprint 34: Tools that accept empty input (no required properties)
@@ -828,6 +839,7 @@ export class ClaudeProvider implements ILLMProvider {
               // we never double-count. Track the flag so the post-loop block
               // can choose API numbers over estimates.
               if (event.usage) {
+                latestUsagePayload = event.usage;
                 const streamInput = event.usage.input_tokens || 0;
                 const streamOutput = event.usage.output_tokens || 0;
                 if (streamInput > 0 || streamOutput > 0) {
@@ -871,6 +883,8 @@ export class ClaudeProvider implements ILLMProvider {
     }
     getRateLimiter().recordUsage(recordedInputTokens, recordedOutputTokens);
     recordSessionUsage(recordedInputTokens, recordedOutputTokens);
+    // CACHE-DEAD (Phase 2 audit): update cache metrics from streaming usage payload.
+    recordCacheUsage(latestUsagePayload);
 
     // Sprint 24: Parse rate-limit headers from streaming response
     const streamRespHeaders: Record<string, string> = {};
