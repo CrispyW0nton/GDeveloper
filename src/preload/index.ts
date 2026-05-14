@@ -30,6 +30,7 @@ const electronAPI = {
   sendMessage: (sessionId: string, message: string) => ipcRenderer.invoke('chat:send', sessionId, message),
   getChatHistory: (sessionId: string) => ipcRenderer.invoke('chat:history', sessionId),
   clearChat: (sessionId: string) => ipcRenderer.invoke('chat:clear', sessionId),
+  abortChat: () => ipcRenderer.invoke('chat:abort'),
 
   // Chat streaming: listen for stream chunks from main process
   onStreamChunk: (callback: (data: any) => void) => {

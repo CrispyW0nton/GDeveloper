@@ -359,8 +359,10 @@ export class MCPClientManager implements IMCPClientManager {
         // Quick check: can we spawn the command?
         const reachable = await new Promise<boolean>((resolve) => {
           const child = spawn(server.command!, ['--version'], {
-            shell: true,
-            timeout: 5000
+            shell: false,
+            timeout: 5000,
+            stdio: 'ignore',
+            windowsHide: true,
           });
           child.on('exit', (code) => resolve(code === 0));
           child.on('error', () => resolve(false));

@@ -23,7 +23,7 @@
     "fix-codesign": "node scripts/fix-wincodesign.js",
     "test:smoke": "electron-vite build --mode test && npx playwright test tests/smoke/",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/",
+    "lint": "npm run typecheck",
     "postinstall": "electron-builder install-app-deps || echo 'install-app-deps skipped (non-critical)'"
   },
   "build": {

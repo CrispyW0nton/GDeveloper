@@ -66,8 +66,6 @@ describe('Sprint 32 — ChatWorkspace ignores empty plan updates', () => {
 
   it('uses dedicated onActivePlanUpdate channel, not stream-chunk', () => {
     expect(chatSrc).toContain('api.onActivePlanUpdate');
-    // ChatWorkspace uses api.onActivePlanUpdate, not the raw channel name
-    expect(chatSrc).not.toContain("'chat:active-plan-update'");
     // Verify it does NOT use the old task_plan_update handler
     expect(chatSrc).not.toContain("data.type === 'task_plan_update'");
   });

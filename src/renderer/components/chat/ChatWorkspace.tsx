@@ -182,6 +182,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   // clear and (b) the user's current prompt from vanishing before they can
   // see it committed to the transcript.
   const isComposerLockedRef = useRef(false);
+  const isLoadingRef = useRef(false);
 
   // Sprint 38 Bug 2: Keep a ref mirror of streamingContent so the IPC event
   // handler (registered once in an effect with a stable closure) can read the
@@ -275,6 +276,10 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingContent]);
+
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
 
   // Sprint 38 Feature 5: Live countdown for retry banner.
   // Re-computes once per second from retryState.nextRetryMs (absolute ms
@@ -774,6 +779,40 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const removeAttachment = useCallback((id: string) => {
     setAttachments(prev => prev.filter(a => a.id !== id));
   }, []);
+
+  const abortActiveChat = useCallback(async (reason?: string) => {
+    try {
+      if (api?.abortChat) {
+        await api.abortChat();
+      }
+    } catch (err) {
+      console.warn('[Chat] Abort request failed:', err);
+    } finally {
+      setIsLoading(false);
+      streamingContentRef.current = '';
+      setStreamingContent('');
+      setStreamingToolCalls([]);
+      isComposerLockedRef.current = false;
+
+      if (reason) {
+        const infoMsg: Message = {
+          id: `msg-abort-${Date.now()}`,
+          role: 'system',
+          content: reason,
+          timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, infoMsg]);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (isLoadingRef.current) {
+        void abortActiveChat();
+      }
+    };
+  }, [session.id, abortActiveChat]);
 
   const handleSend = async () => {
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
@@ -1395,24 +1434,33 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
               isRefreshingModels={isRefreshingModels}
             />
           )}
-          <button
-            onClick={handleSend}
-            disabled={
-              (!input.trim() && attachments.length === 0) ||
-              isLoading ||
-              isRateLimited /* Sprint 38 Feature 2 */
-            }
-            className="matrix-btn matrix-btn-primary px-4"
-            title={
-              /* Sprint 38 Feature 2: surface the rate-limit reason on hover
-                 when the button is disabled for that reason. */
-              isRateLimited && rateLimitReason
-                ? rateLimitReason
-                : 'Send message (Enter)'
-            }
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-          </button>
+          {isLoading ? (
+            <button
+              onClick={() => { void abortActiveChat('Stopped current response.'); }}
+              className="matrix-btn px-3 border-red-500/40 text-red-300 hover:bg-red-500/10"
+              title="Stop current response"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={
+                (!input.trim() && attachments.length === 0) ||
+                isRateLimited /* Sprint 38 Feature 2 */
+              }
+              className="matrix-btn matrix-btn-primary px-4"
+              title={
+                /* Sprint 38 Feature 2: surface the rate-limit reason on hover
+                   when the button is disabled for that reason. */
+                isRateLimited && rateLimitReason
+                  ? rateLimitReason
+                  : 'Send message (Enter)'
+              }
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+            </button>
+          )}
         </div>
         {/* Sprint 21: Conversation hygiene helpers */}
         <div className="flex items-center justify-between mt-1.5">
