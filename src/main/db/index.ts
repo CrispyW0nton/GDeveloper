@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   args TEXT DEFAULT '[]',
   env TEXT DEFAULT '{}',
   url TEXT,
+  remote_auth TEXT DEFAULT '{}',
   enabled INTEGER DEFAULT 1,
   status TEXT DEFAULT 'disconnected',
   tools TEXT DEFAULT '[]',
@@ -140,6 +141,14 @@ export class DatabaseManager {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA_SQL);
+    this.ensureColumn('mcp_servers', 'remote_auth', "TEXT DEFAULT '{}'");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some(c => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   // ─── Chat Messages ─────────────────────────────────
@@ -316,7 +325,7 @@ export class DatabaseManager {
     if (existing) {
       this.db.prepare(
         `UPDATE mcp_servers
-         SET name=?, transport=?, command=?, args=?, env=?, url=?, enabled=?, status=?, tools=?, last_connected=?
+         SET name=?, transport=?, command=?, args=?, env=?, url=?, remote_auth=?, enabled=?, status=?, tools=?, last_connected=?
          WHERE id=?`
       ).run(
         config.name,
@@ -325,6 +334,7 @@ export class DatabaseManager {
         JSON.stringify(config.args || []),
         JSON.stringify(config.env || {}),
         config.url || null,
+        JSON.stringify(config.remoteAuth || {}),
         config.enabled ? 1 : 0,
         status,
         toolsJson,
@@ -333,8 +343,8 @@ export class DatabaseManager {
       );
     } else {
       this.db.prepare(
-        `INSERT INTO mcp_servers (id, name, transport, command, args, env, url, enabled, status, tools, last_connected)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO mcp_servers (id, name, transport, command, args, env, url, remote_auth, enabled, status, tools, last_connected)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
         config.name,
@@ -343,6 +353,7 @@ export class DatabaseManager {
         JSON.stringify(config.args || []),
         JSON.stringify(config.env || {}),
         config.url || null,
+        JSON.stringify(config.remoteAuth || {}),
         config.enabled !== false ? 1 : 0,
         status,
         toolsJson,
@@ -357,6 +368,7 @@ export class DatabaseManager {
       ...r,
       args: JSON.parse(r.args || '[]'),
       env: JSON.parse(r.env || '{}'),
+      remoteAuth: JSON.parse(r.remote_auth || '{}'),
       tools: JSON.parse(r.tools || '[]'),
       enabled: !!r.enabled
     }));

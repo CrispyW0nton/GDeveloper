@@ -312,8 +312,8 @@ describe('Audit Phase 2 / AGL-TRUNC — functional fixture', () => {
 // ═══════════════════════════════════════════════════════════════════
 describe('Audit Phase 2 / MCP-TOGGLE — tool toggle persistence', () => {
   it('DatabaseManager.saveMCPServer updates tools/status/last_connected columns', () => {
-    expect(dbCode).toMatch(/SET name=\?, transport=\?, command=\?, args=\?, env=\?, url=\?, enabled=\?, status=\?, tools=\?, last_connected=\?/);
-    expect(dbCode).toMatch(/INSERT INTO mcp_servers \(id, name, transport, command, args, env, url, enabled, status, tools, last_connected\)/);
+    expect(dbCode).toMatch(/SET name=\?, transport=\?, command=\?, args=\?, env=\?, url=\?, remote_auth=\?, enabled=\?, status=\?, tools=\?, last_connected=\?/);
+    expect(dbCode).toMatch(/INSERT INTO mcp_servers \(id, name, transport, command, args, env, url, remote_auth, enabled, status, tools, last_connected\)/);
   });
 
   it('MCPClientManager.toggleTool persists the server after mutation', () => {

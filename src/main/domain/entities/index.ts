@@ -179,11 +179,19 @@ export interface MCPServerConfig {
   args?: string[];         // for stdio
   env?: Record<string, string>; // for stdio
   url?: string;            // for http/sse
+  remoteAuth?: MCPRemoteAuthConfig; // for http/sse
   enabled: boolean;
   autoStart: boolean;
   status: MCPServerStatus;
   tools: MCPToolInfo[];
   lastConnected?: string;
+}
+
+export interface MCPRemoteAuthConfig {
+  headers?: Record<string, string>;
+  bearerTokenEnvVar?: string;
+  resourceIndicator?: string;
+  scope?: string;
 }
 
 export interface MCPToolInfo {

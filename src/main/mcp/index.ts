@@ -26,6 +26,7 @@ import { MCPTransportType, MCPServerStatus } from '../domain/enums';
 import { IMCPClientManager } from '../domain/interfaces';
 import { getDatabase } from '../db';
 import { previewMCPPayload, recordMCPAuditEvent } from './audit';
+import { buildMCPRemoteTransportOptions, normalizeRemoteAuth, type MCPRemoteTransportOptions } from './remoteAuth';
 
 export interface MCPServerHealthSnapshot {
   id: string;
@@ -274,7 +275,11 @@ export class MCPClientManager implements IMCPClientManager {
       }
     }
 
-    const server: MCPServerConfig = { ...config, status: MCPServerStatus.DISCONNECTED };
+    const server: MCPServerConfig = {
+      ...config,
+      remoteAuth: config.transport === MCPTransportType.STDIO ? undefined : normalizeRemoteAuth(config.remoteAuth),
+      status: MCPServerStatus.DISCONNECTED,
+    };
     this.servers.set(config.id, server);
     this.health.set(config.id, {
       id: config.id,
@@ -436,23 +441,33 @@ export class MCPClientManager implements IMCPClientManager {
     const baseUrl = new URL(server.url!);
     const pathname = baseUrl.pathname.replace(/\/+$/, '');
     console.log(`[MCP:${server.name}] Connecting to remote: ${server.url}`);
+    const transportOptions = buildMCPRemoteTransportOptions(server);
+    recordMCPAuditEvent({
+      kind: 'server',
+      action: 'remote_auth_preflight',
+      status: 'success',
+      serverId: server.id,
+      serverName: server.name,
+      transport: server.transport,
+      inputPreview: previewMCPPayload(transportOptions.authPreview),
+    });
 
     const isSSEUrl = pathname.endsWith('/sse');
     const isMCPUrl = pathname.endsWith('/mcp');
 
     if (isSSEUrl) {
       // URL clearly points to an SSE endpoint — try SSE first
-      return this.trySSEThenHTTP(server, baseUrl);
+      return this.trySSEThenHTTP(server, baseUrl, transportOptions);
     }
 
     // URL does NOT end in /sse — try Streamable HTTP first
-    return this.tryHTTPThenSSE(server, baseUrl, isMCPUrl);
+    return this.tryHTTPThenSSE(server, baseUrl, isMCPUrl, transportOptions);
   }
 
   /**
    * Try SSE first at the given URL, fallback to Streamable HTTP at /mcp.
    */
-  private async trySSEThenHTTP(server: MCPServerConfig, sseUrl: URL): Promise<Client> {
+  private async trySSEThenHTTP(server: MCPServerConfig, sseUrl: URL, options: MCPRemoteTransportOptions): Promise<Client> {
     // --- Attempt 1: SSE ---
     try {
       console.log(`[MCP:${server.name}] URL ends in /sse — trying SSE transport first`);
@@ -460,7 +475,11 @@ export class MCPClientManager implements IMCPClientManager {
         { name: 'GDeveloper', version: '1.0.0' },
         { capabilities: {} }
       );
-      const sseTransport = new SSEClientTransport(sseUrl);
+      const sseTransport = new SSEClientTransport(sseUrl, {
+        requestInit: options.requestInit,
+        eventSourceInit: { fetch: options.fetch },
+        fetch: options.fetch,
+      });
       await client.connect(sseTransport);
       console.log(`[MCP:${server.name}] ✓ Connected via SSE`);
       return client;
@@ -477,7 +496,16 @@ export class MCPClientManager implements IMCPClientManager {
         { name: 'GDeveloper', version: '1.0.0' },
         { capabilities: {} }
       );
-      const httpTransport = new StreamableHTTPClientTransport(mcpUrl);
+      const httpTransport = new StreamableHTTPClientTransport(mcpUrl, {
+        requestInit: options.requestInit,
+        fetch: options.fetch,
+        reconnectionOptions: {
+          initialReconnectionDelay: 1_000,
+          maxReconnectionDelay: 30_000,
+          reconnectionDelayGrowFactor: 1.5,
+          maxRetries: 2,
+        },
+      });
       await client.connect(httpTransport);
       console.log(`[MCP:${server.name}] ✓ Connected via Streamable HTTP (fallback from SSE URL)`);
       return client;
@@ -490,7 +518,7 @@ export class MCPClientManager implements IMCPClientManager {
   /**
    * Try Streamable HTTP first, fallback to SSE.
    */
-  private async tryHTTPThenSSE(server: MCPServerConfig, baseUrl: URL, isMCPUrl: boolean): Promise<Client> {
+  private async tryHTTPThenSSE(server: MCPServerConfig, baseUrl: URL, isMCPUrl: boolean, options: MCPRemoteTransportOptions): Promise<Client> {
     // --- Attempt 1: Streamable HTTP ---
     try {
       const streamableUrl = isMCPUrl ? baseUrl : new URL(baseUrl.href.replace(/\/?$/, '/mcp'));
@@ -499,7 +527,16 @@ export class MCPClientManager implements IMCPClientManager {
         { name: 'GDeveloper', version: '1.0.0' },
         { capabilities: {} }
       );
-      const httpTransport = new StreamableHTTPClientTransport(streamableUrl);
+      const httpTransport = new StreamableHTTPClientTransport(streamableUrl, {
+        requestInit: options.requestInit,
+        fetch: options.fetch,
+        reconnectionOptions: {
+          initialReconnectionDelay: 1_000,
+          maxReconnectionDelay: 30_000,
+          reconnectionDelayGrowFactor: 1.5,
+          maxRetries: 2,
+        },
+      });
       await client.connect(httpTransport);
       console.log(`[MCP:${server.name}] ✓ Connected via Streamable HTTP`);
       return client;
@@ -518,7 +555,11 @@ export class MCPClientManager implements IMCPClientManager {
         { name: 'GDeveloper', version: '1.0.0' },
         { capabilities: {} }
       );
-      const sseTransport = new SSEClientTransport(sseUrl);
+      const sseTransport = new SSEClientTransport(sseUrl, {
+        requestInit: options.requestInit,
+        eventSourceInit: { fetch: options.fetch },
+        fetch: options.fetch,
+      });
       await client.connect(sseTransport);
       console.log(`[MCP:${server.name}] ✓ Connected via SSE (fallback)`);
       return client;
@@ -688,9 +729,10 @@ export class MCPClientManager implements IMCPClientManager {
       if (server.url) {
         // For remote servers: try a quick GET to see if the server is reachable
         try {
+          const remoteOptions = buildMCPRemoteTransportOptions(server);
           const res = await fetch(server.url, {
             method: 'GET',
-            headers: { 'Accept': 'text/event-stream' },
+            headers: remoteOptions.requestInit.headers,
             signal: AbortSignal.timeout(5000)
           });
           const reachable = res.ok || res.status === 405; // 405 means server exists but doesn't support GET

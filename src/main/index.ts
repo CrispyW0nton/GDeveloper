@@ -1012,6 +1012,7 @@ function registerIPCHandlers(): void {
         args: config.args || [],
         env: config.env || {},
         url: config.url,
+        remoteAuth: config.remoteAuth || {},
         enabled: true,
         autoStart: false,
         status: 'disconnected' as any,

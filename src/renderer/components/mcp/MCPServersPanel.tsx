@@ -9,9 +9,17 @@ interface MCPServer {
   command?: string;
   args?: string[];
   url?: string;
+  remoteAuth?: MCPRemoteAuthConfig;
   enabled: boolean;
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
   tools: MCPTool[];
+}
+
+interface MCPRemoteAuthConfig {
+  headers?: Record<string, string>;
+  bearerTokenEnvVar?: string;
+  resourceIndicator?: string;
+  scope?: string;
 }
 
 interface MCPTool {
@@ -69,7 +77,18 @@ export default function MCPServersPanel() {
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
   const [selectedMarketplacePreview, setSelectedMarketplacePreview] = useState<MCPMarketplacePreview | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [newServer, setNewServer] = useState({ name: '', transport: 'stdio' as const, command: '', args: '', url: '' });
+  const [newServer, setNewServer] = useState({
+    name: '',
+    transport: 'stdio' as const,
+    command: '',
+    args: '',
+    url: '',
+    bearerTokenEnvVar: '',
+    resourceIndicator: '',
+    scope: '',
+    headersJson: '',
+  });
+  const [addError, setAddError] = useState('');
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ reachable?: boolean; mcpReady?: boolean } | null>(null);
   const [connectError, setConnectError] = useState('');
@@ -265,13 +284,20 @@ export default function MCPServersPanel() {
   };
 
   const handleAddServer = async () => {
+    setAddError('');
     if (api) {
+      const remoteAuth = newServer.transport !== 'stdio' ? buildRemoteAuthConfig(newServer) : undefined;
+      if (remoteAuth instanceof Error) {
+        setAddError(remoteAuth.message);
+        return;
+      }
       const result = await api.addMCPServer({
         name: newServer.name,
         transport: newServer.transport,
         command: newServer.transport === 'stdio' ? newServer.command : undefined,
         args: newServer.transport === 'stdio' ? newServer.args.split(' ').filter(Boolean) : undefined,
         url: newServer.transport !== 'stdio' ? newServer.url : undefined,
+        remoteAuth,
       });
       if (result.success) {
         // Refresh the entire list from the backend (canonical source of truth)
@@ -280,11 +306,36 @@ export default function MCPServersPanel() {
         if (result.server?.id) {
           setSelectedServer(result.server.id);
         }
+      } else {
+        setAddError(result.error || 'Failed to add MCP server');
+        return;
       }
     }
     // Do NOT add a local copy - the loadServers() call above is the source of truth
     setShowAddDialog(false);
-    setNewServer({ name: '', transport: 'stdio', command: '', args: '', url: '' });
+    setNewServer({ name: '', transport: 'stdio', command: '', args: '', url: '', bearerTokenEnvVar: '', resourceIndicator: '', scope: '', headersJson: '' });
+  };
+
+  const buildRemoteAuthConfig = (server: typeof newServer): MCPRemoteAuthConfig | Error => {
+    let headers: Record<string, string> | undefined;
+    if (server.headersJson.trim()) {
+      try {
+        const parsed = JSON.parse(server.headersJson);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return new Error('Headers must be a JSON object');
+        }
+        headers = parsed;
+      } catch {
+        return new Error('Headers must be valid JSON');
+      }
+    }
+
+    return {
+      headers,
+      bearerTokenEnvVar: server.bearerTokenEnvVar.trim() || undefined,
+      resourceIndicator: server.resourceIndicator.trim() || undefined,
+      scope: server.scope.trim() || undefined,
+    };
   };
 
   const statusColors: Record<string, string> = {
@@ -305,7 +356,7 @@ export default function MCPServersPanel() {
           </h2>
           <div className="flex gap-1">
             <button onClick={openAudit} className="matrix-btn px-2 py-1 text-[10px]">Audit</button>
-            <button onClick={() => setShowAddDialog(true)} className="matrix-btn px-2 py-1 text-[10px]">
+            <button onClick={() => { setAddError(''); setShowAddDialog(true); }} className="matrix-btn px-2 py-1 text-[10px]">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               Add
             </button>
@@ -570,6 +621,20 @@ export default function MCPServersPanel() {
                       ? 'SSE: Connects via GET /sse for events, POST /messages/ for requests.'
                       : 'HTTP: Posts JSON-RPC directly to the URL endpoint.'}
                   </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
+                    <div>
+                      <span className="text-matrix-text-muted/35">Bearer env:</span>
+                      <code className="ml-1 text-matrix-green/80">{selected.remoteAuth?.bearerTokenEnvVar || 'None'}</code>
+                    </div>
+                    <div>
+                      <span className="text-matrix-text-muted/35">Headers:</span>
+                      <code className="ml-1 text-matrix-green/80">{Object.keys(selected.remoteAuth?.headers || {}).length}</code>
+                    </div>
+                    <div className="col-span-2 truncate">
+                      <span className="text-matrix-text-muted/35">Resource:</span>
+                      <code className="ml-1 text-matrix-green/80">{selected.remoteAuth?.resourceIndicator || 'None'}</code>
+                    </div>
+                  </div>
                 </>
               )}
             </div>
@@ -641,6 +706,11 @@ export default function MCPServersPanel() {
             </h3>
 
             <div className="space-y-3">
+              {addError && (
+                <div className="text-xs text-matrix-danger bg-matrix-danger/5 border border-matrix-danger/20 rounded px-3 py-2">
+                  {addError}
+                </div>
+              )}
               <div>
                 <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Server Name</label>
                 <input value={newServer.name} onChange={e => setNewServer(p => ({ ...p, name: e.target.value }))} className="matrix-input" placeholder="My MCP Server" />
@@ -678,12 +748,30 @@ export default function MCPServersPanel() {
                       ? 'SSE endpoint (e.g., http://localhost:8000/sse). GDeveloper tries streamable-http first, then SSE fallback.'
                       : 'HTTP endpoint. GDeveloper sends JSON-RPC POST requests directly.'}
                   </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Bearer Token Env</label>
+                      <input value={newServer.bearerTokenEnvVar} onChange={e => setNewServer(p => ({ ...p, bearerTokenEnvVar: e.target.value }))} className="matrix-input" placeholder="MCP_API_TOKEN" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">OAuth Scope</label>
+                      <input value={newServer.scope} onChange={e => setNewServer(p => ({ ...p, scope: e.target.value }))} className="matrix-input" placeholder="read:repo" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Resource Indicator</label>
+                    <input value={newServer.resourceIndicator} onChange={e => setNewServer(p => ({ ...p, resourceIndicator: e.target.value }))} className="matrix-input" placeholder="https://api.example.com" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-matrix-text-muted/50 mb-1 uppercase tracking-wider">Custom Headers JSON</label>
+                    <textarea value={newServer.headersJson} onChange={e => setNewServer(p => ({ ...p, headersJson: e.target.value }))} className="matrix-input min-h-16 text-[10px] font-mono" placeholder='{"X-Workspace": "dev"}' />
+                  </div>
                 </>
               )}
             </div>
 
             <div className="flex gap-2 mt-5 justify-end">
-              <button onClick={() => setShowAddDialog(false)} className="matrix-btn text-xs">Cancel</button>
+              <button onClick={() => { setAddError(''); setShowAddDialog(false); }} className="matrix-btn text-xs">Cancel</button>
               <button onClick={handleAddServer} disabled={!newServer.name.trim()} className="matrix-btn matrix-btn-primary text-xs">Add Server</button>
             </div>
           </div>

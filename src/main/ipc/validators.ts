@@ -110,6 +110,12 @@ const MCPServerConfig = z
     args: z.array(z.string().max(4096)).max(100).optional(),
     env: z.record(z.string(), z.string().max(16384)).optional(),
     url: z.string().max(4096).optional(),
+    remoteAuth: z.object({
+      headers: z.record(z.string(), z.string().max(4096)).optional(),
+      bearerTokenEnvVar: z.string().max(128).optional(),
+      resourceIndicator: z.string().max(4096).optional(),
+      scope: z.string().max(2048).optional(),
+    }).optional(),
     enabled: z.boolean().optional(),
   })
   .passthrough();
