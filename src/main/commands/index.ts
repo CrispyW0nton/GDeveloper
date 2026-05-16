@@ -36,6 +36,16 @@ import {
 import {
   runAssertions, formatVerifyReport, getPersistedReports,
 } from '../orchestration/verifier';
+import {
+  VIBE_LOOP_STAGE_DEFINITIONS,
+  formatVibeLoopMarkdown,
+  getNextVibeLoopStage,
+  getVibeLoopState,
+  isVibeLoopStage,
+  resetVibeLoopState,
+  setVibeLoopStage,
+  type VibeLoopStage,
+} from '../orchestration/vibeLoop';
 
 // ─── Interfaces ───
 
@@ -483,6 +493,79 @@ register({
     };
   },
 });
+
+function vibeLoopCommandResult(ctx: WorkspaceContext, stage: VibeLoopStage, note?: string): CommandResult {
+  const state = setVibeLoopStage(ctx.sessionId, stage, note);
+  const def = VIBE_LOOP_STAGE_DEFINITIONS.find(s => s.id === state.stage);
+  getDatabase().logActivity(ctx.sessionId, 'vibe_loop_stage', `Vibe loop: ${def?.label || state.stage}`, state.note || '', {
+    stage: state.stage,
+    note: state.note,
+  });
+  return {
+    success: true,
+    message: formatVibeLoopMarkdown(state),
+    data: { vibeLoop: state, action: 'vibe-loop-stage' },
+  };
+}
+
+register({
+  name: 'vibe',
+  description: 'Show or change the Vibe Coding Loop stage. Usage: /vibe [frame|decompose|converse|review|test|refine|next|reset] [note]',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const trimmed = args.trim();
+    const [rawSubcommand, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+    const subcommand = (rawSubcommand || 'status').toLowerCase();
+    const note = rest.join(' ');
+
+    if (subcommand === 'status') {
+      const state = getVibeLoopState(ctx.sessionId);
+      return {
+        success: true,
+        message: formatVibeLoopMarkdown(state),
+        data: { vibeLoop: state, action: 'vibe-loop-status' },
+      };
+    }
+
+    if (subcommand === 'next') {
+      const current = getVibeLoopState(ctx.sessionId);
+      return vibeLoopCommandResult(ctx, getNextVibeLoopStage(current.stage), note);
+    }
+
+    if (subcommand === 'reset') {
+      const state = resetVibeLoopState(ctx.sessionId);
+      getDatabase().logActivity(ctx.sessionId, 'vibe_loop_reset', 'Vibe loop reset to Frame');
+      return {
+        success: true,
+        message: formatVibeLoopMarkdown(state),
+        data: { vibeLoop: state, action: 'vibe-loop-reset' },
+      };
+    }
+
+    if (isVibeLoopStage(subcommand)) {
+      return vibeLoopCommandResult(ctx, subcommand, note);
+    }
+
+    const stages = VIBE_LOOP_STAGE_DEFINITIONS.map(s => s.id).join(', ');
+    return {
+      success: false,
+      message: `Unknown Vibe Coding Loop stage: \`${subcommand}\`.\nUse one of: ${stages}, next, reset, status.`,
+    };
+  },
+});
+
+for (const stageDef of VIBE_LOOP_STAGE_DEFINITIONS) {
+  register({
+    name: stageDef.id,
+    description: `Vibe Coding Loop: ${stageDef.intent}`,
+    category: 'workflow',
+    safe: true,
+    async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+      return vibeLoopCommandResult(ctx, stageDef.id, args.trim());
+    },
+  });
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  TRUTHFULNESS VERIFICATION (Sprint 15.2)

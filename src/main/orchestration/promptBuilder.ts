@@ -24,6 +24,7 @@ import {
   retrieveRelevantCodeChunks,
 } from './projectContext';
 import { collectWorkspaceDiagnostics, formatDiagnosticsForPrompt } from '../diagnostics';
+import { formatVibeLoopForPrompt, getVibeLoopState } from './vibeLoop';
 import simpleGit from 'simple-git';
 
 export interface PromptBuilderContext {
@@ -54,6 +55,11 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
 
   // 2. Base system prompt
   sections.push(SYSTEM_PROMPT);
+
+  // Phase 2: first-class Vibe Coding Loop stage.
+  // This keeps Frame/Decompose/Converse/Review/Test/Refine visible to the
+  // model without requiring the user to repeat the workflow contract.
+  sections.push(formatVibeLoopForPrompt(getVibeLoopState(ctx.sessionId)));
 
   // 3. Workspace context
   const wsPath = ctx.workspacePath || getActiveWorkspace();

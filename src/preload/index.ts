@@ -118,6 +118,7 @@ const electronAPI = {
   listSlashCommands: () => ipcRenderer.invoke('slash:list'),
   getExecutionMode: () => ipcRenderer.invoke('mode:get'),
   setExecutionMode: (mode: string) => ipcRenderer.invoke('mode:set', mode),
+  getVibeLoop: (sessionId: string) => ipcRenderer.invoke('vibe-loop:get', sessionId),
 
   // ─── Sprint 13: Discovery ─────────────────────────
   scanForRepos: (rootPath: string, maxDepth?: number) => ipcRenderer.invoke('discovery:scan', rootPath, maxDepth),

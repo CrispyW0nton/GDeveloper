@@ -86,6 +86,66 @@ const TaskPlanCard = memo(function TaskPlanCard({ plan }: { plan: any }) {
   );
 }, deepEqual);
 
+const VIBE_LOOP_STAGES = [
+  { id: 'frame', label: 'Frame' },
+  { id: 'decompose', label: 'Decompose' },
+  { id: 'converse', label: 'Converse' },
+  { id: 'review', label: 'Review' },
+  { id: 'test', label: 'Test' },
+  { id: 'refine', label: 'Refine' },
+] as const;
+
+type VibeLoopStage = typeof VIBE_LOOP_STAGES[number]['id'];
+
+interface VibeLoopState {
+  sessionId: string;
+  stage: VibeLoopStage;
+  updatedAt: string;
+  note?: string;
+}
+
+const VibeLoopCard = memo(function VibeLoopCard({ state }: { state: VibeLoopState | null }) {
+  const activeStage = state?.stage || 'frame';
+  const activeIndex = VIBE_LOOP_STAGES.findIndex(s => s.id === activeStage);
+
+  return (
+    <div className="mb-3 rounded-lg border border-matrix-border/40 bg-matrix-bg-panel/70 p-2.5 text-[10px]">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="font-mono font-bold text-matrix-green">Vibe Coding Loop</span>
+        <span className="ml-auto text-[8px] uppercase tracking-wider text-matrix-text-muted/35">
+          {VIBE_LOOP_STAGES[Math.max(activeIndex, 0)]?.label || 'Frame'}
+        </span>
+      </div>
+      <div className="grid grid-cols-6 gap-1">
+        {VIBE_LOOP_STAGES.map((stage, index) => {
+          const isActive = stage.id === activeStage;
+          const isPast = index < activeIndex;
+          return (
+            <div
+              key={stage.id}
+              className={`h-7 min-w-0 rounded border px-1 flex items-center justify-center font-mono text-[9px] transition-colors ${
+                isActive
+                  ? 'border-matrix-green bg-matrix-green/12 text-matrix-green'
+                  : isPast
+                    ? 'border-matrix-green/25 bg-matrix-green/5 text-matrix-green/45'
+                    : 'border-matrix-border/30 bg-matrix-bg-elevated/50 text-matrix-text-muted/40'
+              }`}
+              title={`/${stage.id}`}
+            >
+              <span className="truncate">{stage.label}</span>
+            </div>
+          );
+        })}
+      </div>
+      {state?.note && (
+        <div className="mt-2 truncate text-[9px] text-matrix-text-muted/45" title={state.note}>
+          {state.note}
+        </div>
+      )}
+    </div>
+  );
+}, deepEqual);
+
 interface WorktreeContextInfo {
   isWorktree: boolean;
   isMain: boolean;
@@ -167,6 +227,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   // Plan lives HERE, not inside a tool card's result field. This prevents the
   // "reverts to Waiting for plan data..." bug caused by React unmount/remount.
   const [activePlan, setActivePlanState] = useState<any>(null);
+  const [activeVibeLoop, setActiveVibeLoop] = useState<VibeLoopState | null>(null);
   const activePlanRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -321,6 +382,14 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       setSlashCommands(rendererCommands);
     }
   }, []);
+
+  // Phase 2: Load the persistent Vibe Coding Loop state for this session.
+  useEffect(() => {
+    if (!api?.getVibeLoop || !session.id) return;
+    api.getVibeLoop(session.id)
+      .then((state: VibeLoopState) => setActiveVibeLoop(state))
+      .catch((err: any) => console.warn('[Chat] Failed to load vibe loop state:', err));
+  }, [session.id]);
 
   // Load chat history from DB on mount
   useEffect(() => {
@@ -629,6 +698,10 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       // Handle mode change
       if (result.data?.mode) {
         onModeChange(result.data.mode);
+      }
+
+      if (result.data?.vibeLoop) {
+        setActiveVibeLoop(result.data.vibeLoop);
       }
 
       const responseMsg: Message = {
@@ -1154,6 +1227,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
       {/* Messages or Suggestions */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <VibeLoopCard state={activeVibeLoop} />
+
         {showSuggestions ? (
           <SuggestionCards onSelect={handleSuggestionSelect} />
         ) : (

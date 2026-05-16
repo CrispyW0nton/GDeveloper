@@ -35,7 +35,8 @@ const CATEGORY_META: Record<string, { color: string; icon: string; label: string
 // Sprint 18: Commands that are safe for beginners (read-only, no mutations)
 const BEGINNER_SAFE: Set<string> = new Set([
   'plan', 'tools', 'clear', 'status', 'diff', 'research', 'research-continue',
-  'compare-repos', 'verify-last', 'worktree-list',
+  'compare-repos', 'verify-last', 'worktree-list', 'vibe',
+  'frame', 'decompose', 'converse', 'review', 'test', 'refine',
 ]);
 
 // Sprint 18: Example usage for commands
@@ -46,6 +47,11 @@ const COMMAND_EXAMPLES: Record<string, string> = {
   'worktree-add': '/worktree-add ../hotfix -b hotfix/bug-123',
   'worktree-isolate': '/worktree-isolate refactor auth system',
   'worktree-handoff': '/worktree-handoff ../feature main',
+  'vibe': '/vibe next',
+  'frame': '/frame user-facing constraints and done criteria',
+  'decompose': '/decompose tracer bullet first',
+  'review': '/review check for hollow tests',
+  'test': '/test run focused verification',
 };
 
 export default function SlashCommandDropdown({

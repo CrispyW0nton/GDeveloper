@@ -68,6 +68,7 @@ import { getRateLimiter } from './providers/rateLimiter';
 import { DEFAULT_TOKEN_BUDGET_CONFIG, validateSoftLimits, type TokenBudgetConfig } from './providers/rateLimitConfig';
 import { getToolResultBudget } from './providers/toolResultBudget';
 import { getSandboxExecutionConfig, isDockerAvailable, setSandboxExecutionConfig } from './sandbox';
+import { getVibeLoopState } from './orchestration/vibeLoop';
 import {
   processAttachment, processClipboardImage, loadAttachment,
   deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
@@ -1574,6 +1575,10 @@ function registerIPCHandlers(): void {
       return { success: true, mode };
     }
     return { success: false, error: 'Invalid mode. Use "plan" or "build".' };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.VIBE_LOOP_GET, async (_event, sessionId: string) => {
+    return getVibeLoopState(sessionId || 'system');
   });
 
   // ─── Sprint 13: Discovery ────────────────────────

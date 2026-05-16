@@ -111,6 +111,7 @@ export const IPC_CHANNELS = {
   SLASH_COMMAND_LIST: 'slash:list',
   MODE_GET: 'mode:get',
   MODE_SET: 'mode:set',
+  VIBE_LOOP_GET: 'vibe-loop:get',
 
   // ─── Sprint 13: Discovery, Migration, Environment, Research ───
   DISCOVERY_SCAN: 'discovery:scan',
