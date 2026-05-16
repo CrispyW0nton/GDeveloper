@@ -23,6 +23,7 @@ import { ATTEMPT_COMPLETION_TOOL_DEF, executeAttemptCompletion, type AttemptComp
 import { ASK_FOLLOWUP_QUESTION_TOOL_DEF, executeAskFollowupQuestion, type AskFollowupQuestionInput } from './askFollowupQuestion';
 import * as compareEngine from '../compare';
 import type { CompareFilters, HunkAction, SyncDirection } from '../compare';
+import { executeCommandWithSandbox } from '../sandbox';
 
 // ─── Workspace State ───
 
@@ -830,19 +831,23 @@ function toolRunCommand(ws: string, args: Record<string, unknown>): string {
   const cwd = resolveSafe(ws, cwdRel);
 
   try {
-    const output = execSync(command, {
-      cwd,
-      maxBuffer: 1024 * 1024,
-      timeout: 30000,
-      encoding: 'utf-8',
-      shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash'
-    });
-    return output || '(no output)';
+    const sandboxResult = executeCommandWithSandbox(ws, cwd, command, 30000);
+    const modeLine = sandboxResult.sandboxed
+      ? '[sandbox: docker]'
+      : sandboxResult.fallbackReason
+        ? `[sandbox fallback: ${sandboxResult.fallbackReason}]`
+        : '';
+    if (sandboxResult.exitCode === 0) {
+      return [modeLine, sandboxResult.stdout || '(no output)'].filter(Boolean).join('\n');
+    }
+    return [
+      modeLine,
+      `Exit code: ${sandboxResult.exitCode}`,
+      `stdout:\n${sandboxResult.stdout}`,
+      `stderr:\n${sandboxResult.stderr}`,
+    ].filter(Boolean).join('\n');
   } catch (err: any) {
-    const stdout = err.stdout || '';
-    const stderr = err.stderr || '';
-    const code = err.status ?? 1;
-    return `Exit code: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`;
+    return `Exit code: ${err.status ?? 1}\nstdout:\n${err.stdout || ''}\nstderr:\n${err.stderr || err.message || ''}`;
   }
 }
 

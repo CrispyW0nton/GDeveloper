@@ -67,6 +67,7 @@ import { getRetryHandler } from './providers/retryHandler';
 import { getRateLimiter } from './providers/rateLimiter';
 import { DEFAULT_TOKEN_BUDGET_CONFIG, validateSoftLimits, type TokenBudgetConfig } from './providers/rateLimitConfig';
 import { getToolResultBudget } from './providers/toolResultBudget';
+import { getSandboxExecutionConfig, isDockerAvailable, setSandboxExecutionConfig } from './sandbox';
 import {
   processAttachment, processClipboardImage, loadAttachment,
   deleteConversationAttachments, getAttachmentConfig, setAttachmentConfig,
@@ -2047,6 +2048,26 @@ function registerIPCHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.SANDBOX_CLEAR_LOG, async () => {
     sandboxLog.length = 0;
     return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SANDBOX_GET_CONFIG, async () => {
+    return getSandboxExecutionConfig();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SANDBOX_SET_CONFIG, async (_event, config: any) => {
+    const updated = setSandboxExecutionConfig(config || {});
+    db.logActivity('system', 'sandbox_config_updated', `Sandbox mode: ${updated.mode}`, JSON.stringify(updated), { config: updated });
+    emitSandboxEvent({
+      type: 'status',
+      summary: `Sandbox execution mode: ${updated.mode}`,
+      detail: JSON.stringify(updated),
+      status: 'success',
+    });
+    return { success: true, config: updated };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SANDBOX_CHECK_DOCKER, async () => {
+    return { available: isDockerAvailable() };
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

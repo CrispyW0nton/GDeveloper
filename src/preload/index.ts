@@ -184,6 +184,9 @@ const electronAPI = {
   // ─── Sprint 16: Sandbox Monitor ───────────────────
   getSandboxLog: () => ipcRenderer.invoke('sandbox:get-log'),
   clearSandboxLog: () => ipcRenderer.invoke('sandbox:clear-log'),
+  getSandboxConfig: () => ipcRenderer.invoke('sandbox:get-config'),
+  setSandboxConfig: (config: any) => ipcRenderer.invoke('sandbox:set-config', config),
+  checkDockerAvailable: () => ipcRenderer.invoke('sandbox:check-docker'),
   onSandboxEvent: (callback: (data: any) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('sandbox:event', handler);

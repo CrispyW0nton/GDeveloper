@@ -39,11 +39,20 @@ interface SandboxMonitorProps {
   onClose?: () => void;
 }
 
+interface SandboxConfig {
+  mode: 'local' | 'docker';
+  dockerImage: string;
+  network: 'none' | 'bridge';
+  fallbackToLocal: boolean;
+}
+
 export default function SandboxMonitor({ onClose }: SandboxMonitorProps) {
   const [events, setEvents] = useState<SandboxEvent[]>([]);
   const [filter, setFilter] = useState<string>('all');
   const [autoScroll, setAutoScroll] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [config, setConfig] = useState<SandboxConfig | null>(null);
+  const [dockerAvailable, setDockerAvailable] = useState<boolean | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Load existing log
@@ -52,6 +61,15 @@ export default function SandboxMonitor({ onClose }: SandboxMonitorProps) {
       api.getSandboxLog().then((log: SandboxEvent[]) => {
         if (log && log.length > 0) setEvents(log);
       });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (api?.getSandboxConfig) {
+      api.getSandboxConfig().then((cfg: SandboxConfig) => setConfig(cfg)).catch(() => {});
+    }
+    if (api?.checkDockerAvailable) {
+      api.checkDockerAvailable().then((result: { available: boolean }) => setDockerAvailable(!!result?.available)).catch(() => setDockerAvailable(false));
     }
   }, []);
 
@@ -85,6 +103,15 @@ export default function SandboxMonitor({ onClose }: SandboxMonitorProps) {
     ).join('\n');
     navigator.clipboard.writeText(text);
   }, [events]);
+
+  const updateSandboxConfig = useCallback(async (patch: Partial<SandboxConfig>) => {
+    const next = { ...(config || { mode: 'local', dockerImage: 'node:20-bookworm', network: 'none', fallbackToLocal: true }), ...patch };
+    setConfig(next);
+    if (api?.setSandboxConfig) {
+      const result = await api.setSandboxConfig(next);
+      if (result?.config) setConfig(result.config);
+    }
+  }, [config]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded(prev => {
@@ -145,6 +172,38 @@ export default function SandboxMonitor({ onClose }: SandboxMonitorProps) {
             </button>
           )}
         </div>
+      </div>
+
+      {/* Sandbox mode controls */}
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-matrix-border/10 bg-matrix-bg-panel/60 text-[9px]">
+        <span className="text-matrix-text-muted/40 uppercase tracking-wider">Execution</span>
+        <select
+          value={config?.mode || 'local'}
+          onChange={e => updateSandboxConfig({ mode: e.target.value as 'local' | 'docker' })}
+          className="matrix-input h-6 py-0 text-[10px] max-w-[92px]"
+          title="Command execution mode"
+        >
+          <option value="local">Local</option>
+          <option value="docker">Docker</option>
+        </select>
+        <input
+          value={config?.dockerImage || 'node:20-bookworm'}
+          onChange={e => updateSandboxConfig({ dockerImage: e.target.value })}
+          disabled={(config?.mode || 'local') !== 'docker'}
+          className="matrix-input h-6 py-0 text-[10px] flex-1 min-w-0"
+          title="Docker image for sandboxed commands"
+        />
+        <label className="flex items-center gap-1 text-matrix-text-muted/50 whitespace-nowrap">
+          <input
+            type="checkbox"
+            checked={config?.fallbackToLocal !== false}
+            onChange={e => updateSandboxConfig({ fallbackToLocal: e.target.checked })}
+          />
+          fallback
+        </label>
+        <span className={`${dockerAvailable ? 'text-matrix-green' : 'text-matrix-warning'} whitespace-nowrap`}>
+          Docker {dockerAvailable === null ? 'checking' : dockerAvailable ? 'ready' : 'unavailable'}
+        </span>
       </div>
 
       {/* Event List */}

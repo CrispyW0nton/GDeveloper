@@ -4,15 +4,16 @@
  * No elevated privileges, no PTY. Destructive commands require confirmation.
  */
 
-import { execSync } from 'child_process';
 import { existsSync } from 'fs';
-import { resolve, sep } from 'path';
+import { resolve } from 'path';
+import { executeCommandWithSandbox, type SandboxExecutionMode } from '../sandbox';
 
 export interface BashCommandInput {
   command: string;
   cwd?: string;
   timeout?: number;
   description?: string;
+  sandbox_mode?: SandboxExecutionMode;
 }
 
 export interface BashCommandResult {
@@ -26,6 +27,9 @@ export interface BashCommandResult {
   blocked: boolean;
   block_reason?: string;
   duration_ms: number;
+  execution_mode?: SandboxExecutionMode;
+  sandboxed?: boolean;
+  fallback_reason?: string;
 }
 
 // High-risk patterns that require confirmation
@@ -163,43 +167,43 @@ export function executeBashCommand(
   // Clamp timeout
   const effectiveTimeout = Math.max(1000, Math.min(timeout, 120000));
 
-  const start = Date.now();
-  try {
-    const stdout = execSync(command, {
-      cwd: effectiveCwd,
-      maxBuffer: 2 * 1024 * 1024,
-      timeout: effectiveTimeout,
-      encoding: 'utf-8',
-      shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash',
-      env: { ...process.env, TERM: 'dumb' },
-    });
+  const sandboxResult = executeCommandWithSandbox(
+    workspacePath,
+    effectiveCwd,
+    command,
+    effectiveTimeout,
+    input.sandbox_mode ? { mode: input.sandbox_mode, dockerImage: 'node:20-bookworm', network: 'none', fallbackToLocal: true } : undefined
+  );
 
-    const duration = Date.now() - start;
+  if (sandboxResult.exitCode === 0) {
     return {
       success: true,
       command,
       cwd: effectiveCwd,
-      stdout: (stdout || '').substring(0, 100000),
-      stderr: '',
+      stdout: (sandboxResult.stdout || '').substring(0, 100000),
+      stderr: (sandboxResult.stderr || '').substring(0, 100000),
       exit_code: 0,
-      timed_out: false,
+      timed_out: sandboxResult.timedOut,
       blocked: false,
-      duration_ms: duration,
-    };
-  } catch (err: any) {
-    const duration = Date.now() - start;
-    const timedOut = err.killed || (err.signal === 'SIGTERM');
-
-    return {
-      success: false,
-      command,
-      cwd: effectiveCwd,
-      stdout: (err.stdout || '').substring(0, 100000),
-      stderr: (err.stderr || '').substring(0, 100000),
-      exit_code: err.status ?? 1,
-      timed_out: timedOut,
-      blocked: false,
-      duration_ms: duration,
+      duration_ms: sandboxResult.durationMs,
+      execution_mode: sandboxResult.executionMode,
+      sandboxed: sandboxResult.sandboxed,
+      fallback_reason: sandboxResult.fallbackReason,
     };
   }
+
+  return {
+    success: false,
+    command,
+    cwd: effectiveCwd,
+    stdout: (sandboxResult.stdout || '').substring(0, 100000),
+    stderr: (sandboxResult.stderr || '').substring(0, 100000),
+    exit_code: sandboxResult.exitCode,
+    timed_out: sandboxResult.timedOut,
+    blocked: false,
+    duration_ms: sandboxResult.durationMs,
+    execution_mode: sandboxResult.executionMode,
+    sandboxed: sandboxResult.sandboxed,
+    fallback_reason: sandboxResult.fallbackReason,
+  };
 }

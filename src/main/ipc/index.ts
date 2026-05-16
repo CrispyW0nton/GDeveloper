@@ -146,6 +146,9 @@ export const IPC_CHANNELS = {
   MODEL_VALIDATE_SELECTED: 'model:validate-selected', // Sprint 25.5: validate + auto-switch
   SANDBOX_GET_LOG: 'sandbox:get-log',
   SANDBOX_CLEAR_LOG: 'sandbox:clear-log',
+  SANDBOX_GET_CONFIG: 'sandbox:get-config',
+  SANDBOX_SET_CONFIG: 'sandbox:set-config',
+  SANDBOX_CHECK_DOCKER: 'sandbox:check-docker',
 
   // ─── Sprint 14: MCP Forge / App Adapter Studio ───
   FORGE_SCAN: 'forge:scan',
