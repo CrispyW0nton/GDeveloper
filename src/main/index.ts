@@ -22,6 +22,7 @@ import {
   getMCPMarketplaceEntry,
   searchMCPMarketplace,
 } from './mcp/marketplace';
+import { clearMCPAuditEvents, getMCPAuditEvents, recordMCPAuditEvent } from './mcp/audit';
 import { getOrchestrationEngine } from './orchestration';
 import * as compareEngine from './compare';
 import {
@@ -981,9 +982,20 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.MCP_CONNECT, async (_event, id: string) => {
     try {
+      const startedAt = Date.now();
       await mcp.connectServer(id);
       const server = mcp.getServer(id);
       const toolCount = server?.tools.length || 0;
+      recordMCPAuditEvent({
+        kind: 'server',
+        action: 'connect',
+        status: 'success',
+        serverId: id,
+        serverName: server?.name,
+        transport: server?.transport,
+        latencyMs: Date.now() - startedAt,
+        outputPreview: `${toolCount} tool(s) discovered`,
+      });
       db.logActivity('system', 'mcp_connected', `MCP connected: ${server?.name}`, `Discovered ${toolCount} tool(s)`, {
         serverId: id,
         serverName: server?.name,
@@ -994,6 +1006,15 @@ function registerIPCHandlers(): void {
       return { success: true, tools: server?.tools || [] };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Connection failed';
+      recordMCPAuditEvent({
+        kind: 'server',
+        action: 'connect',
+        status: 'error',
+        serverId: id,
+        serverName: mcp.getServer(id)?.name,
+        transport: mcp.getServer(id)?.transport,
+        error: errMsg,
+      });
       db.logActivity('system', 'mcp_error', `MCP connection failed: ${mcp.getServer(id)?.name || id}`, errMsg, { serverId: id }, 'error');
       return { success: false, error: errMsg };
     }
@@ -1001,11 +1022,33 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.MCP_DISCONNECT, async (_event, id: string) => {
     await mcp.disconnectServer(id);
+    const server = mcp.getServer(id);
+    recordMCPAuditEvent({
+      kind: 'server',
+      action: 'disconnect',
+      status: 'success',
+      serverId: id,
+      serverName: server?.name,
+      transport: server?.transport,
+    });
     return true;
   });
 
   ipcMain.handle(IPC_CHANNELS.MCP_TEST, async (_event, id: string) => {
+    const startedAt = Date.now();
     const result = await mcp.testConnection(id);
+    const server = mcp.getServer(id);
+    recordMCPAuditEvent({
+      kind: 'server',
+      action: 'test',
+      status: result.reachable ? 'success' : 'error',
+      serverId: id,
+      serverName: server?.name,
+      transport: server?.transport,
+      latencyMs: Date.now() - startedAt,
+      outputPreview: `reachable=${result.reachable}, mcpReady=${result.mcpReady}`,
+      error: result.error,
+    });
     return {
       success: result.reachable,
       reachable: result.reachable,
@@ -1061,6 +1104,15 @@ function registerIPCHandlers(): void {
         return { success: false, error: preview.reason || 'Registry entry is not installable', preview };
       }
       const server = await mcp.addServer(preview.config);
+      recordMCPAuditEvent({
+        kind: 'marketplace',
+        action: 'install',
+        status: 'success',
+        serverId: server.id,
+        serverName: server.name,
+        transport: server.transport,
+        outputPreview: entry.name,
+      });
       db.logActivity('system', 'mcp_marketplace_install', `Installed MCP server: ${server.name}`, entry.name, {
         registryName: entry.name,
         serverId: server.id,
@@ -1070,6 +1122,15 @@ function registerIPCHandlers(): void {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Marketplace install failed' };
     }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MCP_AUDIT_LIST, async (_event, limit?: number) => {
+    return getMCPAuditEvents(limit || 200);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MCP_AUDIT_CLEAR, async () => {
+    clearMCPAuditEvents();
+    return true;
   });
 
   // ─── Tools ─────────────────────────────────────────────

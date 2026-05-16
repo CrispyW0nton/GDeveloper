@@ -25,6 +25,7 @@ import { MCPServerConfig, MCPToolInfo } from '../domain/entities';
 import { MCPTransportType, MCPServerStatus } from '../domain/enums';
 import { IMCPClientManager } from '../domain/interfaces';
 import { getDatabase } from '../db';
+import { previewMCPPayload, recordMCPAuditEvent } from './audit';
 
 export interface MCPServerHealthSnapshot {
   id: string;
@@ -577,13 +578,47 @@ export class MCPClientManager implements IMCPClientManager {
 
     const server = this.servers.get(serverId);
     console.log(`[MCP:${server?.name || serverId}] Executing tool: ${toolName}`);
+    const startedAt = Date.now();
+    recordMCPAuditEvent({
+      kind: 'tool',
+      action: 'call',
+      status: 'running',
+      serverId,
+      serverName: server?.name,
+      toolName,
+      transport: server?.transport,
+      inputPreview: previewMCPPayload(args),
+    });
 
     try {
       const result = await client.callTool({ name: toolName, arguments: args });
       console.log(`[MCP:${server?.name || serverId}] Tool ${toolName} completed`);
+      recordMCPAuditEvent({
+        kind: 'tool',
+        action: 'result',
+        status: 'success',
+        serverId,
+        serverName: server?.name,
+        toolName,
+        transport: server?.transport,
+        latencyMs: Date.now() - startedAt,
+        outputPreview: previewMCPPayload(result),
+      });
       return result;
     } catch (error) {
       console.error(`[MCP:${server?.name || serverId}] Tool ${toolName} failed:`, error);
+      recordMCPAuditEvent({
+        kind: 'tool',
+        action: 'error',
+        status: 'error',
+        serverId,
+        serverName: server?.name,
+        toolName,
+        transport: server?.transport,
+        latencyMs: Date.now() - startedAt,
+        inputPreview: previewMCPPayload(args),
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
@@ -696,6 +731,15 @@ export class MCPClientManager implements IMCPClientManager {
           console.warn(`[MCP:${server.name}] Failed to persist tool toggle for ${toolName}:`, err);
         }
         this.emit({ type: 'tool_toggled', serverId, toolName, enabled });
+        recordMCPAuditEvent({
+          kind: 'permission',
+          action: enabled ? 'tool_enabled' : 'tool_disabled',
+          status: 'success',
+          serverId,
+          serverName: server.name,
+          toolName,
+          transport: server.transport,
+        });
       }
     }
   }

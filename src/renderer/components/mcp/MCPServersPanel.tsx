@@ -38,6 +38,21 @@ interface MCPMarketplacePreview {
   permissionPreview: string[];
 }
 
+interface MCPAuditEvent {
+  id: string;
+  timestamp: string;
+  kind: 'server' | 'tool' | 'marketplace' | 'permission';
+  action: string;
+  status: 'running' | 'success' | 'error';
+  serverName?: string;
+  toolName?: string;
+  transport?: string;
+  latencyMs?: number;
+  inputPreview?: string;
+  outputPreview?: string;
+  error?: string;
+}
+
 export default function MCPServersPanel() {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
@@ -52,6 +67,8 @@ export default function MCPServersPanel() {
   const [marketplaceLoading, setMarketplaceLoading] = useState(false);
   const [marketplaceResults, setMarketplaceResults] = useState<MCPMarketplaceEntry[]>([]);
   const [marketplaceError, setMarketplaceError] = useState('');
+  const [showAudit, setShowAudit] = useState(false);
+  const [auditEvents, setAuditEvents] = useState<MCPAuditEvent[]>([]);
 
   const loadServers = async () => {
     if (!api) { setLoading(false); return; }
@@ -69,6 +86,24 @@ export default function MCPServersPanel() {
   }, []);
 
   const selected = servers.find(s => s.id === selectedServer);
+
+  const loadAudit = async () => {
+    if (!api?.listMCPAudit) return;
+    const events = await api.listMCPAudit(200);
+    setAuditEvents(events || []);
+  };
+
+  const openAudit = async () => {
+    setShowAudit(true);
+    setSelectedServer(null);
+    setSelectedMarketplacePreview(null);
+    await loadAudit();
+  };
+
+  const clearAudit = async () => {
+    if (api?.clearMCPAudit) await api.clearMCPAudit();
+    setAuditEvents([]);
+  };
 
   const searchMarketplace = async () => {
     if (!api?.searchMCPMarketplace) return;
@@ -228,10 +263,13 @@ export default function MCPServersPanel() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="15" width="20" height="6" rx="1"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>
             MCP Servers
           </h2>
-          <button onClick={() => setShowAddDialog(true)} className="matrix-btn px-2 py-1 text-[10px]">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            Add
-          </button>
+          <div className="flex gap-1">
+            <button onClick={openAudit} className="matrix-btn px-2 py-1 text-[10px]">Audit</button>
+            <button onClick={() => setShowAddDialog(true)} className="matrix-btn px-2 py-1 text-[10px]">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add
+            </button>
+          </div>
         </div>
 
         <div className="p-3 border-b border-matrix-border/40 space-y-2">
@@ -281,7 +319,7 @@ export default function MCPServersPanel() {
           ) : servers.map(server => (
             <button
               key={server.id}
-              onClick={() => { setSelectedServer(server.id); setSelectedMarketplacePreview(null); }}
+              onClick={() => { setSelectedServer(server.id); setSelectedMarketplacePreview(null); setShowAudit(false); }}
               className={`w-full px-4 py-3 text-left border-b border-matrix-border/30 transition-all ${
                 selectedServer === server.id ? 'bg-matrix-green/5 border-l-2 border-l-matrix-green' : 'hover:bg-matrix-bg-hover'
               }`}
@@ -301,7 +339,50 @@ export default function MCPServersPanel() {
 
       {/* Server Detail */}
       <div className="flex-1 overflow-y-auto">
-        {selectedMarketplacePreview ? (
+        {showAudit ? (
+          <div className="p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-matrix-text-muted/40 mb-1">MCP Audit Console</div>
+                <h3 className="text-lg font-bold text-matrix-green">Server and Tool Activity</h3>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={loadAudit} className="matrix-btn text-xs">Refresh</button>
+                <button onClick={clearAudit} className="matrix-btn matrix-btn-danger text-xs">Clear</button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {auditEvents.map(event => (
+                <div key={event.id} className="glass-panel p-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`w-2 h-2 rounded-full ${event.status === 'success' ? 'bg-matrix-green' : event.status === 'error' ? 'bg-matrix-danger' : 'bg-matrix-warning animate-pulseDot'}`} />
+                    <span className="text-xs text-matrix-green font-bold">{event.kind}:{event.action}</span>
+                    {event.toolName && <code className="text-[10px] text-matrix-text-muted/50">{event.toolName}</code>}
+                    {event.latencyMs !== undefined && <span className="ml-auto text-[9px] text-matrix-text-muted/35">{event.latencyMs}ms</span>}
+                  </div>
+                  <div className="text-[10px] text-matrix-text-muted/45">
+                    {new Date(event.timestamp).toLocaleTimeString()} {event.serverName ? `- ${event.serverName}` : ''} {event.transport ? `(${event.transport})` : ''}
+                  </div>
+                  {event.inputPreview && (
+                    <pre className="mt-2 max-h-24 overflow-auto rounded bg-black/20 p-2 text-[9px] text-matrix-text-muted/50">{event.inputPreview}</pre>
+                  )}
+                  {event.outputPreview && (
+                    <pre className="mt-2 max-h-24 overflow-auto rounded bg-matrix-green/5 p-2 text-[9px] text-matrix-text-muted/50">{event.outputPreview}</pre>
+                  )}
+                  {event.error && (
+                    <div className="mt-2 text-[10px] text-matrix-danger">{event.error}</div>
+                  )}
+                </div>
+              ))}
+              {auditEvents.length === 0 && (
+                <div className="text-xs text-matrix-text-muted/30 text-center py-10">
+                  No MCP audit events yet. Connect a server, toggle a tool, or run an MCP tool to populate this log.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : selectedMarketplacePreview ? (
           <div className="p-6 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">

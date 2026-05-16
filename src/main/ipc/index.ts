@@ -55,6 +55,8 @@ export const IPC_CHANNELS = {
   MCP_MARKETPLACE_SEARCH: 'mcp:marketplace-search',
   MCP_MARKETPLACE_PREVIEW: 'mcp:marketplace-preview',
   MCP_MARKETPLACE_INSTALL: 'mcp:marketplace-install',
+  MCP_AUDIT_LIST: 'mcp:audit-list',
+  MCP_AUDIT_CLEAR: 'mcp:audit-clear',
 
   // Tools
   TOOL_LIST: 'tool:list',
