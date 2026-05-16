@@ -43,6 +43,7 @@ const BEGINNER_SAFE: Set<string> = new Set([
 // Sprint 18: Example usage for commands
 const COMMAND_EXAMPLES: Record<string, string> = {
   'commit': '/commit fix: resolve login validation',
+  'mcp-marketplace': '/mcp-marketplace search github',
   'research': '/research best React state management library',
   'compare-repos': '/compare-repos ./app1 ./app2',
   'worktree-add': '/worktree-add ../hotfix -b hotfix/bug-123',

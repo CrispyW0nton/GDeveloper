@@ -13,6 +13,11 @@ import { getActiveWorkspace, LOCAL_TOOL_DEFINITIONS } from '../tools';
 import { getDatabase } from '../db';
 import { getMCPManager } from '../mcp';
 import { MCPTransportType } from '../domain/enums';
+import {
+  buildMarketplaceInstallPreview,
+  getMCPMarketplaceEntry,
+  searchMCPMarketplace,
+} from '../mcp/marketplace';
 import { providerRegistry, ClaudeProvider } from '../providers';
 import { executeResearch, compareRepos, downloadExternalRepo } from '../research';
 import { fetchGitHubSource, formatSourceSnippets, parseGitHubUrl } from '../research/githubSource';
@@ -1455,6 +1460,101 @@ register({
     return { success: false, message: 'Unknown subcommand. Use: list, add, remove, connect, disconnect, test' };
   },
 });
+
+register({
+  name: 'mcp-marketplace',
+  description: 'Search, preview, or install servers from the official MCP Registry. Usage: /mcp-marketplace search <query> | preview <name> | install <name>',
+  category: 'workflow',
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const sub = (parts[0] || 'search').toLowerCase();
+    const query = parts.slice(1).join(' ');
+    const mcp = getMCPManager();
+    const db = getDatabase();
+
+    if (sub === 'search' || sub === 'list') {
+      const entries = await searchMCPMarketplace(query, 20);
+      if (entries.length === 0) {
+        return { success: true, message: `**No MCP registry matches** for \`${query || '(all)'}\`.` };
+      }
+      const lines = entries.map(entry => [
+        `- **${entry.title}**`,
+        `  - name: \`${entry.name}\``,
+        entry.description ? `  - ${entry.description.substring(0, 140)}` : '',
+        entry.status ? `  - status: ${entry.status}` : '',
+      ].filter(Boolean).join('\n'));
+      return {
+        success: true,
+        message: [
+          `**MCP Registry Results (${entries.length})**`,
+          '',
+          ...lines,
+          '',
+          'Use `/mcp-marketplace preview <name>` before installing.',
+        ].join('\n'),
+        data: { entries },
+      };
+    }
+
+    if (sub === 'preview' || sub === 'inspect') {
+      if (!query) return { success: false, message: 'Usage: `/mcp-marketplace preview <server-name>`' };
+      const entry = await getMCPMarketplaceEntry(query);
+      const preview = buildMarketplaceInstallPreview(entry);
+      return {
+        success: true,
+        message: formatMarketplacePreview(preview),
+        data: { preview },
+      };
+    }
+
+    if (sub === 'install') {
+      if (!query) return { success: false, message: 'Usage: `/mcp-marketplace install <server-name>`' };
+      const entry = await getMCPMarketplaceEntry(query);
+      const preview = buildMarketplaceInstallPreview(entry);
+      if (!preview.installable || !preview.config) {
+        return { success: false, message: formatMarketplacePreview(preview) };
+      }
+      const server = await mcp.addServer(preview.config);
+      db.logActivity(ctx.sessionId, 'mcp_marketplace_install', `Installed MCP server: ${server.name}`, entry.name, {
+        registryName: entry.name,
+        serverId: server.id,
+        transport: server.transport,
+      });
+      return {
+        success: true,
+        message: [
+          `**Installed MCP server:** ${server.name}`,
+          '',
+          `Registry name: \`${entry.name}\``,
+          `Transport: \`${server.transport}\``,
+          '',
+          'Use `/mcp connect ' + server.name + '` to connect and discover tools.',
+        ].join('\n'),
+        data: { server, entry },
+      };
+    }
+
+    return { success: false, message: 'Unknown subcommand. Use: search, preview, install.' };
+  },
+});
+
+function formatMarketplacePreview(preview: ReturnType<typeof buildMarketplaceInstallPreview>): string {
+  const lines = [
+    `**${preview.entry.title}**`,
+    `Registry name: \`${preview.entry.name}\``,
+    preview.entry.version ? `Version: \`${preview.entry.version}\`` : '',
+    preview.entry.status ? `Status: \`${preview.entry.status}\`` : '',
+    preview.entry.description || '',
+    '',
+    preview.installable ? '**Install preview:**' : '**Not installable from available metadata.**',
+    preview.reason ? `Reason: ${preview.reason}` : '',
+    ...preview.permissionPreview.map(item => `- ${item}`),
+  ].filter(Boolean);
+  if (preview.installable) {
+    lines.push('', `Use \`/mcp-marketplace install ${preview.entry.name}\` to register this server.`);
+  }
+  return lines.join('\n');
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  SPRINT 27: TODO COMMANDS
