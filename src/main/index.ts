@@ -23,6 +23,12 @@ import {
   searchMCPMarketplace,
 } from './mcp/marketplace';
 import { clearMCPAuditEvents, getMCPAuditEvents, recordMCPAuditEvent } from './mcp/audit';
+import {
+  getMCPToolPermission,
+  getMCPToolPermissionRules,
+  setMCPToolPermissionRule,
+  type MCPToolPermissionMode,
+} from './mcp/permissions';
 import { getOrchestrationEngine } from './orchestration';
 import * as compareEngine from './compare';
 import {
@@ -227,6 +233,33 @@ function requireActiveWorkspacePath(): string {
   const ws = getActiveWorkspace();
   if (!ws) throw new Error('No active workspace. Clone or open a repository first.');
   return ws;
+}
+
+function describeMCPPermissionBlock(mode: MCPToolPermissionMode, serverName: string | undefined, toolName: string): string {
+  const target = `${serverName || 'MCP server'}/${toolName}`;
+  if (mode === 'ask') {
+    return `MCP tool requires explicit permission before execution: ${target}. Set it to Allow in the MCP permission matrix.`;
+  }
+  return `MCP tool denied by workspace permission policy: ${target}.`;
+}
+
+function checkMCPToolPermission(serverId: string, toolName: string): {
+  allowed: boolean;
+  mode: MCPToolPermissionMode;
+  message?: string;
+  serverName?: string;
+} {
+  const server = getMCPManager().getServer(serverId);
+  const mode = getMCPToolPermission(getActiveWorkspace(), serverId, server?.name, toolName);
+  if (mode === 'allow') {
+    return { allowed: true, mode, serverName: server?.name };
+  }
+  return {
+    allowed: false,
+    mode,
+    serverName: server?.name,
+    message: describeMCPPermissionBlock(mode, server?.name, toolName),
+  };
 }
 
 // ─── Register IPC Handlers ──────────────────────────────────────────────────
@@ -627,13 +660,29 @@ function registerIPCHandlers(): void {
               if (toolMeta) {
                 try {
                   emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
-                  const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
-                  toolResultContent = mcpResult?.content
-                    ? (Array.isArray(mcpResult.content)
-                        ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
-                        : JSON.stringify(mcpResult.content))
-                    : JSON.stringify(mcpResult);
-                  emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
+                  const permission = checkMCPToolPermission(toolMeta.serverId, tc.name);
+                  if (!permission.allowed) {
+                    recordMCPAuditEvent({
+                      kind: 'permission',
+                      action: permission.mode === 'ask' ? 'permission_required' : 'permission_denied',
+                      status: 'error',
+                      serverId: toolMeta.serverId,
+                      serverName: permission.serverName,
+                      toolName: tc.name,
+                      error: permission.message,
+                    });
+                    toolResultContent = `Error: ${permission.message}`;
+                    isError = true;
+                    emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} blocked`, detail: toolResultContent, status: 'error' });
+                  } else {
+                    const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
+                    toolResultContent = mcpResult?.content
+                      ? (Array.isArray(mcpResult.content)
+                          ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
+                          : JSON.stringify(mcpResult.content))
+                      : JSON.stringify(mcpResult);
+                    emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} done`, detail: toolResultContent.substring(0, 300), status: 'success' });
+                  }
                 } catch (err) {
                   toolResultContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
                   isError = true;
@@ -1133,6 +1182,30 @@ function registerIPCHandlers(): void {
     return true;
   });
 
+  ipcMain.handle(IPC_CHANNELS.MCP_PERMISSION_LIST, async () => {
+    return getMCPToolPermissionRules(getActiveWorkspace());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MCP_PERMISSION_SET, async (_event, rule: any) => {
+    const saved = setMCPToolPermissionRule({
+      serverId: rule?.serverId,
+      serverName: rule?.serverName,
+      toolName: rule?.toolName,
+      mode: rule?.mode,
+      workspacePath: getActiveWorkspace(),
+    });
+    recordMCPAuditEvent({
+      kind: 'permission',
+      action: 'permission_set',
+      status: 'success',
+      serverId: saved.serverId,
+      serverName: saved.serverName,
+      toolName: saved.toolName,
+      outputPreview: `mode=${saved.mode}`,
+    });
+    return saved;
+  });
+
   // ─── Tools ─────────────────────────────────────────────
 
   ipcMain.handle(IPC_CHANNELS.TOOL_LIST, async () => {
@@ -1184,6 +1257,23 @@ function registerIPCHandlers(): void {
       db.logActivity('system', 'tool_execute', `Executing tool: ${name}`, JSON.stringify(input).substring(0, 200), {
         toolName: name, serverId: targetServerId
       });
+
+      const permission = checkMCPToolPermission(targetServerId, name);
+      if (!permission.allowed) {
+        recordMCPAuditEvent({
+          kind: 'permission',
+          action: permission.mode === 'ask' ? 'permission_required' : 'permission_denied',
+          status: 'error',
+          serverId: targetServerId,
+          serverName: permission.serverName,
+          toolName: name,
+          error: permission.message,
+        });
+        db.logActivity('system', 'tool_error', `Tool blocked: ${name}`, permission.message || 'MCP tool blocked', {
+          toolName: name, serverId: targetServerId, permission: permission.mode,
+        }, 'warning');
+        return { success: false, error: permission.message };
+      }
 
       const result = await mcp.executeTool(targetServerId, name, input || {});
       db.logActivity('system', 'tool_result', `Tool completed: ${name}`, JSON.stringify(result).substring(0, 200), {

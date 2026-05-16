@@ -59,6 +59,8 @@ const electronAPI = {
   installMCPMarketplace: (serverName: string) => ipcRenderer.invoke('mcp:marketplace-install', serverName),
   listMCPAudit: (limit?: number) => ipcRenderer.invoke('mcp:audit-list', limit),
   clearMCPAudit: () => ipcRenderer.invoke('mcp:audit-clear'),
+  listMCPPermissions: () => ipcRenderer.invoke('mcp:permission-list'),
+  setMCPPermission: (rule: any) => ipcRenderer.invoke('mcp:permission-set', rule),
 
   // ─── Tools ─────────────────────────────────────────
   listTools: () => ipcRenderer.invoke('tool:list'),

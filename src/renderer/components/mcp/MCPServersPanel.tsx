@@ -53,6 +53,17 @@ interface MCPAuditEvent {
   error?: string;
 }
 
+type MCPToolPermissionMode = 'allow' | 'ask' | 'deny';
+
+interface MCPToolPermissionRule {
+  serverId?: string;
+  serverName?: string;
+  toolName: string;
+  mode: MCPToolPermissionMode;
+  workspacePath?: string;
+  updatedAt: string;
+}
+
 export default function MCPServersPanel() {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
@@ -69,12 +80,28 @@ export default function MCPServersPanel() {
   const [marketplaceError, setMarketplaceError] = useState('');
   const [showAudit, setShowAudit] = useState(false);
   const [auditEvents, setAuditEvents] = useState<MCPAuditEvent[]>([]);
+  const [permissionRules, setPermissionRules] = useState<Record<string, MCPToolPermissionMode>>({});
+
+  const permissionKey = (serverId: string, toolName: string) => `${serverId}:${toolName}`;
+
+  const loadPermissions = async () => {
+    if (!api?.listMCPPermissions) return;
+    const rules = await api.listMCPPermissions();
+    const next: Record<string, MCPToolPermissionMode> = {};
+    for (const rule of (rules || []) as MCPToolPermissionRule[]) {
+      if (rule.serverId && rule.toolName) {
+        next[permissionKey(rule.serverId, rule.toolName)] = rule.mode;
+      }
+    }
+    setPermissionRules(next);
+  };
 
   const loadServers = async () => {
     if (!api) { setLoading(false); return; }
     try {
       const result = await api.listMCPServers();
       setServers(result || []);
+      await loadPermissions();
     } catch (err) {
       console.error('Failed to load MCP servers:', err);
     }
@@ -214,6 +241,19 @@ export default function MCPServersPanel() {
       if (s.id !== serverId) return s;
       return { ...s, tools: s.tools.map(t => t.name === toolName ? { ...t, enabled: !t.enabled } : t) };
     }));
+  };
+
+  const handleSetToolPermission = async (server: MCPServer, toolName: string, mode: MCPToolPermissionMode) => {
+    const key = permissionKey(server.id, toolName);
+    setPermissionRules(prev => ({ ...prev, [key]: mode }));
+    if (api?.setMCPPermission) {
+      await api.setMCPPermission({
+        serverId: server.id,
+        serverName: server.name,
+        toolName,
+        mode,
+      });
+    }
   };
 
   const handleRemove = async (id: string) => {
@@ -542,20 +582,32 @@ export default function MCPServersPanel() {
               </div>
               <div className="space-y-2">
                 {selected.tools.map(tool => (
-                  <div key={tool.name} className="flex items-center justify-between p-2 bg-matrix-bg-hover/30 rounded">
+                  <div key={tool.name} className="flex items-center justify-between gap-3 p-2 bg-matrix-bg-hover/30 rounded">
                     <div className="flex-1">
                       <div className="text-xs text-matrix-green font-bold">{tool.name}</div>
                       <div className="text-[10px] text-matrix-text-muted/40">{tool.description}</div>
                     </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={tool.enabled}
-                        onChange={() => handleToggleTool(selected.id, tool.name, tool.enabled)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-8 h-4 bg-matrix-border rounded-full peer-checked:bg-matrix-green/30 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-matrix-text-muted/40 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-4 peer-checked:after:bg-matrix-green" />
-                    </label>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <select
+                        value={permissionRules[permissionKey(selected.id, tool.name)] || 'allow'}
+                        onChange={e => handleSetToolPermission(selected, tool.name, e.target.value as MCPToolPermissionMode)}
+                        className="matrix-select h-7 w-20 text-[10px]"
+                        title="Workspace permission for this MCP tool"
+                      >
+                        <option value="allow">Allow</option>
+                        <option value="ask">Ask</option>
+                        <option value="deny">Deny</option>
+                      </select>
+                      <label className="relative inline-flex items-center cursor-pointer" title="Expose this tool to the agent">
+                        <input
+                          type="checkbox"
+                          checked={tool.enabled}
+                          onChange={() => handleToggleTool(selected.id, tool.name, tool.enabled)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-8 h-4 bg-matrix-border rounded-full peer-checked:bg-matrix-green/30 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-matrix-text-muted/40 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-4 peer-checked:after:bg-matrix-green" />
+                      </label>
+                    </div>
                   </div>
                 ))}
                 {selected.tools.length === 0 && (
