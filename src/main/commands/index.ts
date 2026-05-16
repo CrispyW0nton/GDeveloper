@@ -48,6 +48,10 @@ import {
 } from '../orchestration/vibeLoop';
 import { writeSessionMemento } from '../orchestration/memento';
 import { createTracerBullet } from '../orchestration/tracerBullet';
+import {
+  formatCardboardScanReport,
+  scanWorkspaceChangesForCardboardMuffins,
+} from '../orchestration/cardboardDetector';
 
 // ─── Interfaces ───
 
@@ -637,6 +641,13 @@ register({
       const staged = status.staged;
       const untracked = status.not_added;
       const deleted = status.deleted;
+      const unstagedDiff = await git.diff();
+      const stagedDiff = await git.diff(['--cached']);
+      const cardboardScan = scanWorkspaceChangesForCardboardMuffins(
+        ws,
+        [unstagedDiff, stagedDiff].filter(Boolean).join('\n'),
+        untracked,
+      );
 
       // 2. Get recent activity from DB (last 50 events)
       const activity = db.getActivity(ctx.sessionId).slice(0, 50);
@@ -714,16 +725,18 @@ register({
       const truthScore = Math.round(((totalChecks - mismatches) / totalChecks) * 100);
       lines.push('');
       lines.push(`### Truthfulness Score: **${truthScore}%** (${totalChecks - mismatches}/${totalChecks} files consistent)`);
+      lines.push('');
+      lines.push(formatCardboardScanReport(cardboardScan));
 
-      if (truthScore < 100) {
+      if (truthScore < 100 || cardboardScan.findings.some(f => f.severity === 'critical' || f.severity === 'high')) {
         lines.push('');
-        lines.push('> **Recommendation:** Review mismatched files. Use `/diff` to inspect changes, then `/commit` to stage and commit verified work.');
+        lines.push('> **Recommendation:** Review mismatched files and safety findings. Use `/diff` to inspect changes, fix high-risk findings, then `/commit` only after verified work is clean.');
       }
 
       return {
         success: true,
         message: lines.join('\n'),
-        data: { truthScore, gitChangedFiles: [...gitChangedFiles], dbChangedFiles: [...dbChangedFiles], mismatches },
+        data: { truthScore, gitChangedFiles: [...gitChangedFiles], dbChangedFiles: [...dbChangedFiles], mismatches, cardboardScan },
       };
     } catch (err) {
       return { success: false, message: `Verification failed: ${err instanceof Error ? err.message : String(err)}` };
