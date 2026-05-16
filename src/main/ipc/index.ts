@@ -52,6 +52,9 @@ export const IPC_CHANNELS = {
   MCP_GET_TOOLS: 'mcp:get-tools',
   MCP_TOGGLE_TOOL: 'mcp:toggle-tool',
   MCP_UPDATE_SERVER: 'mcp:update-server',
+  MCP_MARKETPLACE_SEARCH: 'mcp:marketplace-search',
+  MCP_MARKETPLACE_PREVIEW: 'mcp:marketplace-preview',
+  MCP_MARKETPLACE_INSTALL: 'mcp:marketplace-install',
 
   // Tools
   TOOL_LIST: 'tool:list',

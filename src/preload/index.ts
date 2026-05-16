@@ -54,6 +54,9 @@ const electronAPI = {
   testMCPConnection: (id: string) => ipcRenderer.invoke('mcp:test', id),
   getMCPTools: (serverId?: string) => ipcRenderer.invoke('mcp:get-tools', serverId),
   toggleMCPTool: (serverId: string, toolName: string, enabled: boolean) => ipcRenderer.invoke('mcp:toggle-tool', serverId, toolName, enabled),
+  searchMCPMarketplace: (query: string, limit?: number) => ipcRenderer.invoke('mcp:marketplace-search', query, limit),
+  previewMCPMarketplace: (serverName: string) => ipcRenderer.invoke('mcp:marketplace-preview', serverName),
+  installMCPMarketplace: (serverName: string) => ipcRenderer.invoke('mcp:marketplace-install', serverName),
 
   // ─── Tools ─────────────────────────────────────────
   listTools: () => ipcRenderer.invoke('tool:list'),

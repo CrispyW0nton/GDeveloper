@@ -17,6 +17,11 @@ import { getSecureSettings } from './security';
 import { DEFAULT_MODEL_ID, createProviderForKey, providerRegistry } from './providers';
 import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
+import {
+  buildMarketplaceInstallPreview,
+  getMCPMarketplaceEntry,
+  searchMCPMarketplace,
+} from './mcp/marketplace';
 import { getOrchestrationEngine } from './orchestration';
 import * as compareEngine from './compare';
 import {
@@ -1027,6 +1032,44 @@ function registerIPCHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.MCP_UPDATE_SERVER, async (_event, id: string, updates: any) => {
     mcp.updateServer(id, updates);
     return true;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MCP_MARKETPLACE_SEARCH, async (_event, query: string, limit?: number) => {
+    try {
+      const entries = await searchMCPMarketplace(query || '', limit || 20);
+      return { success: true, entries };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Marketplace search failed', entries: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MCP_MARKETPLACE_PREVIEW, async (_event, serverName: string) => {
+    try {
+      const entry = await getMCPMarketplaceEntry(serverName);
+      const preview = buildMarketplaceInstallPreview(entry);
+      return { success: true, preview };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Marketplace preview failed' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MCP_MARKETPLACE_INSTALL, async (_event, serverName: string) => {
+    try {
+      const entry = await getMCPMarketplaceEntry(serverName);
+      const preview = buildMarketplaceInstallPreview(entry);
+      if (!preview.installable || !preview.config) {
+        return { success: false, error: preview.reason || 'Registry entry is not installable', preview };
+      }
+      const server = await mcp.addServer(preview.config);
+      db.logActivity('system', 'mcp_marketplace_install', `Installed MCP server: ${server.name}`, entry.name, {
+        registryName: entry.name,
+        serverId: server.id,
+        transport: server.transport,
+      });
+      return { success: true, server, entry, preview };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Marketplace install failed' };
+    }
   });
 
   // ─── Tools ─────────────────────────────────────────────
