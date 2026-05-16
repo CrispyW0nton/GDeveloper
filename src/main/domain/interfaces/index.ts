@@ -111,6 +111,23 @@ export interface IMCPClientManager {
   connectServer(id: string): Promise<void>;
   disconnectServer(id: string): Promise<void>;
   getServers(): MCPServerConfig[];
+  getRoutedTools(): Array<MCPServerConfig['tools'][number] & {
+    serverId: string;
+    routeCandidates: number;
+    routeReason: string;
+    lastLatencyMs: number | null;
+  }>;
+  getToolRouteCandidates(toolName: string): Array<{
+    serverId: string;
+    serverName: string;
+    toolName: string;
+    transport: string;
+    healthy: boolean;
+    heartbeatFailureCount: number;
+    reconnectAttempts: number;
+    lastLatencyMs: number | null;
+    score: number;
+  }>;
   getServerTools(id: string): Promise<MCPServerConfig['tools']>;
   getHealthStatus(): Array<{
     id: string;

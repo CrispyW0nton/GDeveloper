@@ -44,6 +44,25 @@ export interface MCPServerHealthSnapshot {
   command: string | null;
 }
 
+export interface MCPToolRouteCandidate {
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  transport: MCPServerConfig['transport'];
+  healthy: boolean;
+  heartbeatFailureCount: number;
+  reconnectAttempts: number;
+  lastLatencyMs: number | null;
+  score: number;
+}
+
+export interface MCPRoutedToolInfo extends MCPToolInfo {
+  serverId: string;
+  routeCandidates: number;
+  routeReason: string;
+  lastLatencyMs: number | null;
+}
+
 export class MCPClientManager implements IMCPClientManager {
   private servers: Map<string, MCPServerConfig> = new Map();
   /** Active MCP SDK Client instances, keyed by server id */
@@ -58,6 +77,7 @@ export class MCPClientManager implements IMCPClientManager {
   private reconnectAttempts: Map<string, number> = new Map();
   private heartbeatInFlight: Set<string> = new Set();
   private health: Map<string, MCPServerHealthSnapshot> = new Map();
+  private toolLatencyMs: Map<string, number> = new Map();
 
   constructor() {
     this.loadFromDB();
@@ -634,6 +654,7 @@ export class MCPClientManager implements IMCPClientManager {
     try {
       const result = await client.callTool({ name: toolName, arguments: args });
       console.log(`[MCP:${server?.name || serverId}] Tool ${toolName} completed`);
+      this.toolLatencyMs.set(this.toolLatencyKey(serverId, toolName), Date.now() - startedAt);
       recordMCPAuditEvent({
         kind: 'tool',
         action: 'result',
@@ -648,6 +669,7 @@ export class MCPClientManager implements IMCPClientManager {
       return result;
     } catch (error) {
       console.error(`[MCP:${server?.name || serverId}] Tool ${toolName} failed:`, error);
+      this.toolLatencyMs.set(this.toolLatencyKey(serverId, toolName), Date.now() - startedAt + 5_000);
       recordMCPAuditEvent({
         kind: 'tool',
         action: 'error',
@@ -672,6 +694,69 @@ export class MCPClientManager implements IMCPClientManager {
 
   getServer(id: string): MCPServerConfig | undefined {
     return this.servers.get(id);
+  }
+
+  getToolRouteCandidates(toolName: string): MCPToolRouteCandidate[] {
+    const candidates: MCPToolRouteCandidate[] = [];
+    for (const server of this.servers.values()) {
+      if (server.status !== MCPServerStatus.CONNECTED || !this.mcpClients.has(server.id)) continue;
+      const tool = server.tools.find(t => t.name === toolName && t.enabled);
+      if (!tool) continue;
+
+      const health = this.health.get(server.id);
+      const lastLatencyMs = this.toolLatencyMs.get(this.toolLatencyKey(server.id, toolName)) ?? null;
+      const healthy = health?.healthy ?? false;
+      const heartbeatFailureCount = health?.heartbeatFailureCount || 0;
+      const reconnectAttempts = this.reconnectAttempts.get(server.id) || health?.reconnectAttempts || 0;
+      const latencyScore = lastLatencyMs ?? 1_000;
+      const healthPenalty = healthy ? 0 : 100_000;
+      const failurePenalty = heartbeatFailureCount * 10_000;
+      const reconnectPenalty = reconnectAttempts * 5_000;
+      const transportPenalty = server.transport === MCPTransportType.STDIO ? 0 : 250;
+
+      candidates.push({
+        serverId: server.id,
+        serverName: server.name,
+        toolName,
+        transport: server.transport,
+        healthy,
+        heartbeatFailureCount,
+        reconnectAttempts,
+        lastLatencyMs,
+        score: healthPenalty + failurePenalty + reconnectPenalty + latencyScore + transportPenalty,
+      });
+    }
+
+    return candidates.sort((a, b) => a.score - b.score || a.serverName.localeCompare(b.serverName));
+  }
+
+  getRoutedTools(): MCPRoutedToolInfo[] {
+    const toolNames = new Set<string>();
+    for (const server of this.servers.values()) {
+      if (server.status !== MCPServerStatus.CONNECTED) continue;
+      for (const tool of server.tools) {
+        if (tool.enabled) toolNames.add(tool.name);
+      }
+    }
+
+    const routed: MCPRoutedToolInfo[] = [];
+    for (const toolName of Array.from(toolNames).sort()) {
+      const candidates = this.getToolRouteCandidates(toolName);
+      const best = candidates[0];
+      if (!best) continue;
+      const server = this.servers.get(best.serverId);
+      const tool = server?.tools.find(t => t.name === toolName && t.enabled);
+      if (!server || !tool) continue;
+      routed.push({
+        ...tool,
+        serverId: server.id,
+        serverName: server.name,
+        routeCandidates: candidates.length,
+        routeReason: best.healthy ? 'healthy-lowest-latency' : 'fallback-available',
+        lastLatencyMs: best.lastLatencyMs,
+      });
+    }
+    return routed;
   }
 
   async getServerTools(id: string): Promise<MCPToolInfo[]> {
@@ -806,6 +891,10 @@ export class MCPClientManager implements IMCPClientManager {
 
   private emit(event: MCPEvent): void {
     this.listeners.forEach(l => l(event));
+  }
+
+  private toolLatencyKey(serverId: string, toolName: string): string {
+    return `${serverId}:${toolName}`;
   }
 }
 

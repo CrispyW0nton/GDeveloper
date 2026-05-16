@@ -262,6 +262,28 @@ function checkMCPToolPermission(serverId: string, toolName: string): {
   };
 }
 
+function selectAllowedMCPToolRoute(toolName: string, preferredServerId?: string): {
+  candidate?: ReturnType<ReturnType<typeof getMCPManager>['getToolRouteCandidates']>[number];
+  blocked?: ReturnType<typeof checkMCPToolPermission>;
+} {
+  const manager = getMCPManager();
+  const candidates = manager.getToolRouteCandidates(toolName);
+  const ordered = preferredServerId
+    ? candidates.filter(c => c.serverId === preferredServerId)
+    : candidates;
+
+  let blocked: ReturnType<typeof checkMCPToolPermission> | undefined;
+  for (const candidate of ordered) {
+    const permission = checkMCPToolPermission(candidate.serverId, toolName);
+    if (permission.allowed) {
+      return { candidate };
+    }
+    blocked = blocked || permission;
+  }
+
+  return { blocked };
+}
+
 // ─── Register IPC Handlers ──────────────────────────────────────────────────
 
 function registerIPCHandlers(): void {
@@ -478,22 +500,21 @@ function registerIPCHandlers(): void {
       }));
 
       // Collect available MCP tools for Claude
-      const mcpServers = mcp.getServers();
       const mcpTools: any[] = [];
-      for (const s of mcpServers) {
-        if (s.status === 'connected') {
-          for (const t of s.tools) {
-            if (t.enabled) {
-              mcpTools.push({
-                name: t.name,
-                description: t.description || '',
-                inputSchema: t.inputSchema || { type: 'object', properties: {} },
-                source: 'mcp',
-                serverName: s.name,
-                serverId: s.id
-              });
-            }
-          }
+      for (const t of mcp.getRoutedTools()) {
+        const route = selectAllowedMCPToolRoute(t.name, t.serverId);
+        if (route.candidate) {
+          mcpTools.push({
+            name: t.name,
+            description: t.description || '',
+            inputSchema: t.inputSchema || { type: 'object', properties: {} },
+            source: 'mcp',
+            serverName: route.candidate.serverName,
+            serverId: route.candidate.serverId,
+            routeCandidates: t.routeCandidates,
+            routeReason: t.routeReason,
+            lastLatencyMs: t.lastLatencyMs,
+          });
         }
       }
 
@@ -660,8 +681,9 @@ function registerIPCHandlers(): void {
               if (toolMeta) {
                 try {
                   emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
-                  const permission = checkMCPToolPermission(toolMeta.serverId, tc.name);
-                  if (!permission.allowed) {
+                  const route = selectAllowedMCPToolRoute(tc.name, toolMeta.serverId);
+                  if (!route.candidate) {
+                    const permission = route.blocked || checkMCPToolPermission(toolMeta.serverId, tc.name);
                     recordMCPAuditEvent({
                       kind: 'permission',
                       action: permission.mode === 'ask' ? 'permission_required' : 'permission_denied',
@@ -675,7 +697,17 @@ function registerIPCHandlers(): void {
                     isError = true;
                     emitSandboxEvent({ type: 'tool_result', tool: tc.name, summary: `MCP: ${tc.name} blocked`, detail: toolResultContent, status: 'error' });
                   } else {
-                    const mcpResult = await mcp.executeTool(toolMeta.serverId, tc.name, tc.input || {});
+                    recordMCPAuditEvent({
+                      kind: 'tool',
+                      action: 'route_selected',
+                      status: 'success',
+                      serverId: route.candidate.serverId,
+                      serverName: route.candidate.serverName,
+                      toolName: tc.name,
+                      transport: route.candidate.transport,
+                      inputPreview: `score=${route.candidate.score}; candidates=${mcp.getToolRouteCandidates(tc.name).length}`,
+                    });
+                    const mcpResult = await mcp.executeTool(route.candidate.serverId, tc.name, tc.input || {});
                     toolResultContent = mcpResult?.content
                       ? (Array.isArray(mcpResult.content)
                           ? mcpResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n')
@@ -1210,18 +1242,24 @@ function registerIPCHandlers(): void {
   // ─── Tools ─────────────────────────────────────────────
 
   ipcMain.handle(IPC_CHANNELS.TOOL_LIST, async () => {
-    const servers = mcp.getServers();
     const tools: any[] = [];
     // Local tools
     for (const t of LOCAL_TOOL_DEFINITIONS) {
       tools.push({ name: t.name, description: t.description, source: 'local', enabled: true });
     }
     // MCP tools
-    for (const s of servers) {
-      if (s.status === 'connected') {
-        for (const t of s.tools) {
-          if (t.enabled) tools.push({ ...t, source: 'mcp', serverName: s.name });
-        }
+    for (const t of mcp.getRoutedTools()) {
+      const route = selectAllowedMCPToolRoute(t.name, t.serverId);
+      if (route.candidate) {
+        tools.push({
+          ...t,
+          source: 'mcp',
+          serverName: route.candidate.serverName,
+          serverId: route.candidate.serverId,
+          routeCandidates: t.routeCandidates,
+          routeReason: t.routeReason,
+          lastLatencyMs: t.lastLatencyMs,
+        });
       }
     }
     return tools;
@@ -1241,17 +1279,17 @@ function registerIPCHandlers(): void {
 
       // MCP tool
       let targetServerId = serverId;
+      let blockedRoute: ReturnType<typeof checkMCPToolPermission> | undefined;
       if (!targetServerId) {
-        const servers = mcp.getServers();
-        for (const s of servers) {
-          if (s.status === 'connected' && s.tools.some(t => t.name === name && t.enabled)) {
-            targetServerId = s.id;
-            break;
-          }
-        }
+        const route = selectAllowedMCPToolRoute(name);
+        targetServerId = route.candidate?.serverId;
+        blockedRoute = route.blocked;
       }
 
       if (!targetServerId) {
+        if (blockedRoute?.message) {
+          return { success: false, error: blockedRoute.message };
+        }
         return { success: false, error: `No connected server provides tool: ${name}` };
       }
 

@@ -26,8 +26,8 @@ describe('MCP tool permission matrix', () => {
     const permissionHelperIdx = mainSrc.indexOf('function checkMCPToolPermission');
 
     expect(permissionHelperIdx).toBeGreaterThan(-1);
-    expect(mainSrc.indexOf('checkMCPToolPermission(toolMeta.serverId, tc.name)', agentExecIdx)).toBeGreaterThan(agentExecIdx);
-    expect(mainSrc.indexOf('mcp.executeTool(toolMeta.serverId, tc.name', agentExecIdx)).toBeGreaterThan(agentExecIdx);
+    expect(mainSrc.indexOf('selectAllowedMCPToolRoute(tc.name, toolMeta.serverId)', agentExecIdx)).toBeGreaterThan(agentExecIdx);
+    expect(mainSrc.indexOf('mcp.executeTool(route.candidate.serverId, tc.name', agentExecIdx)).toBeGreaterThan(agentExecIdx);
     expect(mainSrc.indexOf('checkMCPToolPermission(targetServerId, name)', directExecIdx)).toBeGreaterThan(directExecIdx);
     expect(mainSrc.indexOf('mcp.executeTool(targetServerId, name', directExecIdx)).toBeGreaterThan(directExecIdx);
     expect(mainSrc).toContain('permission_denied');
