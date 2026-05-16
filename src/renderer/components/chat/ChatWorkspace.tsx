@@ -104,6 +104,14 @@ interface VibeLoopState {
   note?: string;
 }
 
+interface SpecialistMode {
+  id: string;
+  label: string;
+  description: string;
+  toolPolicy: 'full' | 'read-only' | 'debug' | 'test';
+  source: 'built-in' | 'workspace';
+}
+
 const VibeLoopCard = memo(function VibeLoopCard({ state }: { state: VibeLoopState | null }) {
   const activeStage = state?.stage || 'frame';
   const activeIndex = VIBE_LOOP_STAGES.findIndex(s => s.id === activeStage);
@@ -264,6 +272,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const [mcpBannerDismissed, setMcpBannerDismissed] = useState(false);
   // Sprint 38 Feature 4: /mcp-off picker visibility
   const [mcpPickerVisible, setMcpPickerVisible] = useState(false);
+  const [specialistModes, setSpecialistModes] = useState<SpecialistMode[]>([]);
+  const [activeSpecialistMode, setActiveSpecialistMode] = useState<SpecialistMode | null>(null);
 
   // Sprint 38 Feature 5: Retry countdown. `retryState.nextRetryMs` is the
   // wall-clock instant we should next retry. We expose the remaining seconds
@@ -294,6 +304,33 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   useEffect(() => {
     refreshMCPInfo();
   }, [session.id, refreshMCPInfo]);
+
+  const refreshSpecialistModes = useCallback(async () => {
+    if (!api?.listSpecialistModes || !api?.getSpecialistMode) return;
+    try {
+      const [modes, active] = await Promise.all([
+        api.listSpecialistModes(),
+        api.getSpecialistMode(),
+      ]);
+      setSpecialistModes(modes || []);
+      setActiveSpecialistMode(active || null);
+    } catch (err) {
+      console.warn('[Chat] Specialist mode refresh failed:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSpecialistModes();
+  }, [session.id, refreshSpecialistModes]);
+
+  const handleSpecialistModeChange = async (modeId: string) => {
+    if (!api?.setSpecialistMode) return;
+    const result = await api.setSpecialistMode(modeId);
+    if (result?.success) {
+      setActiveSpecialistMode(result.mode);
+      await refreshSpecialistModes();
+    }
+  };
 
   // Sprint 25: Attachment state
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
@@ -704,6 +741,11 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
         setActiveVibeLoop(result.data.vibeLoop);
       }
 
+      if (result.data?.specialistMode) {
+        setActiveSpecialistMode(result.data.specialistMode);
+        await refreshSpecialistModes();
+      }
+
       const responseMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: 'system',
@@ -727,7 +769,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       };
       setMessages(prev => [...prev, errMsg]);
     }
-  }, [session.id, onModeChange, rateLimitSnapshot, softInputLimit, softOutputLimit, softRequestLimit, refreshMCPInfo]);
+  }, [session.id, onModeChange, rateLimitSnapshot, softInputLimit, softOutputLimit, softRequestLimit, refreshMCPInfo, refreshSpecialistModes]);
 
   // Sprint 25: Process file for attachment
   const processFile = useCallback(async (file: File, source: AttachmentMeta['source'] = 'drag-drop') => {
@@ -1171,6 +1213,21 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             <span>{executionMode === 'plan' ? '\uD83D\uDD0D' : '\uD83D\uDD28'}</span>
             <span>{executionMode === 'plan' ? 'PLAN' : 'BUILD'}</span>
           </button>
+
+          {specialistModes.length > 0 && (
+            <select
+              value={activeSpecialistMode?.id || 'code'}
+              onChange={e => handleSpecialistModeChange(e.target.value)}
+              className="h-7 rounded border border-matrix-border/40 bg-matrix-bg-elevated px-2 text-[10px] font-bold text-matrix-text-dim outline-none hover:border-matrix-green/35 focus:border-matrix-green/50"
+              title={activeSpecialistMode ? `${activeSpecialistMode.label}: ${activeSpecialistMode.description}` : 'Specialist mode'}
+            >
+              {specialistModes.map(mode => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.label}
+                </option>
+              ))}
+            </select>
+          )}
 
           {/* Sprint 23: Model chip in header (read-only badge — full picker is in composer) */}
           {selectedModel && (

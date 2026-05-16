@@ -125,6 +125,9 @@ const electronAPI = {
   listSlashCommands: () => ipcRenderer.invoke('slash:list'),
   getExecutionMode: () => ipcRenderer.invoke('mode:get'),
   setExecutionMode: (mode: string) => ipcRenderer.invoke('mode:set', mode),
+  listSpecialistModes: () => ipcRenderer.invoke('specialist-mode:list'),
+  getSpecialistMode: () => ipcRenderer.invoke('specialist-mode:get'),
+  setSpecialistMode: (modeId: string) => ipcRenderer.invoke('specialist-mode:set', modeId),
   getVibeLoop: (sessionId: string) => ipcRenderer.invoke('vibe-loop:get', sessionId),
 
   // ─── Sprint 13: Discovery ─────────────────────────

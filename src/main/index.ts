@@ -102,6 +102,11 @@ import {
 import {
   buildChangelogEntry, writeChangelog,
 } from './orchestration/changelog';
+import {
+  getActiveSpecialistMode,
+  listSpecialistModes,
+  setActiveSpecialistMode,
+} from './orchestration/specialistModes';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -1808,6 +1813,28 @@ function registerIPCHandlers(): void {
       return { success: true, mode };
     }
     return { success: false, error: 'Invalid mode. Use "plan" or "build".' };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPECIALIST_MODE_LIST, async () => {
+    return listSpecialistModes(getActiveWorkspace());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPECIALIST_MODE_GET, async () => {
+    return getActiveSpecialistMode(getActiveWorkspace());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPECIALIST_MODE_SET, async (_event, modeId: string) => {
+    try {
+      const mode = setActiveSpecialistMode(modeId, getActiveWorkspace());
+      db.logActivity('system', 'specialist_mode_set', `Specialist mode: ${mode.label}`, mode.description, {
+        modeId: mode.id,
+        source: mode.source,
+        toolPolicy: mode.toolPolicy,
+      });
+      return { success: true, mode };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to set specialist mode' };
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.VIBE_LOOP_GET, async (_event, sessionId: string) => {

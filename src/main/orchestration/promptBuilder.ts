@@ -25,6 +25,7 @@ import {
 } from './projectContext';
 import { collectWorkspaceDiagnostics, formatDiagnosticsForPrompt } from '../diagnostics';
 import { formatVibeLoopForPrompt, getVibeLoopState } from './vibeLoop';
+import { formatSpecialistModeForPrompt } from './specialistModes';
 import simpleGit from 'simple-git';
 
 export interface PromptBuilderContext {
@@ -55,6 +56,10 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
 
   // 2. Base system prompt
   sections.push(SYSTEM_PROMPT);
+
+  // Phase 4: specialist mode controls role posture while Plan/Build
+  // continues to control actual tool safety.
+  sections.push(formatSpecialistModeForPrompt(ctx.workspacePath || getActiveWorkspace()));
 
   // Phase 2: first-class Vibe Coding Loop stage.
   // This keeps Frame/Decompose/Converse/Review/Test/Refine visible to the

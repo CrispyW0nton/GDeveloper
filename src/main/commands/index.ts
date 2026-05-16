@@ -61,6 +61,11 @@ import {
   formatMultiModelVerificationResult,
   runMultiModelVerification,
 } from '../orchestration/multiModelVerifier';
+import {
+  getActiveSpecialistMode,
+  listSpecialistModes,
+  setActiveSpecialistMode,
+} from '../orchestration/specialistModes';
 
 // ─── Interfaces ───
 
@@ -403,6 +408,51 @@ register({
       message: '**Switched to BUILD MODE.** All tools enabled. Full read/write access.',
       data: { mode: 'build' },
     };
+  },
+});
+
+register({
+  name: 'mode',
+  description: 'Show or set specialist mode. Usage: /mode [code|architect|ask|debug|test|custom-id]',
+  category: 'mode',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const requested = args.trim().toLowerCase();
+    const modes = listSpecialistModes(ctx.workspacePath);
+
+    if (!requested || requested === 'status') {
+      const active = getActiveSpecialistMode(ctx.workspacePath);
+      return {
+        success: true,
+        message: [
+          `**Specialist mode:** ${active.label} (\`${active.id}\`)`,
+          active.description,
+          '',
+          '**Available modes:**',
+          ...modes.map(mode => `- \`${mode.id}\` - ${mode.label} (${mode.toolPolicy}, ${mode.source})`),
+        ].join('\n'),
+        data: { specialistMode: active, modes },
+      };
+    }
+
+    try {
+      const mode = setActiveSpecialistMode(requested, ctx.workspacePath);
+      getDatabase().logActivity(ctx.sessionId, 'specialist_mode_set', `Specialist mode: ${mode.label}`, mode.description, {
+        modeId: mode.id,
+        source: mode.source,
+        toolPolicy: mode.toolPolicy,
+      });
+      return {
+        success: true,
+        message: `**Specialist mode set:** ${mode.label} (\`${mode.id}\`)\n${mode.description}`,
+        data: { specialistMode: mode, action: 'specialist-mode-set' },
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message: `${err instanceof Error ? err.message : String(err)}\nUse \`/mode\` to list available specialist modes.`,
+      };
+    }
   },
 });
 

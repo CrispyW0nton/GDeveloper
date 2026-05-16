@@ -591,6 +591,7 @@ export function useAppState() {
   // ─── Sprint 12: Execution mode ───
   const setExecutionMode = useCallback((mode: ExecutionMode) => {
     setState(prev => ({ ...prev, executionMode: mode }));
+    if (api?.setExecutionMode) api.setExecutionMode(mode);
   }, []);
 
   // ─── Sprint 12: Terminal panel ───

@@ -60,6 +60,11 @@ export const IPC_CHANNELS = {
   MCP_PERMISSION_LIST: 'mcp:permission-list',
   MCP_PERMISSION_SET: 'mcp:permission-set',
 
+  // Specialist Modes
+  SPECIALIST_MODE_LIST: 'specialist-mode:list',
+  SPECIALIST_MODE_GET: 'specialist-mode:get',
+  SPECIALIST_MODE_SET: 'specialist-mode:set',
+
   // Tools
   TOOL_LIST: 'tool:list',
   TOOL_EXECUTE: 'tool:execute',
