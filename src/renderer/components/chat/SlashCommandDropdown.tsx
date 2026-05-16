@@ -52,6 +52,9 @@ const COMMAND_EXAMPLES: Record<string, string> = {
   'decompose': '/decompose tracer bullet first',
   'review': '/review check for hollow tests',
   'test': '/test run focused verification',
+  'tracer': '/tracer settings import flow',
+  'memento': '/memento ready for tomorrow',
+  'handoff': '/handoff branch is ready for review',
 };
 
 export default function SlashCommandDropdown({

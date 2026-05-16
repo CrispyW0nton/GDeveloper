@@ -46,6 +46,8 @@ import {
   setVibeLoopStage,
   type VibeLoopStage,
 } from '../orchestration/vibeLoop';
+import { writeSessionMemento } from '../orchestration/memento';
+import { createTracerBullet } from '../orchestration/tracerBullet';
 
 // ─── Interfaces ───
 
@@ -472,12 +474,30 @@ register({
 
 register({
   name: 'handoff',
-  description: 'Generate developer handoff package (coming in Sprint 16).',
+  description: 'Write a session memento for handoff/resume. Usage: /handoff [note]',
   category: 'workflow',
-  async execute(_args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const result = await writeSessionMemento(ws, ctx.sessionId, args.trim());
     return {
       success: true,
-      message: '**Handoff generation** is coming in Sprint 16. This will generate a zip of plans, tasks, changes, and conversation summary.',
+      message: `**Memento written.**\n\nPath: \`${result.relativePath}\`\n\nUse this file to resume or hand off the session with current loop stage, todos, checkpoints, git state, and recent transcript.`,
+      data: { memento: result.relativePath },
+    };
+  },
+});
+
+register({
+  name: 'memento',
+  description: 'Write a resumable session memento to .gd/memento. Usage: /memento [note]',
+  category: 'workflow',
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const result = await writeSessionMemento(ws, ctx.sessionId, args.trim());
+    return {
+      success: true,
+      message: `**Memento written.**\n\nPath: \`${result.relativePath}\`\n\nResume prompt and session context are captured in the markdown file.`,
+      data: { memento: result.relativePath },
     };
   },
 });
@@ -490,6 +510,35 @@ register({
     return {
       success: true,
       message: '**Roadmap generation** is coming in Sprint 16. This will analyze the repo and generate plan.md + tasks.md.',
+    };
+  },
+});
+
+register({
+  name: 'tracer',
+  description: 'Create a tracer-bullet plan and todo ladder. Usage: /tracer <feature or behavior>',
+  category: 'workflow',
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const tracer = createTracerBullet(ws, ctx.sessionId, args);
+    const vibeLoop = setVibeLoopStage(ctx.sessionId, 'decompose', `Tracer bullet: ${tracer.feature}`);
+    getDatabase().logActivity(ctx.sessionId, 'tracer_bullet_created', `Tracer bullet: ${tracer.feature}`, tracer.relativePath, {
+      filePath: tracer.filePath,
+      tasks: tracer.tasks,
+    });
+    return {
+      success: true,
+      message: [
+        `**Tracer bullet created:** ${tracer.feature}`,
+        '',
+        `Path: \`${tracer.relativePath}\``,
+        '',
+        '**Task ladder:**',
+        ...tracer.tasks.map((task, index) => `${index + 1}. ${task}`),
+        '',
+        'Loop stage moved to **Decompose**.',
+      ].join('\n'),
+      data: { tracer: tracer.relativePath, vibeLoop },
     };
   },
 });
