@@ -14,11 +14,10 @@ import { IPC_CHANNELS } from './ipc';
 import { validateIPC } from './ipc/validators';
 import { getDatabase } from './db';
 import { getSecureSettings } from './security';
-import { ClaudeProvider, DEFAULT_MODEL_ID, providerRegistry, streamChatToRenderer } from './providers';
+import { DEFAULT_MODEL_ID, createProviderForKey, providerRegistry } from './providers';
 import { getGitHub } from './github';
 import { getMCPManager } from './mcp';
 import { getOrchestrationEngine } from './orchestration';
-import { SYSTEM_PROMPT } from './orchestration/prompts';
 import * as compareEngine from './compare';
 import {
   setActiveWorkspace, getActiveWorkspace,
@@ -29,7 +28,7 @@ import {
 } from './tools';
 import {
   getAllCommands, getCommand, getExecutionMode, setExecutionMode,
-  WRITE_TOOL_NAMES, WorkspaceContext, setCommandsMainWindow,
+  WorkspaceContext, setCommandsMainWindow,
 } from './commands';
 import { scanForRepositories, importDiscoveredRepos, DiscoveredRepo } from './discovery';
 import { getManagedRoot, setManagedRoot, moveWorkspace, moveToManagedRoot, ensureManagedRoot } from './migration';
@@ -260,10 +259,7 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.API_KEY_SET, async (_event, provider: string, key: string) => {
     settings.setApiKey(provider, key);
-    if (provider === 'claude') {
-      const claude = new ClaudeProvider(key);
-      providerRegistry.register(claude);
-    }
+    providerRegistry.register(createProviderForKey(provider, key));
     db.logActivity('system', 'api_key_set', `API key configured for ${provider}`, '', { provider });
     return true;
   });
@@ -280,29 +276,22 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.API_KEY_VALIDATE, async (_event, provider: string, key: string) => {
     try {
-      if (provider === 'claude') {
-        const claude = new ClaudeProvider(key);
-        const result = await claude.validateKey();
-        if (result.valid) {
-          settings.setApiKey(provider, key);
-          // Sprint 25.5: Register with safe default, then discover + validate.
-          // BUG-10: safeDefault now comes from the single DEFAULT_MODEL_ID constant.
-          const registeredProvider = new ClaudeProvider(key, DEFAULT_MODEL_ID);
-          providerRegistry.register(registeredProvider);
-          // Asynchronously discover models and pick the best one
-          registeredProvider.discoverModels().then(models => {
-            providerRegistry.availableModels = models;
-            const bestModel = providerRegistry.validateSelectedModel();
-            console.log(`[Validate] Discovered ${models.length} models, best: ${bestModel}`);
-          }).catch(() => {});
-          const bestModel = result.models?.[0] || DEFAULT_MODEL_ID;
-          db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
-        }
-        return { valid: result.valid, error: result.error };
+      const candidate = createProviderForKey(provider, key);
+      const result = typeof candidate.validateKey === 'function'
+        ? await candidate.validateKey()
+        : { valid: key.length > 10, error: key.length > 10 ? undefined : 'API key is too short' };
+      if (result.valid) {
+        settings.setApiKey(provider, key);
+        providerRegistry.register(candidate);
+        candidate.discoverModels?.().then(models => {
+          providerRegistry.availableModels = models;
+          const bestModel = providerRegistry.validateSelectedModel();
+          console.log(`[Validate] Discovered ${models.length} models for ${provider}, best: ${bestModel}`);
+        }).catch(() => {});
+        const bestModel = result.models?.[0] || candidate.getModelId?.() || DEFAULT_MODEL_ID;
+        db.logActivity('system', 'api_key_validated', `API key validated for ${provider}, model: ${bestModel}`, '', { provider, model: bestModel });
       }
-      const valid = key.length > 10;
-      if (valid) settings.setApiKey(provider, key);
-      return { valid, error: valid ? undefined : 'API key is too short' };
+      return { valid: result.valid, error: result.error };
     } catch (err) {
       return { valid: false, error: err instanceof Error ? err.message : 'Validation failed' };
     }
@@ -481,58 +470,16 @@ function registerIPCHandlers(): void {
         ...mcpTools
       ];
 
-      // Build enhanced system prompt with workspace context
+      // Build enhanced system prompt with workspace, project rules, repo-map, RAG, and diagnostics context
+      // MCP-429-08: promptBuilder preserves the compact
+      // `You have ${allTools.length} tools available (...)` summary while
+      // avoiding the old per-tool name enumeration in the live prompt body.
       const wsPath = getActiveWorkspace();
-      let enhancedPrompt = SYSTEM_PROMPT;
-
-      // Sprint 12: mode-aware system prompt prefix
-      if (mode === 'plan') {
-        enhancedPrompt = 'You are in PLAN MODE. You can read, search, and analyze the codebase but you CANNOT modify files, run commands, or make commits. Focus on understanding, researching, and proposing plans. When ready to implement, tell the user to switch to Build mode with /build.\n\n' + enhancedPrompt;
-      } else {
-        enhancedPrompt = 'You are in BUILD MODE. You have full access to read, write, patch, and execute commands in the workspace. You can create branches, commit changes, and run shell commands.\n\n' + enhancedPrompt;
-      }
-      if (wsPath) {
-        enhancedPrompt += `\n\nCurrent workspace: ${wsPath}`;
-        try {
-          const git: SimpleGit = simpleGit(wsPath);
-          const status = await git.status();
-          enhancedPrompt += `\nBranch: ${status.current || '(detached)'}`;
-          enhancedPrompt += `\nTracking: ${status.tracking || '(none)'}`;
-          enhancedPrompt += `\nModified: ${status.modified.length} | Staged: ${status.staged.length} | Untracked: ${status.not_added.length}`;
-        } catch { /* git context optional */ }
-
-        // Sprint 17: Add worktree context to system prompt
-        try {
-          const wtContext = getWorktreeContext(wsPath);
-          if (wtContext) {
-            enhancedPrompt += `\nWorktree: ${wtContext.isMain ? 'Main' : 'Linked'}`;
-            if (wtContext.isLinked) {
-              enhancedPrompt += ` (branch: ${wtContext.branch || 'detached ' + wtContext.head?.substring(0, 7)})`;
-              enhancedPrompt += `\nMain repo root: ${wtContext.mainRoot || 'unknown'}`;
-            }
-            const wts = listWorktrees(wsPath);
-            if (wts.length > 1) {
-              enhancedPrompt += `\nTotal worktrees: ${wts.length} (${wts.filter(w => w.isLinked).length} linked)`;
-            }
-          }
-        } catch { /* worktree context optional */ }
-      }
-
-      enhancedPrompt += `\n\nYou have ${allTools.length} tools available (${filteredLocalTools.length} local + ${mcpTools.length} MCP).`;
-      // MCP-429-08 (scope-adjusted): The previous line here was
-      //   enhancedPrompt += `\nLocal tools: ${filteredLocalTools.map(...).join(', ')}`;
-      // which re-emitted the NAMES of every local tool in the system prompt
-      // body, redundant with the `tools` parameter the API call already
-      // carries. ~60-80 tokens/turn of pure overhead at the current local
-      // tool count. Deleted.
-      //
-      // (Note: the MCP tool-NAME enumeration flagged in the audit lives
-      // in promptBuilder.ts, which is currently dead code — that module
-      // has been cleaned up in the same commit for future-regression
-      // safety, but does not affect the live path's token cost today.)
-      if (mode === 'plan') {
-        enhancedPrompt += `\n[PLAN MODE] Disabled write tools: ${Array.from(WRITE_ACCESS_TOOLS).join(', ')}`;
-      }
+      const enhancedPrompt = await buildEnhancedSystemPrompt({
+        sessionId,
+        workspacePath: wsPath || undefined,
+        currentUserMessage: message,
+      });
 
       // Sprint 29: Debug log of tool names for P0-A terminal tool wiring verification
       const toolNameList = allTools.map((t: any) => t.name);
@@ -892,7 +839,7 @@ function registerIPCHandlers(): void {
 
   // Sprint 36 Fix 2: Abort active stream on demand (tab switch / component unmount)
   ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async () => {
-    const provider = providerRegistry.getDefault() as ClaudeProvider | undefined;
+    const provider = providerRegistry.getDefault();
     if (provider && typeof provider.abortActiveStream === 'function') {
       provider.abortActiveStream();
       console.log('[chat:abort] Active stream aborted');
@@ -2829,28 +2776,26 @@ app.whenReady().then(() => {
 
   // Sprint 25.5: Auto-register saved API keys with dynamic model discovery
   const configuredProviders = settings.getConfiguredProviders();
+  const savedSettings = settings.getSettings() as any;
+  const savedModel = savedSettings?.selectedModel || savedSettings?.preferences?.defaultModel;
   for (const providerName of configuredProviders) {
     const key = settings.getApiKey(providerName);
-    if (key && providerName === 'claude') {
-      // Register immediately with a safe default model.
-      // BUG-10: safeDefault unified via the single DEFAULT_MODEL_ID constant.
-      const claudeInstance = new ClaudeProvider(key, DEFAULT_MODEL_ID);
-      providerRegistry.register(claudeInstance);
+    if (key) {
+      const providerInstance = createProviderForKey(providerName, key, savedModel);
+      providerRegistry.register(providerInstance, providerName === configuredProviders[configuredProviders.length - 1]);
 
-      // Then discover available models and validate/auto-switch
-      claudeInstance.discoverModels().then(models => {
+      // Then discover available models and validate/auto-switch.
+      providerInstance.discoverModels?.().then(models => {
         providerRegistry.availableModels = models;
 
         // Restore persisted model selection, then validate it exists
-        const savedSettings = settings.getSettings() as any;
-        const savedModel = savedSettings?.selectedModel || savedSettings?.preferences?.defaultModel;
         if (savedModel) {
           providerRegistry.selectedModel = savedModel;
         }
         const validatedModel = providerRegistry.validateSelectedModel();
-        console.log(`[Startup] Discovered ${models.length} models, selected: ${validatedModel}`);
+        console.log(`[Startup] Discovered ${models.length} models for ${providerName}, selected: ${validatedModel}`);
       }).catch(err => {
-        console.warn('[Startup] Model discovery failed, using safe fallback:', err);
+        console.warn(`[Startup] Model discovery failed for ${providerName}, using safe fallback:`, err);
       });
     }
   }

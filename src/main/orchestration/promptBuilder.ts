@@ -17,11 +17,19 @@ import { getMCPManager } from '../mcp';
 import { getTodoProgress, getTodoList } from './todoManager';
 import { formatCheckpointSummary, getLatestCheckpoint } from './checkpoint';
 import { getRateLimiter } from '../providers/rateLimiter';
+import {
+  buildProjectContext,
+  formatProjectContextForPrompt,
+  formatRelevantCodeChunksForPrompt,
+  retrieveRelevantCodeChunks,
+} from './projectContext';
+import { collectWorkspaceDiagnostics, formatDiagnosticsForPrompt } from '../diagnostics';
 import simpleGit from 'simple-git';
 
 export interface PromptBuilderContext {
   sessionId: string;
   workspacePath?: string;
+  currentUserMessage?: string;
   mcpToolCount?: number;
   localToolCount?: number;
 }
@@ -76,6 +84,59 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
     } catch { /* optional */ }
 
     sections.push(wsLines.join('\n'));
+
+    // Project memory + repo map context
+    try {
+      const projectContext = buildProjectContext(wsPath, {
+        maxFiles: 500,
+        maxDepth: 8,
+        maxRuleChars: 16000,
+        maxPromptChars: 14000,
+      });
+      const formattedProjectContext = formatProjectContextForPrompt(projectContext, {
+        maxPromptChars: 14000,
+      });
+      if (formattedProjectContext) {
+        sections.push(formattedProjectContext);
+      }
+
+      const relevantCodeChunks = ctx.currentUserMessage
+        ? retrieveRelevantCodeChunks(wsPath, ctx.currentUserMessage, {
+            maxFiles: 500,
+            maxDepth: 8,
+            maxChunks: 6,
+            maxRagChars: 10000,
+          })
+        : [];
+      const formattedRelevantCode = formatRelevantCodeChunksForPrompt(relevantCodeChunks, 10000);
+      if (formattedRelevantCode) {
+        sections.push(formattedRelevantCode);
+      }
+
+      const diagnosticsSnapshot = collectWorkspaceDiagnostics(wsPath, {
+        timeoutMs: 15000,
+        maxDiagnostics: 12,
+        cacheTtlMs: 90000,
+      });
+      const formattedDiagnostics = formatDiagnosticsForPrompt(diagnosticsSnapshot, 12);
+      if (formattedDiagnostics) {
+        sections.push(formattedDiagnostics);
+      }
+
+      try {
+        const { getDatabase } = await import('../db');
+        const db = getDatabase();
+        db.saveProjectContextSnapshot(wsPath, projectContext.rules, projectContext.repoMap);
+        if (ctx.currentUserMessage && relevantCodeChunks.length > 0) {
+          db.saveProjectContextRetrieval(ctx.sessionId, wsPath, ctx.currentUserMessage, relevantCodeChunks);
+        }
+        db.saveDiagnosticsSnapshot(wsPath, diagnosticsSnapshot);
+      } catch {
+        // Snapshot persistence is best-effort; prompt context should still work without SQLite.
+      }
+    } catch (err) {
+      sections.push(`\nProject context unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // 4. Todo/task context
@@ -109,7 +170,6 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
   }
 
   sections.push(`\nYou have ${filteredLocal.length + mcpToolCount} tools available (${filteredLocal.length} local + ${mcpToolCount} MCP).`);
-  sections.push(`Local tools: ${filteredLocal.map(t => t.name).join(', ')}`);
   if (mode === 'plan') {
     sections.push(`[PLAN MODE] Disabled write tools: ${WRITE_TOOL_NAMES.join(', ')}`);
   }

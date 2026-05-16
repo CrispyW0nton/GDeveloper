@@ -373,6 +373,20 @@ const SAFE_FALLBACK_MODELS: ModelInfo[] = [
   { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', provider: 'claude', supportsTools: true, supportsStreaming: true, contextWindow: 200000, maxOutput: 4096 },
 ];
 
+export const DEFAULT_OPENAI_COMPATIBLE_MODEL = 'gpt-4o-mini';
+
+const OPENAI_COMPATIBLE_FALLBACK_MODELS: ModelInfo[] = [
+  { id: 'gpt-4o-mini', name: 'GPT-4o mini', provider: 'openai', supportsTools: true, supportsStreaming: true, contextWindow: 128000, maxOutput: 16384 },
+  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', supportsTools: true, supportsStreaming: true, contextWindow: 128000, maxOutput: 4096 },
+  { id: 'openai/gpt-4o-mini', name: 'OpenAI GPT-4o mini', provider: 'openrouter', supportsTools: true, supportsStreaming: true, contextWindow: 128000, maxOutput: 16384 },
+];
+
+const OPENAI_COMPATIBLE_PRESETS: Record<string, { baseUrl: string; defaultModel: string; displayProvider: string }> = {
+  openai: { baseUrl: 'https://api.openai.com/v1', defaultModel: DEFAULT_OPENAI_COMPATIBLE_MODEL, displayProvider: 'openai' },
+  openrouter: { baseUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o-mini', displayProvider: 'openrouter' },
+  custom: { baseUrl: process.env.GDEVELOPER_OPENAI_BASE_URL || 'http://localhost:1234/v1', defaultModel: process.env.GDEVELOPER_OPENAI_MODEL || DEFAULT_OPENAI_COMPATIBLE_MODEL, displayProvider: 'custom' },
+};
+
 // Models that DO NOT support tool use
 const NO_TOOL_SUPPORT = new Set(['claude-2.0', 'claude-2.1', 'claude-instant-1.2']);
 
@@ -1054,15 +1068,348 @@ export class ClaudeProvider implements ILLMProvider {
   }
 }
 
+// ─── OpenAI-Compatible Provider (OpenAI / OpenRouter / local gateways) ───
+export class OpenAICompatibleProvider implements ILLMProvider {
+  name: string;
+  private apiKey: string;
+  private model: string;
+  private baseUrl: string;
+  private displayProvider: string;
+  private activeStream: AbortController | null = null;
+
+  constructor(
+    apiKey: string,
+    providerName: string = 'openai',
+    model?: string,
+    baseUrl?: string
+  ) {
+    const preset = OPENAI_COMPATIBLE_PRESETS[providerName] || OPENAI_COMPATIBLE_PRESETS.custom;
+    this.name = providerName;
+    this.apiKey = apiKey;
+    this.model = model || preset.defaultModel;
+    this.baseUrl = (baseUrl || preset.baseUrl).replace(/\/+$/, '');
+    this.displayProvider = preset.displayProvider;
+  }
+
+  abortActiveStream(): void {
+    if (this.activeStream) {
+      console.log(`[OpenAICompatibleProvider:${this.name}] Aborting active stream`);
+      this.activeStream.abort();
+      this.activeStream = null;
+    }
+  }
+
+  async sendMessage(
+    messages: Array<{ role: string; content: string }>,
+    tools?: ToolDefinition[],
+    systemPrompt?: string
+  ): Promise<LLMResponse> {
+    const body = this.buildChatCompletionsBody(messages, tools, systemPrompt, false);
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.buildHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => 'Unknown error');
+      const err: any = new Error(`${this.name} API error ${response.status}: ${errText}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    const data = await response.json();
+    const choice = data.choices?.[0] || {};
+    const message = choice.message || {};
+    const toolCalls = this.normalizeToolCalls(message.tool_calls || []) || [];
+    const content = typeof message.content === 'string' ? message.content : '';
+    const inputTokens = data.usage?.prompt_tokens || 0;
+    const outputTokens = data.usage?.completion_tokens || 0;
+    getRateLimiter().recordUsage(inputTokens, outputTokens);
+    recordSessionUsage(inputTokens, outputTokens);
+
+    return {
+      content,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: { inputTokens, outputTokens },
+      stopReason: choice.finish_reason === 'tool_calls' ? 'tool_use' : 'end_turn',
+    };
+  }
+
+  async *streamMessage(
+    messages: Array<{ role: string; content: string }>,
+    tools?: ToolDefinition[],
+    systemPrompt?: string
+  ): AsyncGenerator<LLMStreamChunk> {
+    this.abortActiveStream();
+    const streamAbort = new AbortController();
+    this.activeStream = streamAbort;
+
+    const body = this.buildChatCompletionsBody(messages, tools, systemPrompt, true);
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.buildHeaders(),
+      body: JSON.stringify(body),
+      signal: streamAbort.signal,
+    });
+
+    if (!response.ok) {
+      this.activeStream = null;
+      const errText = await response.text().catch(() => 'Unknown error');
+      const err: any = new Error(`${this.name} API error ${response.status}: ${errText}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullStreamContent = '';
+    let stopReason = 'end_turn';
+    let apiInputTokens = 0;
+    let apiOutputTokens = 0;
+    const toolCallParts = new Map<number, { id: string; name: string; argumentsJson: string }>();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r\n|\r|\n/);
+        buffer = lines.pop() || '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+
+          let event: any;
+          try {
+            event = JSON.parse(data);
+          } catch {
+            continue;
+          }
+
+          if (event.usage) {
+            apiInputTokens = event.usage.prompt_tokens || apiInputTokens;
+            apiOutputTokens = event.usage.completion_tokens || apiOutputTokens;
+          }
+
+          const choice = event.choices?.[0];
+          if (!choice) continue;
+          if (choice.finish_reason === 'tool_calls') stopReason = 'tool_use';
+          if (choice.finish_reason && choice.finish_reason !== 'tool_calls') stopReason = 'end_turn';
+
+          const delta = choice.delta || {};
+          if (typeof delta.content === 'string' && delta.content.length > 0) {
+            fullStreamContent += delta.content;
+            yield { type: 'text', content: delta.content };
+          }
+
+          for (const toolDelta of delta.tool_calls || []) {
+            const index = typeof toolDelta.index === 'number' ? toolDelta.index : toolCallParts.size;
+            const current = toolCallParts.get(index) || { id: '', name: '', argumentsJson: '' };
+            if (toolDelta.id) current.id = toolDelta.id;
+            if (toolDelta.function?.name) current.name = toolDelta.function.name;
+            if (toolDelta.function?.arguments) current.argumentsJson += toolDelta.function.arguments;
+            toolCallParts.set(index, current);
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+      this.activeStream = null;
+    }
+
+    for (const [index, part] of Array.from(toolCallParts.entries()).sort((a, b) => a[0] - b[0])) {
+      if (!part.name) continue;
+      let input: Record<string, unknown> = {};
+      if (part.argumentsJson.trim()) {
+        try {
+          input = JSON.parse(part.argumentsJson);
+        } catch {
+          input = { raw_arguments: part.argumentsJson };
+        }
+      }
+      yield {
+        type: 'tool_call',
+        toolCall: {
+          id: part.id || `openai-tool-${Date.now()}-${index}`,
+          name: part.name,
+          input,
+        },
+      };
+    }
+
+    if (apiInputTokens === 0 && apiOutputTokens === 0) {
+      apiInputTokens = estimateTokens(messages.map(m => m.content).join(' ') + (systemPrompt || ''));
+      apiOutputTokens = estimateTokens(fullStreamContent);
+    }
+    getRateLimiter().recordUsage(apiInputTokens, apiOutputTokens);
+    recordSessionUsage(apiInputTokens, apiOutputTokens);
+
+    yield { type: 'done', stopReason };
+  }
+
+  countTokens(text: string): number {
+    return estimateTokens(text);
+  }
+
+  getModelId(): string {
+    return this.model;
+  }
+
+  setModel(model: string): void {
+    this.model = model;
+    console.log(`[OpenAICompatibleProvider:${this.name}] Model switched to: ${model}`);
+  }
+
+  async discoverModels(): Promise<ModelInfo[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        headers: this.buildHeaders(false),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const models: ModelInfo[] = (data.data || []).map((m: any) => ({
+        id: m.id,
+        name: modelIdToDisplayName(String(m.id || 'model')),
+        provider: this.displayProvider,
+        supportsTools: OpenAICompatibleProvider.modelSupportsTools(String(m.id || '')),
+        supportsStreaming: true,
+      }));
+      return models.length > 0 ? models : this.fallbackModels();
+    } catch (err) {
+      console.warn(`[OpenAICompatibleProvider:${this.name}] Model discovery failed, using fallback:`, err);
+      return this.fallbackModels();
+    }
+  }
+
+  async validateKey(): Promise<{ valid: boolean; error?: string; models?: string[] }> {
+    if (!this.apiKey || this.apiKey.trim().length === 0) {
+      return { valid: false, error: 'Please enter an API key.' };
+    }
+    if (this.name === 'openai' && !this.apiKey.startsWith('sk-')) {
+      return { valid: false, error: 'Invalid format. OpenAI API keys usually start with "sk-".' };
+    }
+
+    try {
+      const models = await this.discoverModels();
+      return { valid: true, models: models.map(m => m.id) };
+    } catch (err) {
+      return { valid: false, error: err instanceof Error ? err.message : 'Validation failed' };
+    }
+  }
+
+  static modelSupportsTools(modelId: string): boolean {
+    const id = modelId.toLowerCase();
+    if (!id) return true;
+    return !/(instruct|embedding|audio|whisper|tts|moderation)/.test(id);
+  }
+
+  private buildChatCompletionsBody(
+    messages: Array<{ role: string; content: string }>,
+    tools?: ToolDefinition[],
+    systemPrompt?: string,
+    stream = false
+  ): any {
+    const bodyMessages = this.normalizeMessages(messages, systemPrompt);
+    const body: any = {
+      model: this.model,
+      messages: bodyMessages,
+      stream,
+    };
+
+    if (stream) {
+      body.stream_options = { include_usage: true };
+    }
+
+    const openAiTools = tools?.map(t => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema || { type: 'object', properties: {} },
+      },
+    }));
+    if (openAiTools?.length) {
+      body.tools = openAiTools;
+    }
+
+    return body;
+  }
+
+  private normalizeMessages(messages: Array<{ role: string; content: string }>, systemPrompt?: string): Array<{ role: string; content: string }> {
+    const systemMessages = messages.filter(m => m.role === 'system').map(m => m.content);
+    const allSystem = [systemPrompt, ...systemMessages].filter(Boolean).join('\n\n');
+    const normalized = messages
+      .filter(m => m.role !== 'system')
+      .map(m => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      }));
+    return allSystem ? [{ role: 'system', content: allSystem }, ...normalized] : normalized;
+  }
+
+  private normalizeToolCalls(toolCalls: any[]): LLMResponse['toolCalls'] {
+    return toolCalls.map(tc => {
+      let input: Record<string, unknown> = {};
+      const args = tc.function?.arguments;
+      if (typeof args === 'string' && args.trim()) {
+        try {
+          input = JSON.parse(args);
+        } catch {
+          input = { raw_arguments: args };
+        }
+      }
+      return {
+        id: tc.id || `openai-tool-${Date.now()}`,
+        name: tc.function?.name || tc.name || 'unknown_tool',
+        input,
+      };
+    }).filter(tc => tc.name && tc.name !== 'unknown_tool');
+  }
+
+  private buildHeaders(includeJson = true): Record<string, string> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+    };
+    if (includeJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (this.name === 'openrouter') {
+      headers['HTTP-Referer'] = 'https://github.com/CrispyW0nton/GDeveloper';
+      headers['X-Title'] = 'GDeveloper';
+    }
+    return headers;
+  }
+
+  private fallbackModels(): ModelInfo[] {
+    return OPENAI_COMPATIBLE_FALLBACK_MODELS
+      .filter(m => m.provider === this.displayProvider || (this.displayProvider === 'custom' && m.provider === 'openai'))
+      .map(m => ({ ...m, provider: this.displayProvider }));
+  }
+}
+
 // ─── Provider Registry (Sprint 16 + Sprint 25.5: dynamic model state) ───
 class ProviderRegistry {
   private providers: Map<string, ILLMProvider> = new Map();
+  private _activeProvider: string | null = null;
   private _selectedModel: string = DEFAULT_MODEL_ID;
   private _availableModels: ModelInfo[] = SAFE_FALLBACK_MODELS;
   private _modelDiscovered: boolean = false;
 
-  register(provider: ILLMProvider): void {
+  register(provider: ILLMProvider, makeActive = true): void {
     this.providers.set(provider.name, provider);
+    if (makeActive || !this._activeProvider || !this.providers.has(this._activeProvider)) {
+      this._activeProvider = provider.name;
+      const providerModel = provider.getModelId?.();
+      if (providerModel) this._selectedModel = providerModel;
+    }
   }
 
   get(name: string): ILLMProvider | undefined {
@@ -1070,6 +1417,10 @@ class ProviderRegistry {
   }
 
   getDefault(): ILLMProvider | undefined {
+    if (this._activeProvider) {
+      const active = this.providers.get(this._activeProvider);
+      if (active) return active;
+    }
     return this.providers.values().next().value;
   }
 
@@ -1079,6 +1430,22 @@ class ProviderRegistry {
 
   remove(name: string): void {
     this.providers.delete(name);
+    if (this._activeProvider === name) {
+      this._activeProvider = this.providers.keys().next().value || null;
+      const providerModel = this.getDefault()?.getModelId?.();
+      if (providerModel) this._selectedModel = providerModel;
+    }
+  }
+
+  get activeProvider(): string | null { return this._activeProvider; }
+  set activeProvider(name: string | null) {
+    if (name && this.providers.has(name)) {
+      this._activeProvider = name;
+      const providerModel = this.providers.get(name)?.getModelId?.();
+      if (providerModel) this._selectedModel = providerModel;
+    } else if (name === null) {
+      this._activeProvider = null;
+    }
   }
 
   // Sprint 16 + Sprint 25.5: Model selection with validation
@@ -1086,7 +1453,7 @@ class ProviderRegistry {
   set selectedModel(model: string) {
     this._selectedModel = model;
     // Update the provider's model
-    const provider = this.getDefault() as ClaudeProvider | undefined;
+    const provider = this.getDefault();
     if (provider && typeof provider.setModel === 'function') {
       provider.setModel(model);
     }
@@ -1102,7 +1469,7 @@ class ProviderRegistry {
    * @param forceRefresh - bypass cache (user clicked "Refresh models")
    */
   async discoverModels(forceRefresh = false): Promise<ModelInfo[]> {
-    const provider = this.getDefault() as ClaudeProvider | undefined;
+    const provider = this.getDefault();
     if (provider && typeof provider.discoverModels === 'function') {
       this._availableModels = await provider.discoverModels(forceRefresh);
       this._modelDiscovered = true;
@@ -1145,11 +1512,25 @@ class ProviderRegistry {
 
   checkModelToolSupport(modelId?: string): boolean {
     const id = modelId || this._selectedModel;
-    return ClaudeProvider.modelSupportsTools(id);
+    const active = this.getDefault();
+    if (active?.name === 'claude') return ClaudeProvider.modelSupportsTools(id);
+    if (active instanceof OpenAICompatibleProvider) return OpenAICompatibleProvider.modelSupportsTools(id);
+    const known = this._availableModels.find(m => m.id === id);
+    return known?.supportsTools ?? true;
   }
 }
 
 export const providerRegistry = new ProviderRegistry();
+
+export function createProviderForKey(providerName: string, key: string, model?: string): ILLMProvider {
+  if (providerName === 'claude') {
+    return new ClaudeProvider(key, model || DEFAULT_MODEL_ID);
+  }
+  if (providerName === 'openai' || providerName === 'openrouter' || providerName === 'custom') {
+    return new OpenAICompatibleProvider(key, providerName, model);
+  }
+  return new OpenAICompatibleProvider(key, providerName, model);
+}
 
 /**
  * Send a streaming chat response and emit chunks to the renderer via IPC
@@ -1171,7 +1552,7 @@ export async function streamChatToRenderer(
   let stopReason = 'end_turn';
 
   // ─── Sprint 35: Context-window hygiene before sending to Anthropic ───
-  const modelId = (provider as ClaudeProvider).getModelId();
+  const modelId = provider.getModelId?.() || DEFAULT_MODEL_ID;
 
   // Sprint 35 Fix 4: Ensure tool_use/tool_result pairing is valid
   const pairingResult = ensureToolResultsFollowToolUse(messages);
@@ -1238,7 +1619,7 @@ export async function streamChatToRenderer(
   } catch { /* ignore devconsole errors */ }
 
   try {
-    for await (const chunk of (provider as ClaudeProvider).streamMessage(cleanedMessages, tools, systemPrompt)) {
+    for await (const chunk of provider.streamMessage(cleanedMessages, tools, systemPrompt)) {
       if (chunk.type === 'text' && chunk.content) {
         fullContent += chunk.content;
         win?.webContents.send('chat:stream-chunk', {

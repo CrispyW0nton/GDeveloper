@@ -97,10 +97,38 @@ CREATE TABLE IF NOT EXISTS workspaces (
   status TEXT DEFAULT 'active'
 );
 
+CREATE TABLE IF NOT EXISTS project_context_snapshots (
+  workspace_path TEXT PRIMARY KEY,
+  rule_files TEXT DEFAULT '[]',
+  repo_map TEXT DEFAULT '{}',
+  generated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS project_context_retrievals (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  workspace_path TEXT NOT NULL,
+  query TEXT NOT NULL,
+  chunks TEXT DEFAULT '[]',
+  generated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS workspace_diagnostics_snapshots (
+  workspace_path TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  status TEXT NOT NULL,
+  command TEXT NOT NULL,
+  diagnostics TEXT DEFAULT '[]',
+  error TEXT,
+  duration_ms INTEGER DEFAULT 0,
+  generated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
 CREATE INDEX IF NOT EXISTS idx_activity_session ON activity_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_diff_session ON diff_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_project_context_retrievals_session ON project_context_retrievals(session_id);
 `;
 
 export class DatabaseManager {
@@ -381,6 +409,72 @@ export class DatabaseManager {
 
   touchWorkspace(id: string): void {
     this.db.prepare(`UPDATE workspaces SET last_opened_at = datetime('now') WHERE id = ?`).run(id);
+  }
+
+  // ─── Project Context Snapshots ─────────────────────────
+  saveProjectContextSnapshot(workspacePath: string, ruleFiles: any[], repoMap: any): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO project_context_snapshots (workspace_path, rule_files, repo_map, generated_at)
+       VALUES (?, ?, ?, datetime('now'))`
+    ).run(workspacePath, JSON.stringify(ruleFiles || []), JSON.stringify(repoMap || {}));
+  }
+
+  getProjectContextSnapshot(workspacePath: string): any | null {
+    const row = this.db.prepare(
+      `SELECT * FROM project_context_snapshots WHERE workspace_path = ?`
+    ).get(workspacePath) as any;
+    if (!row) return null;
+    return {
+      ...row,
+      rule_files: JSON.parse(row.rule_files || '[]'),
+      repo_map: JSON.parse(row.repo_map || '{}'),
+    };
+  }
+
+  saveProjectContextRetrieval(sessionId: string, workspacePath: string, query: string, chunks: any[]): string {
+    const id = uuid();
+    this.db.prepare(
+      `INSERT INTO project_context_retrievals (id, session_id, workspace_path, query, chunks)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(id, sessionId, workspacePath, query, JSON.stringify(chunks || []));
+    return id;
+  }
+
+  getProjectContextRetrievals(sessionId: string): any[] {
+    return this.db.prepare(
+      `SELECT * FROM project_context_retrievals WHERE session_id = ? ORDER BY generated_at DESC LIMIT 20`
+    ).all(sessionId).map((row: any) => ({
+      ...row,
+      chunks: JSON.parse(row.chunks || '[]'),
+    }));
+  }
+
+  saveDiagnosticsSnapshot(workspacePath: string, snapshot: any): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO workspace_diagnostics_snapshots
+       (workspace_path, source, status, command, diagnostics, error, duration_ms, generated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      workspacePath,
+      snapshot.source || 'typescript',
+      snapshot.status || 'unavailable',
+      snapshot.command || '',
+      JSON.stringify(snapshot.diagnostics || []),
+      snapshot.error || null,
+      snapshot.durationMs || snapshot.duration_ms || 0,
+      snapshot.generatedAt || new Date().toISOString()
+    );
+  }
+
+  getDiagnosticsSnapshot(workspacePath: string): any | null {
+    const row = this.db.prepare(
+      `SELECT * FROM workspace_diagnostics_snapshots WHERE workspace_path = ?`
+    ).get(workspacePath) as any;
+    if (!row) return null;
+    return {
+      ...row,
+      diagnostics: JSON.parse(row.diagnostics || '[]'),
+    };
   }
 
   // ─── Settings (non-sensitive) ──────────────────────

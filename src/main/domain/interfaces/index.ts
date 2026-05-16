@@ -9,9 +9,22 @@ import { TaskStatus } from '../enums';
 // ─── LLM Provider Interface ───
 export interface ILLMProvider {
   name: string;
-  sendMessage(messages: Array<{ role: string; content: string }>, tools?: ToolDefinition[]): Promise<LLMResponse>;
-  streamMessage(messages: Array<{ role: string; content: string }>, tools?: ToolDefinition[]): AsyncIterable<LLMStreamChunk>;
+  sendMessage(messages: Array<{ role: string; content: string }>, tools?: ToolDefinition[], systemPrompt?: string): Promise<LLMResponse>;
+  streamMessage(messages: Array<{ role: string; content: string }>, tools?: ToolDefinition[], systemPrompt?: string): AsyncIterable<LLMStreamChunk>;
   countTokens(text: string): number;
+  getModelId?(): string;
+  setModel?(model: string): void;
+  discoverModels?(forceRefresh?: boolean): Promise<Array<{
+    id: string;
+    name: string;
+    provider: string;
+    supportsTools: boolean;
+    supportsStreaming: boolean;
+    contextWindow?: number;
+    maxOutput?: number;
+  }>>;
+  validateKey?(): Promise<{ valid: boolean; error?: string; models?: string[] }>;
+  abortActiveStream?(): void;
 }
 
 export interface LLMResponse {
