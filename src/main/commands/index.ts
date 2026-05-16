@@ -52,6 +52,10 @@ import {
   formatCardboardScanReport,
   scanWorkspaceChangesForCardboardMuffins,
 } from '../orchestration/cardboardDetector';
+import {
+  formatMultiModelVerificationResult,
+  runMultiModelVerification,
+} from '../orchestration/multiModelVerifier';
 
 // ─── Interfaces ───
 
@@ -740,6 +744,83 @@ register({
       };
     } catch (err) {
       return { success: false, message: `Verification failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+});
+
+register({
+  name: 'verify-with',
+  description: 'Ask a configured provider/model to review the current diff. Usage: /verify-with [provider] [model]',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const providerName = parts[0] || providerRegistry.activeProvider || providerRegistry.getDefault()?.name || '';
+    const modelId = parts.slice(1).join(' ') || undefined;
+
+    const provider = providerName ? providerRegistry.get(providerName) : providerRegistry.getDefault();
+    if (!provider) {
+      const available = providerRegistry.list();
+      return {
+        success: false,
+        message: available.length
+          ? `Provider \`${providerName || '(default)'}\` is not configured. Available providers: ${available.map(p => `\`${p}\``).join(', ')}.`
+          : 'No AI provider is configured. Configure a provider before running `/verify-with`.',
+      };
+    }
+
+    const git: SimpleGit = simpleGit(ws);
+    const status = await git.status();
+    const unstagedDiff = await git.diff();
+    const stagedDiff = await git.diff(['--cached']);
+    const diffText = [unstagedDiff, stagedDiff].filter(Boolean).join('\n');
+    const changedCount = status.modified.length + status.staged.length + status.not_added.length + status.deleted.length;
+
+    if (!diffText.trim() && status.not_added.length === 0) {
+      return {
+        success: true,
+        message: '**No current diff to verify.** Working tree appears clean.',
+      };
+    }
+
+    const cardboardScan = scanWorkspaceChangesForCardboardMuffins(ws, diffText, status.not_added);
+    const statusSummary = [
+      `Branch: ${status.current || '(detached)'}`,
+      `Changed files: ${changedCount}`,
+      `Modified: ${status.modified.length}`,
+      `Staged: ${status.staged.length}`,
+      `Untracked: ${status.not_added.length}`,
+      `Deleted: ${status.deleted.length}`,
+      `Cardboard scan score: ${cardboardScan.score}% (${cardboardScan.findings.length} findings)`,
+    ].join('\n');
+
+    try {
+      const result = await runMultiModelVerification({
+        provider,
+        providerName: provider.name,
+        modelId,
+        diffText,
+        statusSummary,
+        cardboardScan,
+      });
+      getDatabase().logActivity(ctx.sessionId, 'multi_model_verify', `Verified diff with ${result.providerName}`, result.modelId || '', {
+        provider: result.providerName,
+        model: result.modelId,
+        usage: result.usage,
+        cardboardScore: cardboardScan.score,
+      });
+
+      return {
+        success: true,
+        message: formatMultiModelVerificationResult(result),
+        data: { result, cardboardScan },
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message: `Multi-model verification failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   },
 });

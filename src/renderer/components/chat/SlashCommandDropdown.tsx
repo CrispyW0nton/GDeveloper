@@ -37,6 +37,7 @@ const BEGINNER_SAFE: Set<string> = new Set([
   'plan', 'tools', 'clear', 'status', 'diff', 'research', 'research-continue',
   'compare-repos', 'verify-last', 'worktree-list', 'vibe',
   'frame', 'decompose', 'converse', 'review', 'test', 'refine',
+  'verify-with',
 ]);
 
 // Sprint 18: Example usage for commands
@@ -52,6 +53,7 @@ const COMMAND_EXAMPLES: Record<string, string> = {
   'decompose': '/decompose tracer bullet first',
   'review': '/review check for hollow tests',
   'test': '/test run focused verification',
+  'verify-with': '/verify-with openai gpt-4o-mini',
   'tracer': '/tracer settings import flow',
   'memento': '/memento ready for tomorrow',
   'handoff': '/handoff branch is ready for review',
