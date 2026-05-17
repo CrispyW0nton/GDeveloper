@@ -221,6 +221,7 @@ const electronAPI = {
   worktreeHandoff: (worktreePath: string, targetBranch?: string) => ipcRenderer.invoke('worktree:handoff', worktreePath, targetBranch),
   worktreeTaskList: () => ipcRenderer.invoke('worktree:task-list'),
   worktreeRecommend: (taskDescription: string) => ipcRenderer.invoke('worktree:recommend', taskDescription),
+  getAgentBoard: () => ipcRenderer.invoke('agent-board:get'),
 
   // ─── Sprint 19: File Tree ─────────────────────────
   getFileTree: (maxDepth?: number) => ipcRenderer.invoke('filetree:get', maxDepth),

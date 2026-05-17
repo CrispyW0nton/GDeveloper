@@ -66,6 +66,7 @@ import {
   createTaskWorktree, completeTaskWorktree, abandonTaskWorktree,
   getHandoffInfo, getTaskWorktrees, shouldRecommendWorktree,
 } from './worktree/taskIsolation';
+import { getAgentBoardSnapshot } from './worktree/agentBoard';
 import { buildFileTree, readFileSafe, writeFileSafe, checkFileWritable } from './fs';
 // Sprint 28: autoContinue engine removed — agent loop driven by stop_reason
 import { runAgentLoop } from './orchestration/agentLoop';
@@ -2529,6 +2530,15 @@ function registerIPCHandlers(): void {
       return shouldRecommendWorktree(taskDescription, dirty);
     } catch (err) {
       return { recommend: false, reason: '' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_BOARD_GET, async () => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      return { success: true, board: getAgentBoardSnapshot(ws) };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to load agent board' };
     }
   });
 

@@ -7,6 +7,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import AgentKanbanBoard, { type AgentBoardSnapshot } from './AgentKanbanBoard';
 
 const api = (window as any).electronAPI;
 
@@ -61,6 +62,7 @@ export default function WorktreePanel({ workspacePath, sessionId, onSwitchWorktr
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
   const [context, setContext] = useState<WorktreeContext | null>(null);
   const [taskWorktrees, setTaskWorktrees] = useState<TaskWorktree[]>([]);
+  const [agentBoard, setAgentBoard] = useState<AgentBoardSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -92,6 +94,10 @@ export default function WorktreePanel({ workspacePath, sessionId, onSwitchWorktr
       else setError(wtResult.error || 'Failed to list worktrees');
       if (ctxResult.success) setContext(ctxResult.context);
       setTaskWorktrees(tasks || []);
+      if (api.getAgentBoard) {
+        const boardResult = await api.getAgentBoard();
+        if (boardResult?.success) setAgentBoard(boardResult.board);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load worktrees');
     }
@@ -201,6 +207,35 @@ export default function WorktreePanel({ workspacePath, sessionId, onSwitchWorktr
 
   const handleOpen = (path: string) => {
     if (onSwitchWorktree) onSwitchWorktree(path);
+  };
+
+  const handleCompleteTask = async (taskId: string) => {
+    try {
+      const result = await api.worktreeCompleteTask(taskId);
+      showMessage(result.success ? (result.message || 'Agent task completed') : (result.message || 'Complete failed'));
+      refresh();
+    } catch (err) {
+      showMessage(err instanceof Error ? err.message : 'Complete failed');
+    }
+  };
+
+  const handleAbandonTask = async (taskId: string) => {
+    try {
+      const result = await api.worktreeAbandonTask(taskId);
+      showMessage(result.success ? (result.message || 'Agent task abandoned') : (result.message || 'Abandon failed'));
+      refresh();
+    } catch (err) {
+      showMessage(err instanceof Error ? err.message : 'Abandon failed');
+    }
+  };
+
+  const handleHandoffTask = async (worktreePath: string) => {
+    try {
+      const result = await api.worktreeHandoff(worktreePath);
+      showMessage(result.success ? result.message : (result.message || 'Handoff failed'));
+    } catch (err) {
+      showMessage(err instanceof Error ? err.message : 'Handoff failed');
+    }
   };
 
   const linkedCount = worktrees.filter(wt => wt.isLinked).length;
@@ -407,6 +442,14 @@ export default function WorktreePanel({ workspacePath, sessionId, onSwitchWorktr
           ))}
         </div>
       )}
+
+      <AgentKanbanBoard
+        board={agentBoard}
+        onOpen={handleOpen}
+        onComplete={handleCompleteTask}
+        onAbandon={handleAbandonTask}
+        onHandoff={handleHandoffTask}
+      />
 
       {/* Empty State (Sprint 18) */}
       {worktrees.length === 0 && !loading && !error && (
