@@ -48,6 +48,13 @@ interface AgentRunItem {
   startedAt: string;
 }
 
+interface AgentRunScore {
+  runId: string;
+  score: number;
+  grade: 'excellent' | 'good' | 'needs_review' | 'risky';
+  summary: string;
+}
+
 const TYPE_META: Record<string, { color: string; label: string; icon: string }> = {
   api_key_set:       { color: 'text-yellow-400',         label: 'API Key',      icon: '🔑' },
   github_connect:    { color: 'text-blue-400',           label: 'GitHub',       icon: '🔗' },
@@ -120,9 +127,17 @@ function LineageList({ title, items }: { title: string; items: string[] }) {
   );
 }
 
+function scoreClass(grade?: string): string {
+  if (grade === 'excellent') return 'border-matrix-green/35 text-matrix-green bg-matrix-green/10';
+  if (grade === 'good') return 'border-blue-400/35 text-blue-300 bg-blue-400/10';
+  if (grade === 'needs_review') return 'border-yellow-400/35 text-yellow-300 bg-yellow-400/10';
+  return 'border-red-400/35 text-red-300 bg-red-400/10';
+}
+
 export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [agentRuns, setAgentRuns] = useState<AgentRunItem[]>([]);
+  const [agentRunScores, setAgentRunScores] = useState<Record<string, AgentRunScore>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
 
@@ -134,7 +149,17 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
         api.listAgentRuns ? api.listAgentRuns(sessionId, 20) : Promise.resolve([]),
       ]);
       setActivities(result || []);
-      setAgentRuns(runs || []);
+      const nextRuns = runs || [];
+      setAgentRuns(nextRuns);
+      if (api.scoreAgentRun) {
+        const scored = await Promise.all(
+          nextRuns.slice(0, 5).map(async (run: AgentRunItem) => {
+            const scoredRun = await api.scoreAgentRun(run.id);
+            return scoredRun?.success ? [run.id, scoredRun.score] : null;
+          })
+        );
+        setAgentRunScores(Object.fromEntries(scored.filter(Boolean) as Array<[string, AgentRunScore]>));
+      }
     } catch (err) {
       console.error('Failed to load activity:', err);
     }
@@ -209,7 +234,9 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
             <p className="text-xs text-matrix-text-muted/35">No agent runs recorded yet.</p>
           ) : (
             <div className="space-y-2">
-              {agentRuns.slice(0, 5).map(run => (
+              {agentRuns.slice(0, 5).map(run => {
+                const score = agentRunScores[run.id];
+                return (
                 <div key={run.id} className="border border-matrix-border/40 rounded p-3 bg-matrix-bg-elevated/40">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -220,6 +247,11 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
                         <span className={`text-[9px] px-1.5 py-0.5 rounded border ${
                           run.status === 'completed' ? 'border-matrix-green/25 text-matrix-green/60' : 'border-red-400/25 text-red-400/60'
                         }`}>{run.status}</span>
+                        {score && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded border ${scoreClass(score.grade)}`} title={score.summary}>
+                            Score {score.score}/100
+                          </span>
+                        )}
                       </div>
                       <p className="text-[10px] text-matrix-text-muted/45 mt-1 truncate">
                         {run.spec_title ? `Spec: ${run.spec_title}` : 'No active spec'} · {run.turns} turns · {run.toolCallsCount} tool calls · {(run.durationMs / 1000).toFixed(1)}s · {run.reason}
@@ -249,7 +281,8 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

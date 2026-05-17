@@ -145,6 +145,10 @@ import {
   recordToolLineage,
   serializeAgentRunAccumulator,
 } from './orchestration/agentRunTelemetry';
+import {
+  listAgentEvalScenarios,
+  scoreAgentRun,
+} from './orchestration/agentEvals';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -1178,6 +1182,16 @@ function registerIPCHandlers(): void {
       });
     }
     return { success: !!run, run };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_EVAL_SCENARIOS, async () => {
+    return listAgentEvalScenarios();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_RUN_SCORE, async (_event, runId: string) => {
+    const run = db.getAgentRun(runId);
+    if (!run) return { success: false, error: 'Agent run not found' };
+    return { success: true, score: scoreAgentRun(run), run };
   });
 
   // ─── Diff ──────────────────────────────────────────────

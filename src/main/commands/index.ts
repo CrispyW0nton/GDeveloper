@@ -88,6 +88,12 @@ import {
   setActiveSpec,
 } from '../orchestration/specDriven';
 import {
+  formatAgentRunScoreMarkdown,
+  formatEvalScenariosMarkdown,
+  listAgentEvalScenarios,
+  scoreAgentRun,
+} from '../orchestration/agentEvals';
+import {
   getAgentNamespaceLocks,
   heartbeatAgentLock,
   releaseAgentNamespaces,
@@ -897,6 +903,53 @@ register({
     }
 
     return { success: false, message: 'Usage: /spec [list|active|use <id>|run|create <markdown>]' };
+  },
+});
+
+register({
+  name: 'evals',
+  description: 'List test scenarios or score an agent run. Usage: /evals [list|score [latest|run-id]]',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const trimmed = args.trim();
+    const [rawSubcommand, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+    const subcommand = (rawSubcommand || 'list').toLowerCase();
+    const db = getDatabase();
+
+    if (subcommand === 'list') {
+      const scenarios = listAgentEvalScenarios();
+      return {
+        success: true,
+        message: formatEvalScenariosMarkdown(scenarios),
+        data: { action: 'agent-eval-scenarios', scenarios },
+      };
+    }
+
+    if (subcommand === 'score') {
+      const requestedId = rest.join(' ').trim();
+      const run = requestedId && requestedId !== 'latest'
+        ? db.getAgentRun(requestedId)
+        : db.listAgentRuns(ctx.sessionId, 1)[0];
+
+      if (!run) {
+        return {
+          success: false,
+          message: requestedId && requestedId !== 'latest'
+            ? `No agent run found for \`${requestedId}\`.`
+            : 'No agent runs recorded for this session yet.',
+        };
+      }
+
+      const score = scoreAgentRun(run);
+      return {
+        success: true,
+        message: formatAgentRunScoreMarkdown(score),
+        data: { action: 'agent-run-score', score, runId: run.id },
+      };
+    }
+
+    return { success: false, message: 'Usage: /evals [list|score [latest|run-id]]' };
   },
 });
 
