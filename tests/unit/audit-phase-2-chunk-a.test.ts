@@ -49,7 +49,7 @@ describe('Audit Phase 2 / CHAT-DUP — dedup of final assistant insert', () => {
     //   1. Query the most recent assistant row
     //   2. Compare content byte-for-byte
     //   3. Only insert when content differs
-    const block = indexCode.substring(idx, idx + 2000);
+    const block = indexCode.substring(idx, idx + 4000);
     expect(block).toMatch(/db\.getLastMessage\(sessionId,\s*'assistant'\)/);
     expect(block).toMatch(/existingLast\.content\s*===\s*loopResult\.content/);
     expect(block).toMatch(/db\.insertMessage\(sessionId,\s*'assistant',\s*loopResult\.content\)/);
@@ -63,7 +63,7 @@ describe('Audit Phase 2 / CHAT-DUP — dedup of final assistant insert', () => {
     // must no longer appear in the final-save block.
     const marker = 'CHAT-DUP';
     const idx = indexCode.indexOf(marker);
-    const block = indexCode.substring(idx, idx + 2000);
+    const block = indexCode.substring(idx, idx + 4000);
     expect(block).not.toMatch(/db\.insertMessage\([^)]*loopResult\.toolCalls/);
   });
 });
@@ -360,7 +360,9 @@ describe('Audit Phase 2 / CACHE-DEAD — prompt caching wiring', () => {
   it('sendMessage and streamMessage attach cache_control markers when caching is enabled', () => {
     expect(providersCode).toMatch(/const\s+promptCachingEnabled\s*=\s*isPromptCachingEnabled\(\)/);
     expect(providersCode).toMatch(/cache_control:\s*\{\s*type:\s*'ephemeral'/);
-    expect(providersCode).toMatch(/body\.system\s*=\s*promptCachingEnabled/);
+    expect(providersCode).toContain('ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS = 4');
+    expect(providersCode).toMatch(/buildAnthropicPromptCacheParts\(allSystem,\s*tools,\s*promptCachingEnabled\)/);
+    expect(providersCode).toMatch(/body\.system\s*=\s*promptCacheParts\.system/);
   });
 
   it('sendMessage records cache metrics from Anthropic usage payload', () => {

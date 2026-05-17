@@ -255,6 +255,55 @@ let sessionUsage: SessionUsage = {
 // same mismatch on every subsequent request.
 let _lastDetectedTier: string | null = null;
 
+export const ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS = 4;
+
+export interface AnthropicToolBlock {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  cache_control?: { type: 'ephemeral' };
+}
+
+export function buildAnthropicPromptCacheParts(
+  system: string,
+  tools?: ToolDefinition[],
+  promptCachingEnabled = true,
+): {
+  system: string | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>;
+  tools?: AnthropicToolBlock[];
+  cacheControlBlocks: number;
+} {
+  const anthropicTools = tools?.map(t => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema,
+  }));
+
+  if (!promptCachingEnabled) {
+    return { system, tools: anthropicTools, cacheControlBlocks: 0 };
+  }
+
+  let remainingCacheBlocks = ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS;
+  const systemBlocks = system
+    ? [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }]
+    : system;
+  if (system) {
+    remainingCacheBlocks -= 1;
+  }
+
+  const cachedTools = anthropicTools?.map((tool, index) => (
+    index < remainingCacheBlocks
+      ? { ...tool, cache_control: { type: 'ephemeral' as const } }
+      : tool
+  ));
+
+  return {
+    system: systemBlocks,
+    tools: cachedTools,
+    cacheControlBlocks: (system ? 1 : 0) + Math.min(remainingCacheBlocks, anthropicTools?.length || 0),
+  };
+}
+
 /**
  * Called after every Anthropic API response. If the response's
  * `x-ratelimit-limit-input-tokens` header implies a different tier
@@ -508,12 +557,6 @@ export class ClaudeProvider implements ILLMProvider {
     systemPrompt?: string
   ): Promise<LLMResponse> {
     const promptCachingEnabled = isPromptCachingEnabled();
-    const anthropicTools = tools?.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema,
-      ...(promptCachingEnabled ? { cache_control: { type: 'ephemeral' as const } } : {}),
-    }));
 
     // Build proper Anthropic messages (system goes in system param, not in messages)
     const filteredMessages = messages
@@ -533,14 +576,13 @@ export class ClaudeProvider implements ILLMProvider {
     // Extract system messages and combine with systemPrompt
     const systemMessages = messages.filter(m => m.role === 'system').map(m => m.content);
     const allSystem = [systemPrompt, ...systemMessages].filter(Boolean).join('\n\n');
+    const promptCacheParts = buildAnthropicPromptCacheParts(allSystem, tools, promptCachingEnabled);
     if (allSystem) {
-      body.system = promptCachingEnabled
-        ? [{ type: 'text', text: allSystem, cache_control: { type: 'ephemeral' as const } }]
-        : allSystem;
+      body.system = promptCacheParts.system;
     }
 
-    if (anthropicTools?.length) {
-      body.tools = anthropicTools;
+    if (promptCacheParts.tools?.length) {
+      body.tools = promptCacheParts.tools;
     }
 
     const response = await fetch(`${this.baseUrl}/v1/messages`, {
@@ -609,12 +651,6 @@ export class ClaudeProvider implements ILLMProvider {
     systemPrompt?: string
   ): AsyncGenerator<LLMStreamChunk> {
     const promptCachingEnabled = isPromptCachingEnabled();
-    const anthropicTools = tools?.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema,
-      ...(promptCachingEnabled ? { cache_control: { type: 'ephemeral' as const } } : {}),
-    }));
 
     const filteredMessages = messages
       .filter(m => m.role !== 'system')
@@ -633,25 +669,29 @@ export class ClaudeProvider implements ILLMProvider {
 
     const systemMessages = messages.filter(m => m.role === 'system').map(m => m.content);
     const allSystem = [systemPrompt, ...systemMessages].filter(Boolean).join('\n\n');
+    const promptCacheParts = buildAnthropicPromptCacheParts(allSystem, tools, promptCachingEnabled);
     if (allSystem) {
-      body.system = promptCachingEnabled
-        ? [{ type: 'text', text: allSystem, cache_control: { type: 'ephemeral' as const } }]
-        : allSystem;
+      body.system = promptCacheParts.system;
     }
 
-    if (anthropicTools?.length) {
-      body.tools = anthropicTools;
+    if (promptCacheParts.tools?.length) {
+      body.tools = promptCacheParts.tools;
     }
 
     // Sprint 33: Diagnostic logging for outbound Anthropic payload
-    const systemStr = typeof body.system === 'string' ? body.system : '';
-    const toolNames = anthropicTools?.map((t: any) => t.name) || [];
+    const systemStr = typeof body.system === 'string'
+      ? body.system
+      : Array.isArray(body.system)
+        ? body.system.map((block: any) => block.text || '').join('\n\n')
+        : '';
+    const toolNames = promptCacheParts.tools?.map((t: any) => t.name) || [];
     console.log('[ClaudeProvider:stream] outbound-payload', JSON.stringify({
       model: body.model,
       systemLength: systemStr.length,
       systemPreview: systemStr.substring(0, 200),
       systemTail: systemStr.substring(Math.max(0, systemStr.length - 200)),
-      toolCount: anthropicTools?.length || 0,
+      toolCount: promptCacheParts.tools?.length || 0,
+      cacheControlBlocks: promptCacheParts.cacheControlBlocks,
       toolNames,
       toolChoice: body.tool_choice || undefined,
       messageCount: filteredMessages.length,
