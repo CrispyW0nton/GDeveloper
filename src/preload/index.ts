@@ -69,6 +69,8 @@ const electronAPI = {
 
   // ─── Activity ──────────────────────────────────────
   listActivity: (sessionId?: string) => ipcRenderer.invoke('activity:list', sessionId),
+  listAgentRuns: (sessionId?: string, limit?: number) => ipcRenderer.invoke('agent-run:list', sessionId, limit),
+  setAgentRunFeedback: (runId: string, feedback: string, note?: string) => ipcRenderer.invoke('agent-run:feedback', runId, feedback, note),
 
   // ─── Diff ──────────────────────────────────────────
   getDiffs: (sessionId?: string) => ipcRenderer.invoke('diff:get', sessionId),

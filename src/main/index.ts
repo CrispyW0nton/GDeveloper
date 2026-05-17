@@ -139,6 +139,12 @@ import {
   listSpecs,
   setActiveSpec,
 } from './orchestration/specDriven';
+import {
+  createAgentRunAccumulator,
+  estimatePromptTokens,
+  recordToolLineage,
+  serializeAgentRunAccumulator,
+} from './orchestration/agentRunTelemetry';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -537,6 +543,9 @@ function registerIPCHandlers(): void {
       db.logActivity(sessionId, 'task_updated', `Task created: ${taskTitle}`, persistedUserMessage.substring(0, 200), { taskId, status: 'TASK_CREATED' });
     }
 
+    let activeAgentRunId: string | null = null;
+    let activeAgentRunStartedMs = Date.now();
+
     try {
       // Build conversation context from DB
       const history = db.getMessages(sessionId);
@@ -587,6 +596,47 @@ function registerIPCHandlers(): void {
         sessionId,
         workspacePath: wsPath || undefined,
         currentUserMessage: message,
+      });
+      const activeSpec = getActiveSpec(wsPath);
+      const activeSpecialistMode = getActiveSpecialistMode(wsPath);
+      const runStartedAt = new Date();
+      const runStartedMs = Date.now();
+      const runLineage = createAgentRunAccumulator();
+      const runContextSources = [
+        'chat-history',
+        'execution-mode',
+        'specialist-mode',
+        'project-context',
+        'repo-map',
+        'code-retrieval',
+        'diagnostics',
+        ...(activeSpec ? ['active-spec'] : []),
+        ...(mcpTools.length > 0 ? ['mcp-tools'] : []),
+      ];
+      const agentRunId = db.createAgentRun({
+        sessionId,
+        workspacePath: wsPath || '',
+        provider: provider.name,
+        model: providerRegistry.selectedModel,
+        executionMode: mode,
+        specialistMode: activeSpecialistMode.id,
+        specId: activeSpec?.id || null,
+        specTitle: activeSpec?.title || '',
+        specPath: activeSpec?.relativePath || '',
+        userPrompt: persistedUserMessage,
+        status: 'running',
+        contextSources: runContextSources,
+        tokenEstimate: estimatePromptTokens(enhancedPrompt, messages, allTools),
+        startedAt: runStartedAt.toISOString(),
+      });
+      activeAgentRunId = agentRunId;
+      activeAgentRunStartedMs = runStartedMs;
+      db.logActivity(sessionId, 'agent_run_started', `Agent run started (${provider.name}/${providerRegistry.selectedModel})`, persistedUserMessage.substring(0, 160), {
+        runId: agentRunId,
+        workspacePath: wsPath || '',
+        mode,
+        specialistMode: activeSpecialistMode.id,
+        specId: activeSpec?.id || null,
       });
 
       // Sprint 29: Debug log of tool names for P0-A terminal tool wiring verification
@@ -679,6 +729,7 @@ function registerIPCHandlers(): void {
 
           let toolResultContent: string;
           let isError = false;
+          let toolSource: 'local' | 'mcp' | 'unknown' = 'unknown';
 
           // Plan mode enforcement — Sprint 30: use canonical WRITE_ACCESS_TOOLS from tools/index.ts
           if (mode === 'plan' && WRITE_ACCESS_TOOLS.has(tc.name)) {
@@ -698,6 +749,7 @@ function registerIPCHandlers(): void {
             });
 
             if (isLocalTool) {
+              toolSource = 'local';
               try {
                 const localResult = await executeLocalTool(tc.name, tc.input || {});
                 toolResultContent = localResult.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
@@ -725,6 +777,7 @@ function registerIPCHandlers(): void {
               // MCP tool
               const toolMeta = mcpTools.find(t => t.name === tc.name);
               if (toolMeta) {
+                toolSource = 'mcp';
                 try {
                   emitSandboxEvent({ type: 'mcp_call', tool: tc.name, summary: `MCP: ${tc.name}`, status: 'running' });
                   const route = selectAllowedMCPToolRoute(tc.name, toolMeta.serverId);
@@ -772,6 +825,8 @@ function registerIPCHandlers(): void {
               }
             }
           }
+
+          recordToolLineage(runLineage, tc.name, tc.input || {}, isError, toolSource);
 
           db.logActivity(sessionId, isError ? 'tool_error' : 'tool_result', `Tool ${isError ? 'error' : 'result'}: ${tc.name}`, toolResultContent.substring(0, 200), {
             toolName: tc.name, toolCallId: tc.id, success: !isError,
@@ -933,6 +988,27 @@ function registerIPCHandlers(): void {
         }, outputGuardrail.blocked ? 'error' : 'success');
         loopResult.content = outputGuardrail.sanitizedText;
       }
+      const serializedLineage = serializeAgentRunAccumulator(runLineage);
+      db.updateAgentRun(agentRunId, {
+        status: loopResult.reason === 'error' ? 'error' : 'completed',
+        reason: loopResult.reason,
+        turns: loopResult.turns,
+        toolCallsCount: loopResult.toolCalls.length,
+        tools: serializedLineage.tools,
+        filesTouched: serializedLineage.filesTouched,
+        testsRun: serializedLineage.testsRun,
+        verification: {
+          outputGuardrails: outputGuardrail.findings.map(f => ({
+            category: f.category,
+            severity: f.severity,
+            title: f.title,
+            blocksSend: f.blocksSend,
+          })),
+        },
+        contextSources: runContextSources,
+        durationMs: Date.now() - runStartedMs,
+        completedAt: new Date().toISOString(),
+      });
       const existingLast = db.getLastMessage(sessionId, 'assistant');
       let msgId: string;
       if (existingLast && existingLast.content === loopResult.content) {
@@ -949,7 +1025,9 @@ function registerIPCHandlers(): void {
       db.logActivity(sessionId, 'chat_response', `AI responded (${loopResult.content.length} chars, ${loopResult.turns} turns, ${loopResult.toolCalls.length} tool calls, reason: ${loopResult.reason})`, loopResult.content.substring(0, 150), {
         sessionId, provider: provider.name,
         contentLength: loopResult.content.length, toolCalls: loopResult.toolCalls.length,
-        turns: loopResult.turns, reason: loopResult.reason,
+        turns: loopResult.turns, reason: loopResult.reason, runId: agentRunId,
+        filesTouched: serializedLineage.filesTouched,
+        testsRun: serializedLineage.testsRun,
       });
 
       return {
@@ -961,11 +1039,20 @@ function registerIPCHandlers(): void {
         completionResult: loopResult.completionResult,
         followupQuestion: loopResult.followupQuestion,
         exitReason: loopResult.reason,
+        agentRunId,
       };
     } catch (err) {
       const errMsg = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+      if (activeAgentRunId) {
+        db.updateAgentRun(activeAgentRunId, {
+          status: 'error',
+          reason: errMsg,
+          durationMs: Date.now() - activeAgentRunStartedMs,
+          completedAt: new Date().toISOString(),
+        });
+      }
       db.insertMessage(sessionId, 'assistant', errMsg);
-      db.logActivity(sessionId, 'chat_error', 'Chat error', errMsg, { sessionId, provider: provider.name }, 'error');
+      db.logActivity(sessionId, 'chat_error', 'Chat error', errMsg, { sessionId, provider: provider.name, runId: activeAgentRunId }, 'error');
 
       if (taskId) {
         db.updateTaskStatus(taskId, 'BLOCKED', errMsg);
@@ -1073,6 +1160,24 @@ function registerIPCHandlers(): void {
       ).slice(0, 200);
     }
     return db.getActivity();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_RUN_LIST, async (_event, sessionId?: string, limit?: number) => {
+    return db.listAgentRuns(sessionId, limit || 50);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_RUN_FEEDBACK, async (_event, runId: string, feedback: string, note?: string) => {
+    const normalized = ['accepted', 'edited', 'reverted', 'verified', 'failed', 'up', 'down'].includes(feedback)
+      ? feedback
+      : '';
+    const run = db.setAgentRunFeedback(runId, normalized, note || '');
+    if (run) {
+      db.logActivity(run.session_id || 'system', 'agent_run_feedback', `Agent run feedback: ${normalized || 'cleared'}`, note || '', {
+        runId,
+        feedback: normalized,
+      });
+    }
+    return { success: !!run, run };
   });
 
   // ─── Diff ──────────────────────────────────────────────

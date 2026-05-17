@@ -26,6 +26,28 @@ interface ActivityItem {
   timestamp: string;
 }
 
+interface AgentRunItem {
+  id: string;
+  session_id: string;
+  provider: string;
+  model: string;
+  execution_mode: string;
+  specialist_mode: string;
+  spec_title: string;
+  status: string;
+  reason: string;
+  turns: number;
+  toolCallsCount: number;
+  tools: Array<{ name: string; count: number; errors: number; source?: string }>;
+  filesTouched: string[];
+  testsRun: string[];
+  contextSources: string[];
+  durationMs: number;
+  feedback: string;
+  feedbackNote: string;
+  startedAt: string;
+}
+
 const TYPE_META: Record<string, { color: string; label: string; icon: string }> = {
   api_key_set:       { color: 'text-yellow-400',         label: 'API Key',      icon: '🔑' },
   github_connect:    { color: 'text-blue-400',           label: 'GitHub',       icon: '🔗' },
@@ -48,6 +70,8 @@ const TYPE_META: Record<string, { color: string; label: string; icon: string }> 
   tool_call:         { color: 'text-blue-400',           label: 'Tool Call',    icon: '🔧' },
   tool_result:       { color: 'text-matrix-green',       label: 'Tool Done',    icon: '✓' },
   tool_error:        { color: 'text-red-400',            label: 'Tool Error',   icon: '✕' },
+  agent_run_started: { color: 'text-blue-400',           label: 'Agent Run',    icon: '▶' },
+  agent_run_feedback:{ color: 'text-matrix-green',       label: 'Run Feedback', icon: '★' },
   verification_run:  { color: 'text-blue-400',           label: 'Verification', icon: '🔍' },
   worktree_add:      { color: 'text-blue-400',           label: 'Worktree',     icon: '🌳' },
   worktree_remove:   { color: 'text-yellow-400',         label: 'Worktree',     icon: '🌳' },
@@ -78,16 +102,39 @@ function relativeTime(timestamp: string): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
+function LineageList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div>
+      <div className="text-[8px] uppercase tracking-wider text-matrix-text-muted/30 mb-1">{title}</div>
+      {items.length === 0 ? (
+        <div className="text-matrix-text-muted/25">none</div>
+      ) : (
+        <div className="space-y-0.5">
+          {items.slice(0, 4).map((item, index) => (
+            <div key={`${title}-${index}`} className="truncate text-matrix-text-muted/50" title={item}>{item}</div>
+          ))}
+          {items.length > 4 && <div className="text-matrix-text-muted/25">+{items.length - 4} more</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
   const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const [agentRuns, setAgentRuns] = useState<AgentRunItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
 
   const loadActivity = async () => {
     if (!api) { setLoading(false); return; }
     try {
-      const result = await api.listActivity(sessionId);
+      const [result, runs] = await Promise.all([
+        api.listActivity(sessionId),
+        api.listAgentRuns ? api.listAgentRuns(sessionId, 20) : Promise.resolve([]),
+      ]);
       setActivities(result || []);
+      setAgentRuns(runs || []);
     } catch (err) {
       console.error('Failed to load activity:', err);
     }
@@ -108,6 +155,12 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
   const chatCount = activities.filter(a => a.type === 'chat_send').length;
   const toolCount = activities.filter(a => a.type === 'tool_execute' || a.type === 'tool_call').length;
   const errorCount = activities.filter(a => a.status === 'error' || a.type.includes('error')).length;
+
+  const setRunFeedback = async (runId: string, feedback: string) => {
+    if (!api?.setAgentRunFeedback) return;
+    await api.setAgentRunFeedback(runId, feedback);
+    await loadActivity();
+  };
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -141,6 +194,64 @@ export default function ActivityLog({ sessionId, repo }: ActivityLogProps) {
             <div className={`text-xl font-bold ${errorCount > 0 ? 'text-red-400' : 'text-matrix-green'}`}>{errorCount}</div>
             <div className="text-[10px] text-matrix-text-muted/50 mt-0.5">Errors</div>
           </div>
+        </div>
+
+        {/* Agent Run History */}
+        <div className="glass-panel p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-bold text-matrix-green glow-text-dim">Agent Run History</h2>
+              <p className="text-[10px] text-matrix-text-muted/40">Run context, lineage, verification hints, and feedback</p>
+            </div>
+            <div className="text-lg text-matrix-green font-bold">{agentRuns.length}</div>
+          </div>
+          {agentRuns.length === 0 ? (
+            <p className="text-xs text-matrix-text-muted/35">No agent runs recorded yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {agentRuns.slice(0, 5).map(run => (
+                <div key={run.id} className="border border-matrix-border/40 rounded p-3 bg-matrix-bg-elevated/40">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-matrix-green font-bold">{run.provider}/{run.model}</span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded border border-matrix-border/40 text-matrix-text-muted/50">{run.execution_mode}</span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded border border-matrix-border/40 text-matrix-text-muted/50">{run.specialist_mode}</span>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded border ${
+                          run.status === 'completed' ? 'border-matrix-green/25 text-matrix-green/60' : 'border-red-400/25 text-red-400/60'
+                        }`}>{run.status}</span>
+                      </div>
+                      <p className="text-[10px] text-matrix-text-muted/45 mt-1 truncate">
+                        {run.spec_title ? `Spec: ${run.spec_title}` : 'No active spec'} · {run.turns} turns · {run.toolCallsCount} tool calls · {(run.durationMs / 1000).toFixed(1)}s · {run.reason}
+                      </p>
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      {['accepted', 'edited', 'failed'].map(label => (
+                        <button
+                          key={label}
+                          onClick={() => setRunFeedback(run.id, label)}
+                          className={`text-[9px] px-2 py-1 rounded border ${
+                            run.feedback === label
+                              ? 'border-matrix-green/40 text-matrix-green bg-matrix-green/10'
+                              : 'border-matrix-border/30 text-matrix-text-muted/45 hover:text-matrix-text-dim'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {(run.filesTouched.length > 0 || run.testsRun.length > 0 || run.tools.length > 0) && (
+                    <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
+                      <LineageList title="Tools" items={run.tools.map(t => `${t.name} x${t.count}${t.errors ? ` (${t.errors} err)` : ''}`)} />
+                      <LineageList title="Files" items={run.filesTouched} />
+                      <LineageList title="Tests" items={run.testsRun} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Filter */}

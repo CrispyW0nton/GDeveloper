@@ -125,11 +125,42 @@ CREATE TABLE IF NOT EXISTS workspace_diagnostics_snapshots (
   generated_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  workspace_path TEXT DEFAULT '',
+  provider TEXT DEFAULT '',
+  model TEXT DEFAULT '',
+  execution_mode TEXT DEFAULT '',
+  specialist_mode TEXT DEFAULT '',
+  spec_id TEXT,
+  spec_title TEXT DEFAULT '',
+  spec_path TEXT DEFAULT '',
+  user_prompt TEXT DEFAULT '',
+  status TEXT DEFAULT 'running',
+  reason TEXT DEFAULT '',
+  turns INTEGER DEFAULT 0,
+  tool_calls_count INTEGER DEFAULT 0,
+  tools TEXT DEFAULT '[]',
+  files_touched TEXT DEFAULT '[]',
+  tests_run TEXT DEFAULT '[]',
+  verification TEXT DEFAULT '{}',
+  context_sources TEXT DEFAULT '[]',
+  token_estimate INTEGER DEFAULT 0,
+  duration_ms INTEGER DEFAULT 0,
+  feedback TEXT DEFAULT '',
+  feedback_note TEXT DEFAULT '',
+  started_at TEXT DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
 CREATE INDEX IF NOT EXISTS idx_activity_session ON activity_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_diff_session ON diff_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_project_context_retrievals_session ON project_context_retrievals(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at);
 `;
 
 export class DatabaseManager {
@@ -296,6 +327,114 @@ export class DatabaseManager {
     return this.db.prepare(
       `SELECT * FROM activity_events ORDER BY timestamp DESC LIMIT 100`
     ).all().map((r: any) => ({ ...r, metadata: JSON.parse(r.metadata || '{}') }));
+  }
+
+  // ─── Agent Run Telemetry ───────────────────────────
+  createAgentRun(input: any): string {
+    const id = input.id || uuid();
+    this.db.prepare(
+      `INSERT INTO agent_runs (
+        id, session_id, workspace_path, provider, model, execution_mode, specialist_mode,
+        spec_id, spec_title, spec_path, user_prompt, status, reason, turns,
+        tool_calls_count, tools, files_touched, tests_run, verification,
+        context_sources, token_estimate, duration_ms, feedback, feedback_note,
+        started_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      id,
+      input.sessionId,
+      input.workspacePath || '',
+      input.provider || '',
+      input.model || '',
+      input.executionMode || '',
+      input.specialistMode || '',
+      input.specId || null,
+      input.specTitle || '',
+      input.specPath || '',
+      input.userPrompt || '',
+      input.status || 'running',
+      input.reason || '',
+      input.turns || 0,
+      input.toolCallsCount || 0,
+      JSON.stringify(input.tools || []),
+      JSON.stringify(input.filesTouched || []),
+      JSON.stringify(input.testsRun || []),
+      JSON.stringify(input.verification || {}),
+      JSON.stringify(input.contextSources || []),
+      input.tokenEstimate || 0,
+      input.durationMs || 0,
+      input.feedback || '',
+      input.feedbackNote || '',
+      input.startedAt || new Date().toISOString(),
+      input.completedAt || null,
+    );
+    return id;
+  }
+
+  updateAgentRun(id: string, patch: any): void {
+    const existing = this.getAgentRun(id);
+    if (!existing) return;
+    const next = { ...existing, ...patch };
+    this.db.prepare(
+      `UPDATE agent_runs SET
+        status=?, reason=?, turns=?, tool_calls_count=?, tools=?,
+        files_touched=?, tests_run=?, verification=?, context_sources=?,
+        token_estimate=?, duration_ms=?, feedback=?, feedback_note=?, completed_at=?
+       WHERE id=?`
+    ).run(
+      next.status || 'running',
+      next.reason || '',
+      next.turns || 0,
+      next.toolCallsCount ?? next.tool_calls_count ?? 0,
+      JSON.stringify(next.tools || []),
+      JSON.stringify(next.filesTouched || next.files_touched || []),
+      JSON.stringify(next.testsRun || next.tests_run || []),
+      JSON.stringify(next.verification || {}),
+      JSON.stringify(next.contextSources || next.context_sources || []),
+      next.tokenEstimate ?? next.token_estimate ?? 0,
+      next.durationMs ?? next.duration_ms ?? 0,
+      next.feedback || '',
+      next.feedbackNote || next.feedback_note || '',
+      next.completedAt || next.completed_at || null,
+      id,
+    );
+  }
+
+  getAgentRun(id: string): any | null {
+    const row = this.db.prepare(`SELECT * FROM agent_runs WHERE id = ?`).get(id) as any;
+    return row ? this.parseAgentRun(row) : null;
+  }
+
+  listAgentRuns(sessionId?: string, limit = 50): any[] {
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit || 50)));
+    const rows = sessionId
+      ? this.db.prepare(`SELECT * FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT ?`).all(sessionId, boundedLimit) as any[]
+      : this.db.prepare(`SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT ?`).all(boundedLimit) as any[];
+    return rows.map(row => this.parseAgentRun(row));
+  }
+
+  setAgentRunFeedback(id: string, feedback: string, note = ''): any | null {
+    this.db.prepare(
+      `UPDATE agent_runs SET feedback = ?, feedback_note = ? WHERE id = ?`
+    ).run(feedback, note, id);
+    return this.getAgentRun(id);
+  }
+
+  private parseAgentRun(row: any): any {
+    return {
+      ...row,
+      toolCallsCount: row.tool_calls_count,
+      filesTouched: JSON.parse(row.files_touched || '[]'),
+      testsRun: JSON.parse(row.tests_run || '[]'),
+      contextSources: JSON.parse(row.context_sources || '[]'),
+      tokenEstimate: row.token_estimate,
+      durationMs: row.duration_ms,
+      feedbackNote: row.feedback_note,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      tools: JSON.parse(row.tools || '[]'),
+      verification: JSON.parse(row.verification || '{}'),
+    };
   }
 
   // ─── Diff Records ──────────────────────────────────
