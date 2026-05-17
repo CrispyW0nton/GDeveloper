@@ -67,6 +67,12 @@ import {
   getHandoffInfo, getTaskWorktrees, shouldRecommendWorktree,
 } from './worktree/taskIsolation';
 import { getAgentBoardSnapshot } from './worktree/agentBoard';
+import {
+  getAgentNamespaceLocks,
+  heartbeatAgentLock,
+  releaseAgentNamespaces,
+  reserveAgentNamespaces,
+} from './worktree/agentLocks';
 import { buildFileTree, readFileSafe, writeFileSafe, checkFileWritable } from './fs';
 // Sprint 28: autoContinue engine removed — agent loop driven by stop_reason
 import { runAgentLoop } from './orchestration/agentLoop';
@@ -2550,6 +2556,22 @@ function registerIPCHandlers(): void {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to load agent board' };
     }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_LOCK_LIST, async () => {
+    return getAgentNamespaceLocks();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_LOCK_RESERVE, async (_event, taskId: string, namespaces: string[], ownerSessionId?: string) => {
+    return reserveAgentNamespaces(taskId, ownerSessionId || 'system', Array.isArray(namespaces) ? namespaces : []);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_LOCK_RELEASE, async (_event, taskId: string) => {
+    return releaseAgentNamespaces(taskId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_LOCK_HEARTBEAT, async (_event, taskId: string) => {
+    return heartbeatAgentLock(taskId);
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -1,4 +1,5 @@
 import { getTaskWorktrees, type TaskWorktree } from './taskIsolation';
+import { getAgentNamespaceConflicts, getAgentNamespaceLocks, type AgentNamespaceConflict } from './agentLocks';
 import { listWorktrees, type WorktreeInfo } from '../git/worktree';
 
 export type AgentBoardColumnId = 'active' | 'completed' | 'abandoned';
@@ -16,6 +17,9 @@ export interface AgentBoardCard {
   dirty: boolean;
   missing: boolean;
   head: string | null;
+  namespaceLocks: string[];
+  namespaceConflicts: AgentNamespaceConflict[];
+  heartbeatAt: string | null;
 }
 
 export interface AgentBoardColumn {
@@ -60,6 +64,7 @@ export function getAgentBoardSnapshot(repoPath: string): AgentBoardSnapshot {
 
 function toBoardCard(task: TaskWorktree, worktrees: WorktreeInfo[]): AgentBoardCard {
   const worktree = worktrees.find(wt => wt.path === task.worktreePath);
+  const lock = getAgentNamespaceLocks().find(item => item.taskId === task.id);
   return {
     id: task.id,
     title: task.taskDescription,
@@ -73,6 +78,9 @@ function toBoardCard(task: TaskWorktree, worktrees: WorktreeInfo[]): AgentBoardC
     dirty: !!worktree?.dirty,
     missing: worktree ? !!worktree.missing : true,
     head: worktree?.head || null,
+    namespaceLocks: lock?.namespaces || [],
+    namespaceConflicts: lock ? getAgentNamespaceConflicts(task.id, lock.namespaces) : [],
+    heartbeatAt: lock?.heartbeatAt || null,
   };
 }
 

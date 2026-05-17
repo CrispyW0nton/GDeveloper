@@ -223,6 +223,10 @@ const electronAPI = {
   worktreeTaskList: () => ipcRenderer.invoke('worktree:task-list'),
   worktreeRecommend: (taskDescription: string) => ipcRenderer.invoke('worktree:recommend', taskDescription),
   getAgentBoard: () => ipcRenderer.invoke('agent-board:get'),
+  listAgentLocks: () => ipcRenderer.invoke('agent-lock:list'),
+  reserveAgentLock: (taskId: string, namespaces: string[], ownerSessionId?: string) => ipcRenderer.invoke('agent-lock:reserve', taskId, namespaces, ownerSessionId),
+  releaseAgentLock: (taskId: string) => ipcRenderer.invoke('agent-lock:release', taskId),
+  heartbeatAgentLock: (taskId: string) => ipcRenderer.invoke('agent-lock:heartbeat', taskId),
 
   // ─── Sprint 19: File Tree ─────────────────────────
   getFileTree: (maxDepth?: number) => ipcRenderer.invoke('filetree:get', maxDepth),

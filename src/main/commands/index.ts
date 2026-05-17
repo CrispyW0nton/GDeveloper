@@ -71,6 +71,12 @@ import {
   formatAgentDelegationPlan,
   parseAgentMention,
 } from '../orchestration/agentDelegation';
+import {
+  getAgentNamespaceLocks,
+  heartbeatAgentLock,
+  releaseAgentNamespaces,
+  reserveAgentNamespaces,
+} from '../worktree/agentLocks';
 
 // ─── Interfaces ───
 
@@ -1188,6 +1194,68 @@ register({
   description: 'Get handoff info for a worktree. Usage: /worktree-handoff [worktree-path] [target-branch]',
   category: 'workflow',
   execute: worktreeHandoff,
+});
+
+register({
+  name: 'agent-lock',
+  description: 'Reserve file namespaces for an agent task. Usage: /agent-lock <task-id> <path> [more paths...]',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const [taskId, ...namespaces] = args.trim().split(/\s+/).filter(Boolean);
+    if (!taskId || namespaces.length === 0) {
+      return { success: false, message: 'Usage: /agent-lock <task-id> <path> [more paths...]' };
+    }
+    const result = reserveAgentNamespaces(taskId, ctx.sessionId, namespaces);
+    getDatabase().logActivity(ctx.sessionId, 'agent_namespace_lock', result.success ? `Reserved namespaces for ${taskId}` : `Namespace conflict for ${taskId}`, result.message, {
+      taskId,
+      namespaces,
+      conflicts: result.conflicts || [],
+    });
+    return {
+      success: result.success,
+      message: result.success
+        ? `**Namespace lock reserved:** ${taskId}\n${result.lock?.namespaces.map(ns => `- \`${ns}\``).join('\n')}`
+        : `**Namespace lock blocked:** ${result.message}\n${(result.conflicts || []).map(c => `- ${c.taskId}: ${c.namespaces.join(', ')}`).join('\n')}`,
+      data: { action: 'agent-lock', result },
+    };
+  },
+});
+
+register({
+  name: 'agent-unlock',
+  description: 'Release an agent namespace lock. Usage: /agent-unlock <task-id>',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const taskId = args.trim();
+    if (!taskId) return { success: false, message: 'Usage: /agent-unlock <task-id>' };
+    const result = releaseAgentNamespaces(taskId);
+    getDatabase().logActivity(ctx.sessionId, 'agent_namespace_unlock', `Released namespaces for ${taskId}`, result.message, { taskId });
+    return { success: result.success, message: result.message, data: { action: 'agent-unlock', result } };
+  },
+});
+
+register({
+  name: 'agent-heartbeat',
+  description: 'Refresh or list agent namespace lock heartbeats. Usage: /agent-heartbeat [task-id]',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, _ctx: WorkspaceContext): Promise<CommandResult> {
+    const taskId = args.trim();
+    if (taskId) {
+      const result = heartbeatAgentLock(taskId);
+      return { success: result.success, message: result.message, data: { action: 'agent-heartbeat', result } };
+    }
+    const active = getAgentNamespaceLocks();
+    return {
+      success: true,
+      message: active.length === 0
+        ? 'No active agent namespace locks.'
+        : ['**Active agent namespace locks:**', ...active.map(lock => `- \`${lock.taskId}\` ${lock.namespaces.join(', ')} heartbeat ${lock.heartbeatAt}`)].join('\n'),
+      data: { action: 'agent-heartbeat-list', locks: active },
+    };
+  },
 });
 
 // ─── Sprint 27: Compare Agent Commands ───

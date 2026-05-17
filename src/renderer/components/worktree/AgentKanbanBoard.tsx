@@ -13,6 +13,9 @@ export interface AgentBoardCard {
   dirty: boolean;
   missing: boolean;
   head: string | null;
+  namespaceLocks: string[];
+  namespaceConflicts: Array<{ lockId: string; taskId: string; namespaces: string[] }>;
+  heartbeatAt: string | null;
 }
 
 export interface AgentBoardColumn {
@@ -33,6 +36,8 @@ interface AgentKanbanBoardProps {
   onComplete: (taskId: string) => void;
   onAbandon: (taskId: string) => void;
   onHandoff: (worktreePath: string) => void;
+  onReleaseLock: (taskId: string) => void;
+  onHeartbeat: (taskId: string) => void;
 }
 
 const COLUMN_ACCENTS: Record<AgentBoardColumn['id'], string> = {
@@ -41,7 +46,7 @@ const COLUMN_ACCENTS: Record<AgentBoardColumn['id'], string> = {
   abandoned: 'rgba(255,80,80,0.2)',
 };
 
-export default function AgentKanbanBoard({ board, onOpen, onComplete, onAbandon, onHandoff }: AgentKanbanBoardProps) {
+export default function AgentKanbanBoard({ board, onOpen, onComplete, onAbandon, onHandoff, onReleaseLock, onHeartbeat }: AgentKanbanBoardProps) {
   if (!board || board.columns.every(column => column.cards.length === 0)) {
     return (
       <div className="p-4 rounded-lg text-xs" style={{ background: 'rgba(0,255,65,0.025)', border: '1px solid var(--border, #003300)' }}>
@@ -74,7 +79,24 @@ export default function AgentKanbanBoard({ board, onOpen, onComplete, onAbandon,
                     <span className="rounded border border-matrix-border/40 px-1.5 py-0.5 opacity-70">{card.lifecycle}</span>
                     {card.dirty && <span className="rounded border border-yellow-400/30 px-1.5 py-0.5 text-yellow-400/70">dirty</span>}
                     {card.missing && <span className="rounded border border-red-400/30 px-1.5 py-0.5 text-red-400/70">missing</span>}
+                    {card.namespaceLocks.length > 0 && <span className="rounded border border-cyan-400/30 px-1.5 py-0.5 text-cyan-300/70">locked {card.namespaceLocks.length}</span>}
+                    {card.namespaceConflicts.length > 0 && <span className="rounded border border-red-400/40 px-1.5 py-0.5 text-red-300/80">conflict {card.namespaceConflicts.length}</span>}
                   </div>
+                  {card.namespaceLocks.length > 0 && (
+                    <div className="mt-2 rounded border border-cyan-400/10 bg-cyan-400/5 p-1.5">
+                      <div className="truncate font-mono text-[9px] text-cyan-200/55" title={card.namespaceLocks.join(', ')}>
+                        {card.namespaceLocks.join(', ')}
+                      </div>
+                      {card.heartbeatAt && (
+                        <div className="mt-1 text-[9px] opacity-30">Heartbeat {new Date(card.heartbeatAt).toLocaleTimeString()}</div>
+                      )}
+                    </div>
+                  )}
+                  {card.namespaceConflicts.length > 0 && (
+                    <div className="mt-2 rounded border border-red-400/15 bg-red-400/5 p-1.5 text-[9px] text-red-200/65">
+                      {card.namespaceConflicts.map(conflict => `${conflict.taskId}: ${conflict.namespaces.join(', ')}`).join('; ')}
+                    </div>
+                  )}
                   <div className="mt-2 flex flex-wrap gap-1">
                     {!card.missing && (
                       <button onClick={() => onOpen(card.worktreePath)} className="px-2 py-1 rounded opacity-70 hover:opacity-100" style={{ border: '1px solid var(--border, #003300)' }}>Open</button>
@@ -84,6 +106,12 @@ export default function AgentKanbanBoard({ board, onOpen, onComplete, onAbandon,
                     )}
                     {card.status !== 'abandoned' && (
                       <button onClick={() => onHandoff(card.worktreePath)} className="px-2 py-1 rounded opacity-70 hover:opacity-100" style={{ border: '1px solid rgba(0,255,65,0.25)' }}>Handoff</button>
+                    )}
+                    {card.namespaceLocks.length > 0 && (
+                      <>
+                        <button onClick={() => onHeartbeat(card.id)} className="px-2 py-1 rounded opacity-70 hover:opacity-100" style={{ border: '1px solid rgba(80,220,255,0.25)' }}>Beat</button>
+                        <button onClick={() => onReleaseLock(card.id)} className="px-2 py-1 rounded opacity-70 hover:opacity-100" style={{ border: '1px solid rgba(80,220,255,0.25)' }}>Unlock</button>
+                      </>
                     )}
                     {card.status === 'active' && (
                       <button onClick={() => onAbandon(card.id)} className="px-2 py-1 rounded text-red-400/70 opacity-70 hover:opacity-100" style={{ border: '1px solid rgba(255,80,80,0.25)' }}>Abandon</button>

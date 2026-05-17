@@ -202,6 +202,10 @@ export const IPC_CHANNELS = {
   WORKTREE_TASK_LIST: 'worktree:task-list',
   WORKTREE_RECOMMEND: 'worktree:recommend',
   AGENT_BOARD_GET: 'agent-board:get',
+  AGENT_LOCK_LIST: 'agent-lock:list',
+  AGENT_LOCK_RESERVE: 'agent-lock:reserve',
+  AGENT_LOCK_RELEASE: 'agent-lock:release',
+  AGENT_LOCK_HEARTBEAT: 'agent-lock:heartbeat',
 
   // ─── Sprint 19: File Tree ───
   FILE_TREE_GET: 'filetree:get',

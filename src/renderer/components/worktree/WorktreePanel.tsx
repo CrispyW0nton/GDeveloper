@@ -238,6 +238,26 @@ export default function WorktreePanel({ workspacePath, sessionId, onSwitchWorktr
     }
   };
 
+  const handleReleaseAgentLock = async (taskId: string) => {
+    try {
+      const result = await api.releaseAgentLock(taskId);
+      showMessage(result.success ? (result.message || 'Namespace lock released') : (result.message || 'Unlock failed'));
+      refresh();
+    } catch (err) {
+      showMessage(err instanceof Error ? err.message : 'Unlock failed');
+    }
+  };
+
+  const handleHeartbeatAgentLock = async (taskId: string) => {
+    try {
+      const result = await api.heartbeatAgentLock(taskId);
+      showMessage(result.success ? (result.message || 'Namespace heartbeat refreshed') : (result.message || 'Heartbeat failed'));
+      refresh();
+    } catch (err) {
+      showMessage(err instanceof Error ? err.message : 'Heartbeat failed');
+    }
+  };
+
   const linkedCount = worktrees.filter(wt => wt.isLinked).length;
 
   // ─── Render ───
@@ -449,6 +469,8 @@ export default function WorktreePanel({ workspacePath, sessionId, onSwitchWorktr
         onComplete={handleCompleteTask}
         onAbandon={handleAbandonTask}
         onHandoff={handleHandoffTask}
+        onReleaseLock={handleReleaseAgentLock}
+        onHeartbeat={handleHeartbeatAgentLock}
       />
 
       {/* Empty State (Sprint 18) */}
