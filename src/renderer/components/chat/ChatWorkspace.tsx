@@ -199,6 +199,74 @@ function IntentInspectorCard({ inspection, loading }: { inspection: IntentInspec
   );
 }
 
+function needsPlanAgreement(inspection: IntentInspection | null, executionMode: ExecutionMode): boolean {
+  if (!inspection || executionMode !== 'build') return false;
+  if (inspection.riskLevel === 'high') return true;
+  return inspection.riskLevel === 'medium' && inspection.likelyActions.includes('change files');
+}
+
+function planAgreementKey(prompt: string, attachmentCount: number): string {
+  return `${prompt.trim()}::attachments=${attachmentCount}`;
+}
+
+function PlanAgreementCard({
+  inspection,
+  onApprove,
+  onPlan,
+  onEdit,
+}: {
+  inspection: IntentInspection;
+  onApprove: () => void;
+  onPlan: () => void;
+  onEdit: () => void;
+}) {
+  return (
+    <div className="mb-2 rounded border border-yellow-400/35 bg-yellow-400/10 p-3 text-[11px] animate-fadeIn">
+      <div className="flex items-center gap-2">
+        <span className="font-mono font-bold text-yellow-200">Plan Agreement</span>
+        <span className="ml-auto rounded border border-yellow-400/35 px-1.5 py-0.5 text-[9px] uppercase text-yellow-200">
+          {inspection.riskLevel} risk
+        </span>
+      </div>
+      <p className="mt-1 text-yellow-100/80">{inspection.summary}</p>
+      <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+        <div>
+          <div className="text-[8px] uppercase tracking-wider text-yellow-100/45 mb-1">Likely actions</div>
+          {inspection.likelyActions.slice(0, 4).map(action => (
+            <div key={action} className="truncate text-yellow-100/70">{action}</div>
+          ))}
+        </div>
+        <div>
+          <div className="text-[8px] uppercase tracking-wider text-yellow-100/45 mb-1">Watch points</div>
+          {(inspection.riskNotes.length ? inspection.riskNotes : ['No extra risk notes.']).slice(0, 4).map(note => (
+            <div key={note} className="truncate text-yellow-100/70" title={note}>{note}</div>
+          ))}
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          onClick={onApprove}
+          className="rounded border border-matrix-green/40 bg-matrix-green/10 px-3 py-1 text-[10px] font-bold text-matrix-green hover:bg-matrix-green/15"
+        >
+          Approve & Send
+        </button>
+        <button
+          onClick={onPlan}
+          className="rounded border border-yellow-400/40 px-3 py-1 text-[10px] text-yellow-100 hover:bg-yellow-400/10"
+        >
+          Switch to Plan
+        </button>
+        <button
+          onClick={onEdit}
+          className="rounded border border-matrix-border/40 px-3 py-1 text-[10px] text-matrix-text-muted/70 hover:text-matrix-text-dim"
+        >
+          Keep Editing
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const VibeLoopCard = memo(function VibeLoopCard({ state }: { state: VibeLoopState | null }) {
   const activeStage = state?.stage || 'frame';
   const activeIndex = VIBE_LOOP_STAGES.findIndex(s => s.id === activeStage);
@@ -363,6 +431,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const [activeSpecialistMode, setActiveSpecialistMode] = useState<SpecialistMode | null>(null);
   const [intentInspection, setIntentInspection] = useState<IntentInspection | null>(null);
   const [intentLoading, setIntentLoading] = useState(false);
+  const [pendingPlanAgreement, setPendingPlanAgreement] = useState<IntentInspection | null>(null);
+  const planAgreementAcceptedRef = useRef('');
 
   // Sprint 38 Feature 5: Retry countdown. `retryState.nextRetryMs` is the
   // wall-clock instant we should next retry. We expose the remaining seconds
@@ -433,6 +503,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     if (!api?.inspectIntent || prompt.length < 8 || prompt.startsWith('/') || isLoading) {
       setIntentInspection(null);
       setIntentLoading(false);
+      setPendingPlanAgreement(null);
       return;
     }
 
@@ -445,7 +516,12 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           provider: providerKey,
           model: selectedModel,
         });
-        if (!cancelled) setIntentInspection(inspection || null);
+        if (!cancelled) {
+          setIntentInspection(inspection || null);
+          if (pendingPlanAgreement && prompt !== input.trim()) {
+            setPendingPlanAgreement(null);
+          }
+        }
       } catch (err) {
         if (!cancelled) setIntentInspection(null);
         console.warn('[Chat] Intent inspection failed:', err);
@@ -458,7 +534,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [input, session.id, attachments.length, providerKey, selectedModel, isLoading]);
+  }, [input, session.id, attachments.length, providerKey, selectedModel, isLoading, pendingPlanAgreement]);
 
   // Sprint 28: Auto-continue state removed — loop is driven by stop_reason
 
@@ -751,6 +827,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
     const val = e.target.value;
     setInput(val);
+    setPendingPlanAgreement(null);
 
     // Show dropdown when input starts with '/' and is on first line
     const firstLine = val.split('\n')[0];
@@ -1070,6 +1147,17 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
       }
       return;
     }
+
+    const agreementKey = planAgreementKey(trimmed, attachments.length);
+    if (
+      needsPlanAgreement(intentInspection, executionMode) &&
+      planAgreementAcceptedRef.current !== agreementKey
+    ) {
+      setPendingPlanAgreement(intentInspection);
+      inputRef.current?.focus();
+      return;
+    }
+    planAgreementAcceptedRef.current = '';
 
     // Sprint 25: Build message with attachments
     const hasAttachments = attachments.length > 0;
@@ -1611,7 +1699,27 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           </div>
         )}
 
-        <IntentInspectorCard inspection={intentInspection} loading={intentLoading} />
+        {pendingPlanAgreement ? (
+          <PlanAgreementCard
+            inspection={pendingPlanAgreement}
+            onApprove={() => {
+              planAgreementAcceptedRef.current = planAgreementKey(input.trim(), attachments.length);
+              setPendingPlanAgreement(null);
+              void handleSend();
+            }}
+            onPlan={() => {
+              onModeChange('plan');
+              setPendingPlanAgreement(null);
+              inputRef.current?.focus();
+            }}
+            onEdit={() => {
+              setPendingPlanAgreement(null);
+              inputRef.current?.focus();
+            }}
+          />
+        ) : (
+          <IntentInspectorCard inspection={intentInspection} loading={intentLoading} />
+        )}
 
         {/* Sprint 25: Attachment chips */}
         {attachments.length > 0 && (

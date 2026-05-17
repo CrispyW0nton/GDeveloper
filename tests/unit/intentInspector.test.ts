@@ -54,6 +54,9 @@ describe('Phase 5B intent inspector', () => {
     expect(mainSrc).toContain('IPC_CHANNELS.INTENT_INSPECT');
     expect(preloadSrc).toContain('inspectIntent');
     expect(chatSrc).toContain('IntentInspectorCard');
+    expect(chatSrc).toContain('PlanAgreementCard');
+    expect(chatSrc).toContain('needsPlanAgreement(intentInspection, executionMode)');
+    expect(chatSrc).toContain('Approve & Send');
     expect(chatSrc).toContain('api.inspectIntent');
   });
 });
