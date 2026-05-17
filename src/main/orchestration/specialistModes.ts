@@ -41,6 +41,14 @@ export const BUILT_IN_SPECIALIST_MODES: SpecialistModeDefinition[] = [
     prompt: 'Act as an explanatory pair programmer. Answer directly, cite relevant files when useful, and ask for clarification only when needed.',
   },
   {
+    id: 'audit',
+    label: 'Audit',
+    description: 'Cross-check codebase behavior with evidence, full-path tracing, and stale-claim detection.',
+    toolPolicy: 'read-only',
+    source: 'built-in',
+    prompt: 'Act as a rigorous senior code auditor. Build an evidence ledger before verdicts, trace UI claims through data loaders/actions/API/database/RLS where relevant, classify findings as Confirmed, Refuted/Stale, Inferred Risk, or Needs Runtime Verification, and report the commands you could or could not run.',
+  },
+  {
     id: 'debug',
     label: 'Debug',
     description: 'Investigate failures, isolate causes, and make minimal repairs.',

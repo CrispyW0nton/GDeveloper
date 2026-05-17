@@ -26,12 +26,21 @@ describe('Phase 4 coordinator and sub-agent delegation', () => {
 
   it('supports @general and specialist mention parsing for focused delegation', () => {
     expect(parseAgentMention('@general add a save-game checkpoint')?.modeId).toBe('code');
+    expect(parseAgentMention('@audit cross-check the last report')?.modeId).toBe('audit');
     expect(parseAgentMention('@debug investigate failing startup')?.modeId).toBe('debug');
 
     const plan = createAgentDelegationPlan('@test add regression coverage for worktree handoff');
     expect(plan.objective).toBe('add regression coverage for worktree handoff');
     expect(plan.assignments).toHaveLength(1);
     expect(plan.assignments[0].roleId).toBe('test');
+  });
+
+  it('routes pure audit objectives to audit and verification specialists before implementation', () => {
+    const plan = createAgentDelegationPlan('Cross-check whether this payment portal is production-ready');
+    const roles = plan.assignments.map(assignment => assignment.roleId);
+
+    expect(roles).toEqual(['audit', 'test']);
+    expect(plan.assignments[0].contextPacket).toContain('classify findings as Confirmed');
   });
 
   it('formats a readable coordinator plan for chat', () => {

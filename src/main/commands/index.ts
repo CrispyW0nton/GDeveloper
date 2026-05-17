@@ -460,7 +460,7 @@ register({
 
 register({
   name: 'mode',
-  description: 'Show or set specialist mode. Usage: /mode [code|architect|ask|debug|test|custom-id]',
+  description: 'Show or set specialist mode. Usage: /mode [code|architect|ask|audit|debug|test|custom-id]',
   category: 'mode',
   safe: true,
   async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {

@@ -85,7 +85,7 @@ export function formatAgentDelegationPlan(plan: AgentDelegationPlan): string {
     lines.push(`  ${assignment.brief}`);
   }
 
-  lines.push('', 'Use these as separate Agent Board cards or start a focused chat with `@general`, `@debug`, `@test`, etc.');
+  lines.push('', 'Use these as separate Agent Board cards or start a focused chat with `@general`, `@audit`, `@debug`, `@test`, etc.');
   return lines.join('\n');
 }
 
@@ -97,11 +97,17 @@ function buildAssignments(objective: string, modes: SpecialistModeDefinition[]):
   };
 
   const needsArchitecture = /\b(architecture|design|migration|refactor|rewrite|api|schema|system|multi-agent|orchestration)\b/.test(lowered);
+  const needsAudit = /\b(audit|code review|review|cross[-\s]?check|production[-\s]?ready|functional|reliability|practical use)\b/.test(lowered);
   const needsDebug = /\b(bug|fix|failure|failing|crash|regression|debug|error|broken)\b/.test(lowered);
   const needsTests = /\b(test|coverage|verify|qa|regression|e2e|unit)\b/.test(lowered);
+  const wantsImplementation = /\b(add|implement|create|build|fix|repair|update|refactor|wire|change|remove|delete)\b/.test(lowered);
 
   if (needsArchitecture) {
     add('architect', 'Frame contracts and risks', 'Map the design boundary, affected modules, invariants, and rollout plan.', [], false);
+  }
+
+  if (needsAudit) {
+    add('audit', 'Cross-check behavior with evidence', 'Trace claims across components, data loaders, actions, API/database/RLS, classify stale versus confirmed findings, and report verification blockers.', [], false);
   }
 
   if (needsDebug) {
@@ -109,9 +115,11 @@ function buildAssignments(objective: string, modes: SpecialistModeDefinition[]):
   }
 
   const implementationDeps = assignments.map(item => item.id);
-  add('code', 'Implement the thin vertical slice', 'Make the smallest production change that satisfies the objective and follows local patterns.', implementationDeps, true);
+  if (!needsAudit || wantsImplementation) {
+    add('code', 'Implement the thin vertical slice', 'Make the smallest production change that satisfies the objective and follows local patterns.', implementationDeps, true);
+  }
 
-  if (needsTests || needsDebug || needsArchitecture) {
+  if (needsTests || needsDebug || needsArchitecture || needsAudit) {
     add('test', 'Verify behavior and guard against regressions', 'Add or strengthen focused checks around the changed behavior; watch for skipped or shallow assertions.', implementationDeps, false);
   }
 

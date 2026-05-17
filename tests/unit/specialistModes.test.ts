@@ -13,7 +13,7 @@ describe('Phase 4 specialist modes', () => {
   it('ships the expected built-in specialist roles', () => {
     const ids = BUILT_IN_SPECIALIST_MODES.map(mode => mode.id);
 
-    expect(ids).toEqual(expect.arrayContaining(['code', 'architect', 'ask', 'debug', 'test']));
+    expect(ids).toEqual(expect.arrayContaining(['code', 'architect', 'ask', 'audit', 'debug', 'test']));
     expect(BUILT_IN_SPECIALIST_MODES.every(mode => mode.prompt.length > 20)).toBe(true);
     expect(listSpecialistModes().map(mode => mode.id)).toEqual(expect.arrayContaining(ids));
   });
@@ -45,6 +45,7 @@ describe('Phase 4 specialist modes', () => {
     const storeSrc = readSrc('renderer/store/index.ts');
 
     expect(commandsSrc).toContain("name: 'mode'");
+    expect(commandsSrc).toContain('ask|audit|debug');
     expect(commandsSrc).toContain('setActiveSpecialistMode(requested');
     expect(chatSrc).toContain('handleSpecialistModeChange');
     expect(chatSrc).toContain('api.listSpecialistModes');

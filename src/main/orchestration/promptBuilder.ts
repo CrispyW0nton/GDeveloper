@@ -17,6 +17,7 @@ import { getMCPManager } from '../mcp';
 import { getTodoProgress, getTodoList } from './todoManager';
 import { formatCheckpointSummary, getLatestCheckpoint } from './checkpoint';
 import { getRateLimiter } from '../providers/rateLimiter';
+import { formatAuditReliabilityProtocolForPrompt } from './auditReliability';
 import {
   buildProjectContext,
   formatProjectContextForPrompt,
@@ -58,6 +59,13 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
 
   // 2. Base system prompt
   sections.push(SYSTEM_PROMPT);
+
+  // Audit Reliability: inject only for audit/review-style prompts so
+  // normal implementation turns keep their prompt budget.
+  const auditReliabilityProtocol = formatAuditReliabilityProtocolForPrompt(ctx.currentUserMessage);
+  if (auditReliabilityProtocol) {
+    sections.push(auditReliabilityProtocol);
+  }
 
   // Phase 4: specialist mode controls role posture while Plan/Build
   // continues to control actual tool safety.
