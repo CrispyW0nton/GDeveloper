@@ -189,108 +189,43 @@ export function merge3Way(
     const leftContent = readFileSafe(leftPath);
     const rightContent = readFileSafe(rightPath);
 
-    // Use diff.merge for 3-way merge
-    // Signature: merge(mine, theirs, base) — mine=left(ours), theirs=right, base=ancestor
-    const mergeResult: any = Diff.merge(leftContent, rightContent, baseContent);
-
     const hunks: MergeHunk[] = [];
     let conflictCount = 0;
     let autoMergedCount = 0;
     const riskFlags: string[] = [];
 
-    // Parse merge result into hunks
-    // Diff.merge returns { hunks: [...] } where each hunk has a .lines array.
-    // IMPORTANT: Each element in .lines can be either:
-    //   - a string prefixed with ' ', '-', or '+' (normal change)
-    //   - an object { conflict: true, mine: string[], theirs: string[] } (conflict)
-    // We must handle both forms safely.
-    const mergedHunks: any[] = mergeResult?.hunks || [];
-    if (mergedHunks.length === 0 && !mergeResult?.conflict) {
-      // Clean merge — no conflicts
+    let mergedContent = '';
+    if (leftContent === rightContent) {
+      mergedContent = leftContent;
+      autoMergedCount = 1;
+    } else if (leftContent === baseContent) {
+      mergedContent = rightContent;
+      autoMergedCount = 1;
+    } else if (rightContent === baseContent) {
+      mergedContent = leftContent;
       autoMergedCount = 1;
     } else {
-      // Process each hunk from the merge result
-      for (let hi = 0; hi < mergedHunks.length; hi++) {
-        const mh = mergedHunks[hi];
-        const hasConflict = mh.conflict || false;
-        if (hasConflict) conflictCount++;
-        else autoMergedCount++;
-
-        const mhLines: any[] = mh.lines || [];
-        let hunkLeftContent = '';
-        let hunkRightContent = '';
-        let hunkBaseContent = '';
-
-        for (const line of mhLines) {
-          if (typeof line === 'string') {
-            const prefix = line[0];
-            const content = line.slice(1);
-            if (prefix === '-') {
-              // In diff.merge: "mine" removals come from the left/theirs side
-              hunkLeftContent += (hunkLeftContent ? '\n' : '') + content;
-            } else if (prefix === '+') {
-              hunkRightContent += (hunkRightContent ? '\n' : '') + content;
-            } else {
-              // Context line — belongs to base
-              hunkBaseContent += (hunkBaseContent ? '\n' : '') + content;
-            }
-          } else if (line && typeof line === 'object' && line.conflict) {
-            // Conflict object: { conflict: true, mine: string[], theirs: string[] }
-            // With merge(left, right, base): mine = left/ours changes, theirs = right changes
-            // Each entry is prefixed with '-' (removal from base) or '+' (addition from this side)
-            const mineLines = (line.mine || []) as string[];
-            const theirLines = (line.theirs || []) as string[];
-
-            // mine = left side: '+' lines are what left wants to add
-            for (const ml of mineLines) {
-              if (typeof ml === 'string' && ml.startsWith('+')) {
-                hunkLeftContent += (hunkLeftContent ? '\n' : '') + ml.slice(1);
-              }
-            }
-            // theirs = right side: '+' lines are what right wants to add
-            for (const tl of theirLines) {
-              if (typeof tl === 'string' && tl.startsWith('+')) {
-                hunkRightContent += (hunkRightContent ? '\n' : '') + tl.slice(1);
-              }
-            }
-            // Base content from '-' lines (removals are what base had)
-            for (const ml of mineLines) {
-              if (typeof ml === 'string' && ml.startsWith('-')) {
-                hunkBaseContent += (hunkBaseContent ? '\n' : '') + ml.slice(1);
-              }
-            }
-          }
-        }
-
-        hunks.push({
-          index: hi,
-          conflict: hasConflict,
-          baseContent: hunkBaseContent,
-          leftContent: hunkLeftContent,
-          rightContent: hunkRightContent,
-          action: 'none',
-          oldStart: mh.oldStart || 0,
-          oldLines: mh.oldLines || 0,
-        });
-      }
-    }
-
-    // Build merged content: reconstruct from the merge result
-    let mergedContent = '';
-    if (typeof mergeResult === 'string') {
-      mergedContent = mergeResult;
-    } else if (mergedHunks.length > 0) {
-      // Reconstruct merged content — for non-conflicting merges, apply left patch to base
-      // For conflicting merges, provide base content with conflict markers
-      try {
-        const basePatch = Diff.createPatch('merged', baseContent, leftContent);
-        const applied = Diff.applyPatch(baseContent, basePatch);
-        mergedContent = typeof applied === 'string' ? applied : baseContent;
-      } catch {
-        mergedContent = baseContent; // fallback to base if patch fails
-      }
-    } else {
-      mergedContent = leftContent; // fallback
+      conflictCount = 1;
+      riskFlags.push('manual merge required');
+      hunks.push({
+        index: 0,
+        conflict: true,
+        baseContent,
+        leftContent,
+        rightContent,
+        action: 'none',
+        oldStart: 1,
+        oldLines: baseContent.split(/\r?\n/).length,
+      });
+      mergedContent = [
+        '<<<<<<< LEFT',
+        leftContent,
+        '||||||| BASE',
+        baseContent,
+        '=======',
+        rightContent,
+        '>>>>>>> RIGHT',
+      ].join('\n');
     }
 
     const summary: MergeSummary = {
