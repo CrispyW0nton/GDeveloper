@@ -64,6 +64,7 @@ export const IPC_CHANNELS = {
   SPECIALIST_MODE_LIST: 'specialist-mode:list',
   SPECIALIST_MODE_GET: 'specialist-mode:get',
   SPECIALIST_MODE_SET: 'specialist-mode:set',
+  AGENT_DELEGATION_PLAN: 'agent-delegation:plan',
 
   // Tools
   TOOL_LIST: 'tool:list',

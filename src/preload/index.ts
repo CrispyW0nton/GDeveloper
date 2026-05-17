@@ -128,6 +128,7 @@ const electronAPI = {
   listSpecialistModes: () => ipcRenderer.invoke('specialist-mode:list'),
   getSpecialistMode: () => ipcRenderer.invoke('specialist-mode:get'),
   setSpecialistMode: (modeId: string) => ipcRenderer.invoke('specialist-mode:set', modeId),
+  planAgentDelegation: (objective: string) => ipcRenderer.invoke('agent-delegation:plan', objective),
   getVibeLoop: (sessionId: string) => ipcRenderer.invoke('vibe-loop:get', sessionId),
 
   // ─── Sprint 13: Discovery ─────────────────────────

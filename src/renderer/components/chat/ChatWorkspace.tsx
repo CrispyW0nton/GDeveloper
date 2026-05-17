@@ -934,15 +934,15 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
 
     const trimmed = input.trim();
 
-    // Check if it's a slash command (only text, no attachments)
+    // Check if it's a slash command or sub-agent mention (only text, no attachments)
     // Sprint 38 Bug 1: lock → push command message → clear input, in that
     // order, so the command is visible in the transcript before the composer
     // empties, and typing during execution cannot be clobbered.
-    if (trimmed.startsWith('/') && attachments.length === 0) {
+    if ((trimmed.startsWith('/') || trimmed.startsWith('@')) && attachments.length === 0) {
       isComposerLockedRef.current = true;
       setShowSlashDropdown(false);
       try {
-        await executeSlashCommand(trimmed);
+        await executeSlashCommand(trimmed.startsWith('@') ? `/delegate ${trimmed}` : trimmed);
         setInput('');
       } finally {
         isComposerLockedRef.current = false;

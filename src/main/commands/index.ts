@@ -66,6 +66,11 @@ import {
   listSpecialistModes,
   setActiveSpecialistMode,
 } from '../orchestration/specialistModes';
+import {
+  createAgentDelegationPlan,
+  formatAgentDelegationPlan,
+  parseAgentMention,
+} from '../orchestration/agentDelegation';
 
 // ─── Interfaces ───
 
@@ -451,6 +456,43 @@ register({
       return {
         success: false,
         message: `${err instanceof Error ? err.message : String(err)}\nUse \`/mode\` to list available specialist modes.`,
+      };
+    }
+  },
+});
+
+register({
+  name: 'delegate',
+  description: 'Create a coordinator/sub-agent delegation plan. Usage: /delegate <goal> or /delegate @debug <focused goal>',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const objective = args.trim();
+    if (!objective) {
+      return {
+        success: false,
+        message: 'Usage: /delegate <goal> or /delegate @general <focused goal>',
+      };
+    }
+
+    try {
+      const plan = createAgentDelegationPlan(objective, ctx.workspacePath);
+      const mention = parseAgentMention(objective, ctx.workspacePath);
+      getDatabase().logActivity(ctx.sessionId, 'agent_delegation_plan', `Delegation plan: ${plan.objective}`, `${plan.assignments.length} sub-agent assignment(s)`, {
+        planId: plan.id,
+        coordinatorModeId: plan.coordinatorModeId,
+        assignments: plan.assignments.map(a => ({ id: a.id, roleId: a.roleId, status: a.status })),
+        mention,
+      });
+      return {
+        success: true,
+        message: formatAgentDelegationPlan(plan),
+        data: { action: 'agent-delegation-plan', delegationPlan: plan },
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message: err instanceof Error ? err.message : String(err),
       };
     }
   },

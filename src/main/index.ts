@@ -108,6 +108,7 @@ import {
   listSpecialistModes,
   setActiveSpecialistMode,
 } from './orchestration/specialistModes';
+import { createAgentDelegationPlan } from './orchestration/agentDelegation';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -1835,6 +1836,15 @@ function registerIPCHandlers(): void {
       return { success: true, mode };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to set specialist mode' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_DELEGATION_PLAN, async (_event, objective: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      return { success: true, plan: createAgentDelegationPlan(objective || '', ws) };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to create delegation plan' };
     }
   });
 
