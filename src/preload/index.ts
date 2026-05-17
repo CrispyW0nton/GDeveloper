@@ -319,6 +319,9 @@ const electronAPI = {
   // ─── Sprint 27: Verify ──────────────────────────────
   runVerifyAssertions: (assertions: string, workspacePath?: string) => ipcRenderer.invoke('verify:run', assertions, workspacePath),
   getVerifyHistory: () => ipcRenderer.invoke('verify:history'),
+  scanGuardrails: (text: string, direction?: string) => ipcRenderer.invoke('guardrails:scan', text, direction),
+  getGuardrailConfig: () => ipcRenderer.invoke('guardrails:get-config'),
+  setGuardrailConfig: (config: any) => ipcRenderer.invoke('guardrails:set-config', config),
 
   // ─── Sprint 29: Orchestration Settings ─────────────
   getOrchestrationSettings: () => ipcRenderer.invoke('settings:get-orchestration'),

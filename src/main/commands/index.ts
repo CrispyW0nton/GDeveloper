@@ -42,6 +42,13 @@ import {
   runAssertions, formatVerifyReport, getPersistedReports,
 } from '../orchestration/verifier';
 import {
+  formatGuardrailReport,
+  getGuardrailConfig,
+  scanGuardrails,
+  setGuardrailConfig,
+  type GuardrailDirection,
+} from '../orchestration/guardrails';
+import {
   VIBE_LOOP_STAGE_DEFINITIONS,
   formatVibeLoopMarkdown,
   getNextVibeLoopStage,
@@ -592,6 +599,57 @@ register({
     } catch (err) {
       return { success: false, message: err instanceof Error ? err.message : String(err) };
     }
+  },
+});
+
+register({
+  name: 'guardrails',
+  description: 'Scan text or configure guardrails. Usage: /guardrails scan <text> | status | enable | disable',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const trimmed = args.trim();
+    const [rawSubcommand, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+    const subcommand = (rawSubcommand || 'status').toLowerCase();
+
+    if (subcommand === 'status') {
+      const config = getGuardrailConfig();
+      return {
+        success: true,
+        message: [
+          '**Guardrails:**',
+          `- enabled: ${config.enabled}`,
+          `- blockSecrets: ${config.blockSecrets}`,
+          `- warnOnPii: ${config.warnOnPii}`,
+          `- warnOnPromptInjection: ${config.warnOnPromptInjection}`,
+        ].join('\n'),
+        data: { action: 'guardrails-status', config },
+      };
+    }
+
+    if (subcommand === 'enable' || subcommand === 'disable') {
+      const config = setGuardrailConfig({ enabled: subcommand === 'enable' });
+      getDatabase().logActivity(ctx.sessionId, 'guardrails_config_updated', `Guardrails ${subcommand === 'enable' ? 'enabled' : 'disabled'}`, JSON.stringify(config), { config });
+      return { success: true, message: `Guardrails ${config.enabled ? 'enabled' : 'disabled'}.`, data: { action: 'guardrails-config', config } };
+    }
+
+    if (subcommand === 'scan') {
+      const direction = (rest[0] === 'input' || rest[0] === 'output') ? rest.shift() as GuardrailDirection : 'input';
+      const text = rest.join(' ');
+      if (!text) return { success: false, message: 'Usage: /guardrails scan [input|output] <text>' };
+      const result = scanGuardrails(text, direction, getGuardrailConfig());
+      getDatabase().logActivity(ctx.sessionId, result.blocked ? 'guardrails_scan_blocked' : 'guardrails_scan', result.summary, result.sanitizedText.substring(0, 200), {
+        direction,
+        findings: result.findings.map(f => ({ category: f.category, severity: f.severity, title: f.title, blocksSend: f.blocksSend })),
+      }, result.blocked ? 'error' : 'success');
+      return {
+        success: !result.blocked,
+        message: formatGuardrailReport(result),
+        data: { action: 'guardrails-scan', result },
+      };
+    }
+
+    return { success: false, message: 'Unknown guardrails command. Use status, enable, disable, or scan.' };
   },
 });
 

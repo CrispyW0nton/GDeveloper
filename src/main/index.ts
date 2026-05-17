@@ -107,6 +107,13 @@ import {
   runAssertions, formatVerifyReport, getPersistedReports,
 } from './orchestration/verifier';
 import {
+  formatGuardrailReport,
+  getGuardrailConfig,
+  scanGuardrails,
+  setGuardrailConfig,
+  type GuardrailDirection,
+} from './orchestration/guardrails';
+import {
   buildChangelogEntry, writeChangelog,
 } from './orchestration/changelog';
 import {
@@ -475,13 +482,22 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, message: string) => {
     const provider = providerRegistry.getDefault();
+    const inputGuardrail = scanGuardrails(message, 'input', getGuardrailConfig());
+    const persistedUserMessage = inputGuardrail.sanitizedText;
 
     // Save user message to DB
-    db.insertMessage(sessionId, 'user', message);
-    db.logActivity(sessionId, 'chat_send', `Message sent`, message.substring(0, 100), {
+    db.insertMessage(sessionId, 'user', persistedUserMessage);
+    db.logActivity(sessionId, inputGuardrail.blocked ? 'guardrails_blocked' : 'chat_send', inputGuardrail.blocked ? 'Guardrails blocked message' : `Message sent`, persistedUserMessage.substring(0, 100), {
       sessionId,
-      provider: provider?.name || 'none'
+      provider: provider?.name || 'none',
+      guardrails: inputGuardrail.findings.map(f => ({ category: f.category, severity: f.severity, title: f.title, blocksSend: f.blocksSend })),
     });
+
+    if (inputGuardrail.blocked) {
+      const report = `${formatGuardrailReport(inputGuardrail)}\n\nThe message was not sent to the model. Remove or rotate the detected secret and try again.`;
+      db.insertMessage(sessionId, 'assistant', report);
+      return { role: 'assistant', content: report, error: true, guardrails: inputGuardrail };
+    }
 
     if (!provider) {
       const errMsg = 'No AI provider configured. Please add an API key in Settings.';
@@ -508,9 +524,9 @@ function registerIPCHandlers(): void {
     const existingTasks = db.getTasks(sessionId);
     let taskId: string | null = null;
     if (existingTasks.length === 0) {
-      const taskTitle = message.length > 80 ? message.substring(0, 80) + '...' : message;
-      taskId = db.createTask(sessionId, taskTitle, message);
-      db.logActivity(sessionId, 'task_updated', `Task created: ${taskTitle}`, message.substring(0, 200), { taskId, status: 'TASK_CREATED' });
+      const taskTitle = persistedUserMessage.length > 80 ? persistedUserMessage.substring(0, 80) + '...' : persistedUserMessage;
+      taskId = db.createTask(sessionId, taskTitle, persistedUserMessage);
+      db.logActivity(sessionId, 'task_updated', `Task created: ${taskTitle}`, persistedUserMessage.substring(0, 200), { taskId, status: 'TASK_CREATED' });
     }
 
     try {
@@ -901,6 +917,14 @@ function registerIPCHandlers(): void {
       //      (attempt_completion, ask_followup_question) whose
       //      loopResult.content carries the extracted completion /
       //      followup text that was NOT in any per-turn row.
+      const outputGuardrail = scanGuardrails(loopResult.content, 'output', getGuardrailConfig());
+      if (outputGuardrail.findings.length > 0) {
+        db.logActivity(sessionId, outputGuardrail.blocked ? 'guardrails_output_blocked' : 'guardrails_output_warn', outputGuardrail.summary, outputGuardrail.sanitizedText.substring(0, 200), {
+          sessionId,
+          findings: outputGuardrail.findings.map(f => ({ category: f.category, severity: f.severity, title: f.title, blocksSend: f.blocksSend })),
+        }, outputGuardrail.blocked ? 'error' : 'success');
+        loopResult.content = outputGuardrail.sanitizedText;
+      }
       const existingLast = db.getLastMessage(sessionId, 'assistant');
       let msgId: string;
       if (existingLast && existingLast.content === loopResult.content) {
@@ -3058,6 +3082,20 @@ function registerIPCHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.VERIFY_HISTORY, async () => {
     return getPersistedReports();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GUARDRAILS_SCAN, async (_event, text: string, direction?: GuardrailDirection) => {
+    return scanGuardrails(text || '', direction === 'output' ? 'output' : 'input', getGuardrailConfig());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GUARDRAILS_GET_CONFIG, async () => {
+    return getGuardrailConfig();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GUARDRAILS_SET_CONFIG, async (_event, config: any) => {
+    const next = setGuardrailConfig(config || {});
+    db.logActivity('system', 'guardrails_config_updated', 'Guardrails configuration updated', JSON.stringify(next), { config: next });
+    return { success: true, config: next };
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

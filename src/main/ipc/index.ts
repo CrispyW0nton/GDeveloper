@@ -281,6 +281,9 @@ export const IPC_CHANNELS = {
   // ─── Sprint 27: Verify ───
   VERIFY_RUN: 'verify:run',
   VERIFY_HISTORY: 'verify:history',
+  GUARDRAILS_SCAN: 'guardrails:scan',
+  GUARDRAILS_GET_CONFIG: 'guardrails:get-config',
+  GUARDRAILS_SET_CONFIG: 'guardrails:set-config',
 
   // ─── Sprint 29: Orchestration Settings Persistence ───
   SETTINGS_GET_ORCHESTRATION: 'settings:get-orchestration',
