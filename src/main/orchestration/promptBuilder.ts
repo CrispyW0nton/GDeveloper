@@ -26,6 +26,7 @@ import {
 import { collectWorkspaceDiagnostics, formatDiagnosticsForPrompt } from '../diagnostics';
 import { formatVibeLoopForPrompt, getVibeLoopState } from './vibeLoop';
 import { formatSpecialistModeForPrompt } from './specialistModes';
+import { getOrSetContextCache } from './contextCache';
 import simpleGit from 'simple-git';
 
 export interface PromptBuilderContext {
@@ -98,12 +99,14 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
 
     // Project memory + repo map context
     try {
-      const projectContext = buildProjectContext(wsPath, {
+      const projectOptions = {
         maxFiles: 500,
         maxDepth: 8,
         maxRuleChars: 16000,
         maxPromptChars: 14000,
-      });
+      };
+      const projectCache = getOrSetContextCache('project-context', [wsPath, projectOptions], () => buildProjectContext(wsPath, projectOptions), undefined, 5 * 60 * 1000);
+      const projectContext = projectCache.value;
       const formattedProjectContext = formatProjectContextForPrompt(projectContext, {
         maxPromptChars: 14000,
       });
@@ -111,13 +114,19 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
         sections.push(formattedProjectContext);
       }
 
+      const retrievalOptions = {
+        maxFiles: 500,
+        maxDepth: 8,
+        maxChunks: 6,
+        maxRagChars: 10000,
+      };
       const relevantCodeChunks = ctx.currentUserMessage
-        ? retrieveRelevantCodeChunks(wsPath, ctx.currentUserMessage, {
+        ? getOrSetContextCache('code-retrieval', [wsPath, ctx.currentUserMessage, retrievalOptions], () => retrieveRelevantCodeChunks(wsPath, ctx.currentUserMessage || '', {
             maxFiles: 500,
             maxDepth: 8,
             maxChunks: 6,
             maxRagChars: 10000,
-          })
+          }), undefined, 2 * 60 * 1000).value
         : [];
       const formattedRelevantCode = formatRelevantCodeChunksForPrompt(relevantCodeChunks, 10000);
       if (formattedRelevantCode) {

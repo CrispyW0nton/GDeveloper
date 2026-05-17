@@ -48,6 +48,7 @@ import {
   setGuardrailConfig,
   type GuardrailDirection,
 } from '../orchestration/guardrails';
+import { clearContextCache, getContextCacheStats } from '../orchestration/contextCache';
 import {
   VIBE_LOOP_STAGE_DEFINITIONS,
   formatVibeLoopMarkdown,
@@ -650,6 +651,41 @@ register({
     }
 
     return { success: false, message: 'Unknown guardrails command. Use status, enable, disable, or scan.' };
+  },
+});
+
+register({
+  name: 'cache',
+  description: 'Inspect or clear the context cache. Usage: /cache [status|clear]',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const subcommand = (args.trim() || 'status').toLowerCase();
+    if (subcommand === 'clear') {
+      const stats = clearContextCache();
+      getDatabase().logActivity(ctx.sessionId, 'context_cache_cleared', 'Context cache cleared', JSON.stringify(stats), { stats });
+      return { success: true, message: '**Context cache cleared.**', data: { action: 'context-cache-clear', stats } };
+    }
+    if (subcommand !== 'status') {
+      return { success: false, message: 'Usage: /cache [status|clear]' };
+    }
+
+    const stats = getContextCacheStats();
+    return {
+      success: true,
+      message: [
+        '**Context Cache:**',
+        `- entries: ${stats.entries}`,
+        `- bytes: ${stats.bytes}`,
+        `- hits: ${stats.hits}`,
+        `- misses: ${stats.misses}`,
+        `- evictions: ${stats.evictions}`,
+        `- project-context: ${stats.byNamespace['project-context']}`,
+        `- code-retrieval: ${stats.byNamespace['code-retrieval']}`,
+        `- prompt-fragment: ${stats.byNamespace['prompt-fragment']}`,
+      ].join('\n'),
+      data: { action: 'context-cache-status', stats },
+    };
   },
 });
 

@@ -322,6 +322,8 @@ const electronAPI = {
   scanGuardrails: (text: string, direction?: string) => ipcRenderer.invoke('guardrails:scan', text, direction),
   getGuardrailConfig: () => ipcRenderer.invoke('guardrails:get-config'),
   setGuardrailConfig: (config: any) => ipcRenderer.invoke('guardrails:set-config', config),
+  getContextCacheStats: () => ipcRenderer.invoke('context-cache:stats'),
+  clearContextCache: () => ipcRenderer.invoke('context-cache:clear'),
 
   // ─── Sprint 29: Orchestration Settings ─────────────
   getOrchestrationSettings: () => ipcRenderer.invoke('settings:get-orchestration'),

@@ -113,6 +113,7 @@ import {
   setGuardrailConfig,
   type GuardrailDirection,
 } from './orchestration/guardrails';
+import { clearContextCache, getContextCacheStats } from './orchestration/contextCache';
 import {
   buildChangelogEntry, writeChangelog,
 } from './orchestration/changelog';
@@ -3096,6 +3097,16 @@ function registerIPCHandlers(): void {
     const next = setGuardrailConfig(config || {});
     db.logActivity('system', 'guardrails_config_updated', 'Guardrails configuration updated', JSON.stringify(next), { config: next });
     return { success: true, config: next };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_CACHE_STATS, async () => {
+    return getContextCacheStats();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CONTEXT_CACHE_CLEAR, async () => {
+    const stats = clearContextCache();
+    db.logActivity('system', 'context_cache_cleared', 'Context cache cleared', JSON.stringify(stats), { stats });
+    return { success: true, stats };
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
