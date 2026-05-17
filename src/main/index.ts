@@ -115,6 +115,15 @@ import {
   setActiveSpecialistMode,
 } from './orchestration/specialistModes';
 import { createAgentDelegationPlan } from './orchestration/agentDelegation';
+import {
+  buildScheduledAgentRunPackets,
+  createScheduledAgent,
+  deleteScheduledAgent,
+  listScheduledAgents,
+  markScheduledAgentRun,
+  parseScheduledAgentCadence,
+  setScheduledAgentStatus,
+} from './orchestration/scheduledAgents';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -1852,6 +1861,59 @@ function registerIPCHandlers(): void {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Failed to create delegation plan' };
     }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SCHEDULED_AGENT_LIST, async () => {
+    return listScheduledAgents();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SCHEDULED_AGENT_CREATE, async (_event, request: any) => {
+    try {
+      const ws = request?.workspacePath || requireActiveWorkspacePath();
+      const cadence = typeof request?.cadence === 'string'
+        ? parseScheduledAgentCadence(request.cadence)
+        : request?.cadence;
+      const job = createScheduledAgent({
+        name: request?.name || '',
+        prompt: request?.prompt || '',
+        workspacePath: ws,
+        sessionId: request?.sessionId || 'system',
+        cadence,
+        modeId: request?.modeId,
+        namespaces: Array.isArray(request?.namespaces) ? request.namespaces : [],
+      });
+      db.logActivity(job.sessionId, 'scheduled_agent_created', `Scheduled agent: ${job.name}`, job.prompt, { jobId: job.id, cadence: job.cadence });
+      return { success: true, job };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to create scheduled agent' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SCHEDULED_AGENT_DUE, async () => {
+    return buildScheduledAgentRunPackets();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SCHEDULED_AGENT_MARK_RUN, async (_event, jobId: string) => {
+    try {
+      const job = markScheduledAgentRun(jobId);
+      db.logActivity(job.sessionId, 'scheduled_agent_run_recorded', `Scheduled agent run: ${job.name}`, `Next run: ${job.nextRunAt}`, { jobId: job.id, runCount: job.runCount });
+      return { success: true, job };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to record scheduled agent run' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SCHEDULED_AGENT_STATUS, async (_event, jobId: string, status: string) => {
+    try {
+      const job = setScheduledAgentStatus(jobId, status === 'paused' ? 'paused' : 'active');
+      return { success: true, job };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to update scheduled agent status' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SCHEDULED_AGENT_DELETE, async (_event, jobId: string) => {
+    return { success: deleteScheduledAgent(jobId) };
   });
 
   ipcMain.handle(IPC_CHANNELS.VIBE_LOOP_GET, async (_event, sessionId: string) => {

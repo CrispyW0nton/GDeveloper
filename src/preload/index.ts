@@ -129,6 +129,12 @@ const electronAPI = {
   getSpecialistMode: () => ipcRenderer.invoke('specialist-mode:get'),
   setSpecialistMode: (modeId: string) => ipcRenderer.invoke('specialist-mode:set', modeId),
   planAgentDelegation: (objective: string) => ipcRenderer.invoke('agent-delegation:plan', objective),
+  listScheduledAgents: () => ipcRenderer.invoke('scheduled-agent:list'),
+  createScheduledAgent: (request: any) => ipcRenderer.invoke('scheduled-agent:create', request),
+  getDueScheduledAgents: () => ipcRenderer.invoke('scheduled-agent:due'),
+  markScheduledAgentRun: (jobId: string) => ipcRenderer.invoke('scheduled-agent:mark-run', jobId),
+  setScheduledAgentStatus: (jobId: string, status: string) => ipcRenderer.invoke('scheduled-agent:status', jobId, status),
+  deleteScheduledAgent: (jobId: string) => ipcRenderer.invoke('scheduled-agent:delete', jobId),
   getVibeLoop: (sessionId: string) => ipcRenderer.invoke('vibe-loop:get', sessionId),
 
   // ─── Sprint 13: Discovery ─────────────────────────

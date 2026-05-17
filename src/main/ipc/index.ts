@@ -65,6 +65,12 @@ export const IPC_CHANNELS = {
   SPECIALIST_MODE_GET: 'specialist-mode:get',
   SPECIALIST_MODE_SET: 'specialist-mode:set',
   AGENT_DELEGATION_PLAN: 'agent-delegation:plan',
+  SCHEDULED_AGENT_LIST: 'scheduled-agent:list',
+  SCHEDULED_AGENT_CREATE: 'scheduled-agent:create',
+  SCHEDULED_AGENT_DUE: 'scheduled-agent:due',
+  SCHEDULED_AGENT_MARK_RUN: 'scheduled-agent:mark-run',
+  SCHEDULED_AGENT_STATUS: 'scheduled-agent:status',
+  SCHEDULED_AGENT_DELETE: 'scheduled-agent:delete',
 
   // Tools
   TOOL_LIST: 'tool:list',

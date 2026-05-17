@@ -77,6 +77,16 @@ import {
   releaseAgentNamespaces,
   reserveAgentNamespaces,
 } from '../worktree/agentLocks';
+import {
+  buildScheduledAgentRunPackets,
+  createScheduledAgent,
+  deleteScheduledAgent,
+  formatScheduledAgent,
+  listScheduledAgents,
+  markScheduledAgentRun,
+  parseScheduledAgentCadence,
+  setScheduledAgentStatus,
+} from '../orchestration/scheduledAgents';
 
 // ─── Interfaces ───
 
@@ -500,6 +510,87 @@ register({
         success: false,
         message: err instanceof Error ? err.message : String(err),
       };
+    }
+  },
+});
+
+register({
+  name: 'agent-schedule',
+  description: 'Manage background agent schedules. Usage: /agent-schedule create <cadence> :: <prompt> | list | due | pause|resume|run|delete <id>',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const trimmed = args.trim();
+    const [subcommandRaw, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+    const subcommand = (subcommandRaw || 'list').toLowerCase();
+
+    try {
+      if (subcommand === 'list') {
+        const jobs = listScheduledAgents();
+        return {
+          success: true,
+          message: jobs.length === 0
+            ? 'No scheduled agents yet. Use `/agent-schedule create hourly :: summarize open risks`.'
+            : ['**Scheduled agents:**', ...jobs.map(formatScheduledAgent)].join('\n'),
+          data: { action: 'scheduled-agent-list', jobs },
+        };
+      }
+
+      if (subcommand === 'due') {
+        const packets = buildScheduledAgentRunPackets();
+        return {
+          success: true,
+          message: packets.length === 0
+            ? 'No scheduled agents are due right now.'
+            : ['**Due scheduled agents:**', ...packets.map(packet => `- \`${packet.jobId}\` due ${packet.dueAt}: ${packet.prompt.split('\n')[0]}`)].join('\n'),
+          data: { action: 'scheduled-agent-due', packets },
+        };
+      }
+
+      if (subcommand === 'create') {
+        const createArgs = rest.join(' ');
+        const [cadenceText, promptText] = createArgs.split(/\s+::\s+/);
+        if (!cadenceText || !promptText) {
+          return { success: false, message: 'Usage: /agent-schedule create <hourly|daily|daily@09:00|every 30m> :: <prompt>' };
+        }
+        const ws = requireWorkspace(ctx);
+        const job = createScheduledAgent({
+          name: promptText,
+          prompt: promptText,
+          workspacePath: ws,
+          sessionId: ctx.sessionId,
+          cadence: parseScheduledAgentCadence(cadenceText),
+        });
+        getDatabase().logActivity(ctx.sessionId, 'scheduled_agent_created', `Scheduled agent: ${job.name}`, job.prompt, { jobId: job.id, cadence: job.cadence });
+        return {
+          success: true,
+          message: `**Scheduled agent created:**\n${formatScheduledAgent(job)}`,
+          data: { action: 'scheduled-agent-created', job },
+        };
+      }
+
+      const jobId = rest[0];
+      if (!jobId) return { success: false, message: `Usage: /agent-schedule ${subcommand} <job-id>` };
+
+      if (subcommand === 'pause' || subcommand === 'resume') {
+        const job = setScheduledAgentStatus(jobId, subcommand === 'pause' ? 'paused' : 'active');
+        return { success: true, message: formatScheduledAgent(job), data: { action: 'scheduled-agent-status', job } };
+      }
+
+      if (subcommand === 'run') {
+        const job = markScheduledAgentRun(jobId);
+        getDatabase().logActivity(ctx.sessionId, 'scheduled_agent_run_recorded', `Scheduled agent run: ${job.name}`, `Next run: ${job.nextRunAt}`, { jobId: job.id, runCount: job.runCount });
+        return { success: true, message: `Recorded scheduled run. ${formatScheduledAgent(job)}`, data: { action: 'scheduled-agent-run-recorded', job } };
+      }
+
+      if (subcommand === 'delete') {
+        const deleted = deleteScheduledAgent(jobId);
+        return { success: deleted, message: deleted ? `Deleted scheduled agent: ${jobId}` : `Scheduled agent not found: ${jobId}` };
+      }
+
+      return { success: false, message: 'Unknown agent schedule command. Use list, due, create, pause, resume, run, or delete.' };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
     }
   },
 });
