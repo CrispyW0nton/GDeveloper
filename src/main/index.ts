@@ -149,6 +149,9 @@ import {
   listAgentEvalScenarios,
   scoreAgentRun,
 } from './orchestration/agentEvals';
+import {
+  inspectIntent,
+} from './orchestration/intentInspector';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -1192,6 +1195,18 @@ function registerIPCHandlers(): void {
     const run = db.getAgentRun(runId);
     if (!run) return { success: false, error: 'Agent run not found' };
     return { success: true, score: scoreAgentRun(run), run };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.INTENT_INSPECT, async (_event, sessionId: string, message: string, options?: any) => {
+    return inspectIntent({
+      sessionId,
+      message,
+      workspacePath: getActiveWorkspace() || undefined,
+      executionMode: getExecutionMode(),
+      provider: options?.provider,
+      model: options?.model,
+      attachmentCount: options?.attachmentCount || 0,
+    });
   });
 
   // ─── Diff ──────────────────────────────────────────────

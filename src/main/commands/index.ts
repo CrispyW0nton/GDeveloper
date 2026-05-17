@@ -94,6 +94,10 @@ import {
   scoreAgentRun,
 } from '../orchestration/agentEvals';
 import {
+  formatIntentInspectionMarkdown,
+  inspectIntent,
+} from '../orchestration/intentInspector';
+import {
   getAgentNamespaceLocks,
   heartbeatAgentLock,
   releaseAgentNamespaces,
@@ -950,6 +954,28 @@ register({
     }
 
     return { success: false, message: 'Usage: /evals [list|score [latest|run-id]]' };
+  },
+});
+
+register({
+  name: 'intent',
+  description: 'Preview agent intent and context before sending. Usage: /intent <prompt>',
+  category: 'workflow',
+  safe: true,
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const message = args.trim();
+    if (!message) return { success: false, message: 'Usage: /intent <prompt>' };
+    const inspection = inspectIntent({
+      sessionId: ctx.sessionId,
+      message,
+      workspacePath: ctx.workspacePath,
+      executionMode: getExecutionMode(),
+    });
+    return {
+      success: true,
+      message: formatIntentInspectionMarkdown(inspection),
+      data: { action: 'intent-inspection', inspection },
+    };
   },
 });
 

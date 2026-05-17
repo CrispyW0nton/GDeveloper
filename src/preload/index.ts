@@ -73,6 +73,7 @@ const electronAPI = {
   setAgentRunFeedback: (runId: string, feedback: string, note?: string) => ipcRenderer.invoke('agent-run:feedback', runId, feedback, note),
   listAgentEvalScenarios: () => ipcRenderer.invoke('agent-eval:scenarios'),
   scoreAgentRun: (runId: string) => ipcRenderer.invoke('agent-run:score', runId),
+  inspectIntent: (sessionId: string, message: string, options?: any) => ipcRenderer.invoke('intent:inspect', sessionId, message, options),
 
   // ─── Diff ──────────────────────────────────────────
   getDiffs: (sessionId?: string) => ipcRenderer.invoke('diff:get', sessionId),

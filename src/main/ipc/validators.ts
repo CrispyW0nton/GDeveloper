@@ -189,6 +189,16 @@ export const IPC_SCHEMAS: Partial<Record<string, z.ZodTuple<any>>> = {
     SessionId,
   ]),
 
+  [IPC_CHANNELS.INTENT_INSPECT]: z.tuple([
+    SessionId,
+    BoundedStringAllowEmpty(64 * 1024, 'message'),
+    z.object({
+      attachmentCount: z.number().int().min(0).max(50).optional(),
+      provider: z.string().max(128).optional(),
+      model: z.string().max(256).optional(),
+    }).optional(),
+  ]),
+
   // MCP add-server — registers an arbitrary binary the agent can invoke.
   [IPC_CHANNELS.MCP_ADD_SERVER]: z.tuple([MCPServerConfig]),
 

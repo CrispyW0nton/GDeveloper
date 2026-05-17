@@ -83,6 +83,7 @@ export const IPC_CHANNELS = {
   AGENT_RUN_FEEDBACK: 'agent-run:feedback',
   AGENT_EVAL_SCENARIOS: 'agent-eval:scenarios',
   AGENT_RUN_SCORE: 'agent-run:score',
+  INTENT_INSPECT: 'intent:inspect',
 
   // Verification
   VERIFICATION_LIST: 'verification:list',

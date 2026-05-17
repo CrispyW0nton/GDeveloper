@@ -112,6 +112,93 @@ interface SpecialistMode {
   source: 'built-in' | 'workspace';
 }
 
+interface IntentInspection {
+  summary: string;
+  riskLevel: 'low' | 'medium' | 'high';
+  recommendedAction: string;
+  contextSources: Array<{ id: string; label: string; detail: string }>;
+  likelyActions: string[];
+  riskNotes: string[];
+  relevantFiles: string[];
+  estimatedPromptTokens: number;
+  mcpToolCount: number;
+}
+
+function IntentInspectorCard({ inspection, loading }: { inspection: IntentInspection | null; loading: boolean }) {
+  if (!inspection && !loading) return null;
+
+  const riskClass =
+    inspection?.riskLevel === 'high'
+      ? 'border-red-400/35 text-red-300 bg-red-400/10'
+      : inspection?.riskLevel === 'medium'
+        ? 'border-yellow-400/35 text-yellow-300 bg-yellow-400/10'
+        : 'border-matrix-green/35 text-matrix-green bg-matrix-green/10';
+
+  return (
+    <div className="mb-2 rounded border border-matrix-border/40 bg-matrix-bg-panel/75 p-2.5 text-[10px] animate-fadeIn">
+      <div className="flex items-center gap-2">
+        <span className="font-mono font-bold text-matrix-green">Intent Inspector</span>
+        {loading ? (
+          <span className="ml-auto text-matrix-text-muted/35">checking...</span>
+        ) : inspection && (
+          <span className={`ml-auto rounded border px-1.5 py-0.5 ${riskClass}`}>
+            {inspection.riskLevel}
+          </span>
+        )}
+      </div>
+      {inspection && (
+        <>
+          <div className="mt-1 text-matrix-text-dim/80">{inspection.summary}</div>
+          <div className="mt-1 text-matrix-text-muted/55">{inspection.recommendedAction}</div>
+          <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div>
+              <div className="text-[8px] uppercase tracking-wider text-matrix-text-muted/30 mb-1">Context</div>
+              <div className="space-y-0.5">
+                {inspection.contextSources.slice(0, 4).map(source => (
+                  <div key={source.id} className="truncate text-matrix-text-muted/55" title={source.detail}>
+                    {source.label}: {source.detail}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="text-[8px] uppercase tracking-wider text-matrix-text-muted/30 mb-1">Likely</div>
+              <div className="space-y-0.5">
+                {inspection.likelyActions.slice(0, 4).map(action => (
+                  <div key={action} className="truncate text-matrix-text-muted/55">{action}</div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="text-[8px] uppercase tracking-wider text-matrix-text-muted/30 mb-1">Risk Notes</div>
+              {inspection.riskNotes.length === 0 ? (
+                <div className="text-matrix-text-muted/35">none</div>
+              ) : (
+                <div className="space-y-0.5">
+                  {inspection.riskNotes.slice(0, 3).map(note => (
+                    <div key={note} className="truncate text-matrix-text-muted/55" title={note}>{note}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          {(inspection.relevantFiles.length > 0 || inspection.estimatedPromptTokens > 0) && (
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[9px] text-matrix-text-muted/40">
+              {inspection.relevantFiles.slice(0, 3).map(file => (
+                <span key={file} className="max-w-[180px] truncate rounded border border-matrix-border/30 px-1.5 py-0.5" title={file}>{file}</span>
+              ))}
+              <span className="rounded border border-matrix-border/30 px-1.5 py-0.5">~{inspection.estimatedPromptTokens} prompt tokens</span>
+              {inspection.mcpToolCount > 0 && (
+                <span className="rounded border border-matrix-border/30 px-1.5 py-0.5">{inspection.mcpToolCount} MCP tools</span>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 const VibeLoopCard = memo(function VibeLoopCard({ state }: { state: VibeLoopState | null }) {
   const activeStage = state?.stage || 'frame';
   const activeIndex = VIBE_LOOP_STAGES.findIndex(s => s.id === activeStage);
@@ -274,6 +361,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const [mcpPickerVisible, setMcpPickerVisible] = useState(false);
   const [specialistModes, setSpecialistModes] = useState<SpecialistMode[]>([]);
   const [activeSpecialistMode, setActiveSpecialistMode] = useState<SpecialistMode | null>(null);
+  const [intentInspection, setIntentInspection] = useState<IntentInspection | null>(null);
+  const [intentLoading, setIntentLoading] = useState(false);
 
   // Sprint 38 Feature 5: Retry countdown. `retryState.nextRetryMs` is the
   // wall-clock instant we should next retry. We expose the remaining seconds
@@ -338,6 +427,38 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   const [previewAttachment, setPreviewAttachment] = useState<AttachmentMeta | null>(null);
   const [attachmentError, setAttachmentError] = useState<string>('');
   const dragCounterRef = useRef(0);
+
+  useEffect(() => {
+    const prompt = input.trim();
+    if (!api?.inspectIntent || prompt.length < 8 || prompt.startsWith('/') || isLoading) {
+      setIntentInspection(null);
+      setIntentLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIntentLoading(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const inspection = await api.inspectIntent(session.id, prompt, {
+          attachmentCount: attachments.length,
+          provider: providerKey,
+          model: selectedModel,
+        });
+        if (!cancelled) setIntentInspection(inspection || null);
+      } catch (err) {
+        if (!cancelled) setIntentInspection(null);
+        console.warn('[Chat] Intent inspection failed:', err);
+      } finally {
+        if (!cancelled) setIntentLoading(false);
+      }
+    }, 600);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [input, session.id, attachments.length, providerKey, selectedModel, isLoading]);
 
   // Sprint 28: Auto-continue state removed — loop is driven by stop_reason
 
@@ -1489,6 +1610,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
             )}
           </div>
         )}
+
+        <IntentInspectorCard inspection={intentInspection} loading={intentLoading} />
 
         {/* Sprint 25: Attachment chips */}
         {attachments.length > 0 && (
