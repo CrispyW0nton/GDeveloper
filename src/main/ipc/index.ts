@@ -286,6 +286,11 @@ export const IPC_CHANNELS = {
   GUARDRAILS_SET_CONFIG: 'guardrails:set-config',
   CONTEXT_CACHE_STATS: 'context-cache:stats',
   CONTEXT_CACHE_CLEAR: 'context-cache:clear',
+  SPEC_LIST: 'spec:list',
+  SPEC_CREATE: 'spec:create',
+  SPEC_GET_ACTIVE: 'spec:get-active',
+  SPEC_SET_ACTIVE: 'spec:set-active',
+  SPEC_RUN_PROMPT: 'spec:run-prompt',
 
   // ─── Sprint 29: Orchestration Settings Persistence ───
   SETTINGS_GET_ORCHESTRATION: 'settings:get-orchestration',

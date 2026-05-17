@@ -14,6 +14,7 @@ import GitHubPanel from './components/github/GitHubPanel';
 import MCPServersPanel from './components/mcp/MCPServersPanel';
 import McpForgePanel from './components/mcp/McpForgePanel';
 import TaskLedgerPanel from './components/tasks/TaskLedgerPanel';
+import SpecsPanel from './components/specs/SpecsPanel';
 import DiffViewer from './components/diff/DiffViewer';
 import ActivityLog from './components/activity/ActivityLog';
 import SettingsPanel from './components/settings/SettingsPanel';
@@ -403,6 +404,13 @@ function AppInner() {
             actionLabel="Start Chatting"
             onAction={() => setTab(state.activeWorkspace ? 'chat' : 'workspace')}
             hint="Tasks help you track what the AI is doing and what's been completed."
+          />
+        );
+
+      case 'specs':
+        return (
+          <SpecsPanel
+            sessionId={state.currentSession?.id || 'system'}
           />
         );
 

@@ -58,6 +58,7 @@ const COMMAND_EXAMPLES: Record<string, string> = {
   'tracer': '/tracer settings import flow',
   'memento': '/memento ready for tomorrow',
   'handoff': '/handoff branch is ready for review',
+  'spec': '/spec create # Checkout flow',
 };
 
 export default function SlashCommandDropdown({

@@ -80,6 +80,14 @@ import {
   parseAgentMention,
 } from '../orchestration/agentDelegation';
 import {
+  buildSpecRunPrompt,
+  createSpec,
+  formatSpecList,
+  getActiveSpec,
+  listSpecs,
+  setActiveSpec,
+} from '../orchestration/specDriven';
+import {
   getAgentNamespaceLocks,
   heartbeatAgentLock,
   releaseAgentNamespaces,
@@ -807,6 +815,88 @@ register({
       success: true,
       message: '**Roadmap generation** is coming in Sprint 16. This will analyze the repo and generate plan.md + tasks.md.',
     };
+  },
+});
+
+register({
+  name: 'spec',
+  description: 'Create, list, activate, or run spec-driven work. Usage: /spec [list|active|use <id>|run|create <markdown>]',
+  category: 'workflow',
+  async execute(args: string, ctx: WorkspaceContext): Promise<CommandResult> {
+    const ws = requireWorkspace(ctx);
+    const trimmed = args.trim();
+    const [rawSubcommand, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+    const subcommand = (rawSubcommand || 'active').toLowerCase();
+
+    if (subcommand === 'list') {
+      return {
+        success: true,
+        message: formatSpecList(listSpecs(ws)),
+        data: { action: 'spec-list', specs: listSpecs(ws) },
+      };
+    }
+
+    if (subcommand === 'active') {
+      const spec = getActiveSpec(ws);
+      return {
+        success: true,
+        message: spec ? `**Active spec:** ${spec.title}\n\nPath: \`${spec.relativePath}\`\n\n${buildSpecRunPrompt(spec)}` : '**No active spec.** Create one with `/spec create <markdown spec>`.',
+        data: { action: 'spec-active', spec },
+      };
+    }
+
+    if (subcommand === 'use') {
+      const id = rest.join(' ').trim();
+      if (!id) return { success: false, message: 'Usage: /spec use <spec-id>' };
+      const spec = setActiveSpec(id, ws);
+      getDatabase().logActivity(ctx.sessionId, 'spec_activated', `Spec activated: ${spec.title}`, spec.relativePath, { specId: spec.id });
+      return {
+        success: true,
+        message: `**Active spec set:** ${spec.title}\n\nPath: \`${spec.relativePath}\``,
+        data: { action: 'spec-activated', spec },
+      };
+    }
+
+    if (subcommand === 'run') {
+      const spec = getActiveSpec(ws);
+      if (!spec) return { success: false, message: 'No active spec. Create one with `/spec create <markdown spec>` or activate one with `/spec use <id>`.' };
+      return {
+        success: true,
+        message: buildSpecRunPrompt(spec),
+        data: { action: 'spec-run', spec, prompt: buildSpecRunPrompt(spec) },
+      };
+    }
+
+    if (subcommand === 'create') {
+      const markdown = rest.join(' ').trim();
+      if (!markdown) return { success: false, message: 'Usage: /spec create <markdown spec>' };
+      const spec = createSpec({ workspacePath: ws, sessionId: ctx.sessionId, markdown });
+      const vibeLoop = setVibeLoopStage(ctx.sessionId, 'decompose', `Spec: ${spec.title}`);
+      getDatabase().logActivity(ctx.sessionId, 'spec_created', `Spec created: ${spec.title}`, spec.relativePath, {
+        specId: spec.id,
+        tasks: spec.tasks.map(task => task.title),
+        acceptanceCriteria: spec.acceptanceCriteria,
+      });
+      return {
+        success: true,
+        message: [
+          `**Spec created:** ${spec.title}`,
+          '',
+          `Path: \`${spec.relativePath}\``,
+          `ID: \`${spec.id}\``,
+          '',
+          spec.acceptanceCriteria.length ? '**Acceptance criteria:**' : '',
+          ...spec.acceptanceCriteria.map(item => `- ${item}`),
+          spec.tasks.length ? '**Task tree:**' : '',
+          ...spec.tasks.map((task, index) => `${index + 1}. ${task.title}`),
+          '',
+          'Loop stage moved to **Decompose** and the task tree was loaded into the todo ledger.',
+        ].filter(Boolean).join('\n'),
+        data: { action: 'spec-created', spec, vibeLoop },
+      };
+    }
+
+    return { success: false, message: 'Usage: /spec [list|active|use <id>|run|create <markdown>]' };
   },
 });
 

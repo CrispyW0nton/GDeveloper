@@ -132,6 +132,13 @@ import {
   parseScheduledAgentCadence,
   setScheduledAgentStatus,
 } from './orchestration/scheduledAgents';
+import {
+  buildSpecRunPrompt,
+  createSpec,
+  getActiveSpec,
+  listSpecs,
+  setActiveSpec,
+} from './orchestration/specDriven';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -3107,6 +3114,47 @@ function registerIPCHandlers(): void {
     const stats = clearContextCache();
     db.logActivity('system', 'context_cache_cleared', 'Context cache cleared', JSON.stringify(stats), { stats });
     return { success: true, stats };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPEC_LIST, async () => {
+    const ws = requireActiveWorkspacePath();
+    return listSpecs(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPEC_CREATE, async (_event, markdown: string, sessionId: string, title?: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const spec = createSpec({ workspacePath: ws, sessionId: sessionId || 'system', markdown: markdown || '', title });
+      db.logActivity(sessionId || 'system', 'spec_created', `Spec created: ${spec.title}`, spec.relativePath, {
+        specId: spec.id,
+        tasks: spec.tasks.map(task => task.title),
+      });
+      return { success: true, spec };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to create spec' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPEC_GET_ACTIVE, async () => {
+    const ws = requireActiveWorkspacePath();
+    return getActiveSpec(ws);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPEC_SET_ACTIVE, async (_event, specId: string) => {
+    try {
+      const ws = requireActiveWorkspacePath();
+      const spec = setActiveSpec(specId, ws);
+      db.logActivity('system', 'spec_activated', `Spec activated: ${spec.title}`, spec.relativePath, { specId: spec.id });
+      return { success: true, spec };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to activate spec' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SPEC_RUN_PROMPT, async () => {
+    const ws = requireActiveWorkspacePath();
+    const spec = getActiveSpec(ws);
+    return spec ? { success: true, spec, prompt: buildSpecRunPrompt(spec) } : { success: false, error: 'No active spec' };
   });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

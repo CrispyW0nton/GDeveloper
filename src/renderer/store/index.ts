@@ -17,7 +17,7 @@ const api = (window as any).electronAPI;
 
 export type ExecutionMode = 'plan' | 'build';
 
-export type TabId = 'chat' | 'github' | 'mcp' | 'forge' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal' | 'compare';
+export type TabId = 'chat' | 'github' | 'mcp' | 'forge' | 'specs' | 'tasks' | 'roadmap' | 'diff' | 'activity' | 'settings' | 'workspace' | 'terminal' | 'compare';
 
 // ─── Sprint 21: Rate-limit / token-budget types ───
 export type AnthropicTier = 'tier1' | 'tier2' | 'tier3' | 'tier4';

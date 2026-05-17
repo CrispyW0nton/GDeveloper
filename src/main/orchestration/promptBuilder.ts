@@ -27,6 +27,7 @@ import { collectWorkspaceDiagnostics, formatDiagnosticsForPrompt } from '../diag
 import { formatVibeLoopForPrompt, getVibeLoopState } from './vibeLoop';
 import { formatSpecialistModeForPrompt } from './specialistModes';
 import { getOrSetContextCache } from './contextCache';
+import { formatSpecForPrompt, getActiveSpec } from './specDriven';
 import simpleGit from 'simple-git';
 
 export interface PromptBuilderContext {
@@ -66,6 +67,12 @@ export async function buildEnhancedSystemPrompt(ctx: PromptBuilderContext): Prom
   // This keeps Frame/Decompose/Converse/Review/Test/Refine visible to the
   // model without requiring the user to repeat the workflow contract.
   sections.push(formatVibeLoopForPrompt(getVibeLoopState(ctx.sessionId)));
+
+  // Phase 5: active spec is the implementation oracle for spec-driven mode.
+  const activeSpecPrompt = formatSpecForPrompt(getActiveSpec(ctx.workspacePath || getActiveWorkspace()));
+  if (activeSpecPrompt) {
+    sections.push(activeSpecPrompt);
+  }
 
   // 3. Workspace context
   const wsPath = ctx.workspacePath || getActiveWorkspace();

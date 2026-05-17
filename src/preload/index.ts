@@ -136,6 +136,11 @@ const electronAPI = {
   setScheduledAgentStatus: (jobId: string, status: string) => ipcRenderer.invoke('scheduled-agent:status', jobId, status),
   deleteScheduledAgent: (jobId: string) => ipcRenderer.invoke('scheduled-agent:delete', jobId),
   getVibeLoop: (sessionId: string) => ipcRenderer.invoke('vibe-loop:get', sessionId),
+  listSpecs: () => ipcRenderer.invoke('spec:list'),
+  createSpec: (markdown: string, sessionId: string, title?: string) => ipcRenderer.invoke('spec:create', markdown, sessionId, title),
+  getActiveSpec: () => ipcRenderer.invoke('spec:get-active'),
+  setActiveSpec: (specId: string) => ipcRenderer.invoke('spec:set-active', specId),
+  getSpecRunPrompt: () => ipcRenderer.invoke('spec:run-prompt'),
 
   // ─── Sprint 13: Discovery ─────────────────────────
   scanForRepos: (rootPath: string, maxDepth?: number) => ipcRenderer.invoke('discovery:scan', rootPath, maxDepth),
