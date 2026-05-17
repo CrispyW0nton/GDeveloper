@@ -33,7 +33,7 @@ vi.mock('electron', () => ({
 }));
 
 // Import after mocks are set up
-import { runAgentLoop, AgentLoopOptions, AgentLoopResult } from '../../src/main/orchestration/agentLoop';
+import { runAgentLoop, AgentLoopOptions, TASK_PLAN_NUDGE_MESSAGE, taskPlanResultHasIncompleteTasks } from '../../src/main/orchestration/agentLoop';
 
 // ─── Helpers ───
 
@@ -301,6 +301,57 @@ describe('Agent Loop — Behavioral', () => {
     expect(result.reason).toBe('attempt_completion');
     expect(result.toolCalls).toHaveLength(3);
     expect(executeTool).toHaveBeenCalledTimes(3);
+  });
+
+  it('continues after task_plan-only turn with incomplete tasks', async () => {
+    mockStreamChat
+      .mockResolvedValueOnce(mockToolResponse('I will plan the audit', [
+        { id: 'tc-1', name: 'task_plan', input: { action: 'create', tasks: [{ content: 'Read files', status: 'in_progress' }] } },
+      ]))
+      .mockResolvedValueOnce(mockTextResponse('Plan created.'))
+      .mockResolvedValueOnce(mockToolResponse('Completing after nudge', [
+        { id: 'tc-2', name: 'attempt_completion', input: { result: 'Audit completed' } },
+      ]));
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          success: true,
+          action: 'create',
+          plan: {
+            id: 'plan-1',
+            tasks: [
+              { id: 't1', content: 'Read files', status: 'in_progress', priority: 'high' },
+              { id: 't2', content: 'Cross-check claims', status: 'pending', priority: 'high' },
+            ],
+          },
+        }),
+        isError: false,
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify({ success: true, result: 'Audit completed' }),
+        isError: false,
+      });
+
+    const persistMessage = vi.fn();
+    const result = await runAgentLoop(makeOptions({ executeTool, persistMessage }));
+
+    expect(result.reason).toBe('attempt_completion');
+    expect(result.turns).toBe(3);
+    const thirdCallMessages = mockStreamChat.mock.calls[2][2];
+    expect(thirdCallMessages.some((m: any) => m.role === 'user' && m.content === TASK_PLAN_NUDGE_MESSAGE)).toBe(true);
+    expect(persistMessage.mock.calls.some((c: any) => c[0] === 'user' && c[1] === TASK_PLAN_NUDGE_MESSAGE)).toBe(false);
+  });
+
+  it('detects incomplete task_plan results from structured JSON', () => {
+    expect(taskPlanResultHasIncompleteTasks(JSON.stringify({
+      success: true,
+      plan: { tasks: [{ status: 'done' }, { status: 'pending' }] },
+    }))).toBe(true);
+    expect(taskPlanResultHasIncompleteTasks(JSON.stringify({
+      success: true,
+      plan: { tasks: [{ status: 'done' }, { status: 'skipped' }] },
+    }))).toBe(false);
   });
 
   // 12. API error during streaming

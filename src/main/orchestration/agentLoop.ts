@@ -54,9 +54,28 @@ const MAX_TODO_NUDGES = 3;
 export const TODO_NUDGE_MESSAGE =
   'Continue executing the in_progress task from your todo list. Do not end your turn until all tasks are completed.';
 
+/** The nudge message injected when the model prematurely ends after creating/updating an incomplete task_plan. */
+export const TASK_PLAN_NUDGE_MESSAGE =
+  'Continue executing the in_progress task from your task_plan. Do not stop after creating or updating the plan; use the next tool needed to make progress, then update the plan status.';
+
 /** Returns true iff the given tool calls are non-empty and all are the `todo` tool. */
 export function onlyTodoCalled(toolCalls: Array<{ name: string }>): boolean {
   return toolCalls.length > 0 && toolCalls.every(tc => tc.name === 'todo');
+}
+
+/** Returns true iff the given tool calls are non-empty and all are the `task_plan` tool. */
+export function onlyTaskPlanCalled(toolCalls: Array<{ name: string }>): boolean {
+  return toolCalls.length > 0 && toolCalls.every(tc => tc.name === 'task_plan');
+}
+
+export function taskPlanResultHasIncompleteTasks(content: string): boolean {
+  try {
+    const parsed = JSON.parse(content.replace(/^\[Tool Result:\s*\w+\]\s*/i, '').trim());
+    const tasks = parsed?.plan?.tasks || parsed?.tasks || [];
+    return Array.isArray(tasks) && tasks.some((task: any) => task?.status === 'pending' || task?.status === 'in_progress');
+  } catch {
+    return false;
+  }
 }
 
 // ─── BUG-05: Doom-loop guard constants ───
@@ -142,6 +161,8 @@ export interface AgentLoopResult {
     | 'ask_followup_question'
     /** Sprint 27.5.1: Gave up after MAX_TODO_NUDGES consecutive end_turn following a todo-only turn */
     | 'stuck_after_todo'
+    /** Sprint 40: Gave up after repeated end_turns following an incomplete task_plan-only turn */
+    | 'stuck_after_task_plan'
     /** BUG-05: Hard-stopped because the model kept calling the same tool with identical input */
     | 'stuck_repeat';
   completionResult?: string;
@@ -169,6 +190,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // ─── Sprint 27.5.1: Todo continuation state ───
   let consecutiveTodoNudges = 0;
   let lastTurnOnlyTodo = false;
+  let consecutiveTaskPlanNudges = 0;
+  let lastTurnOnlyTaskPlan = false;
 
   // ─── BUG-05: Doom-loop tracking ───
   // A "batch" is all tool calls from one turn, hashed together with
@@ -341,6 +364,47 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         continue;
       }
 
+      if (
+        stopReason === 'end_turn' &&
+        lastTurnOnlyTaskPlan
+      ) {
+        consecutiveTaskPlanNudges++;
+
+        if (options.win && !options.win.isDestroyed()) {
+          options.win.webContents.send('agent:loop-event', {
+            event: 'task-plan-continuation-nudge',
+            turn: turns,
+            consecutiveNudges: consecutiveTaskPlanNudges,
+            maxNudges: MAX_TODO_NUDGES,
+            ephemeral: true,
+          });
+        }
+
+        if (consecutiveTaskPlanNudges >= MAX_TODO_NUDGES) {
+          if (options.win && !options.win.isDestroyed()) {
+            options.win.webContents.send('agent:loop-event', {
+              event: 'stuck-after-task-plan',
+              turn: turns,
+              consecutiveNudges: consecutiveTaskPlanNudges,
+            });
+          }
+          options.persistMessage?.('assistant', result.content || '(stuck after task_plan)');
+          return {
+            content: lastContent,
+            toolCalls: totalToolCalls,
+            turns,
+            reason: 'stuck_after_task_plan',
+          };
+        }
+
+        options.persistMessage?.('assistant', result.content);
+        currentMessages.push({ role: 'assistant', content: result.content });
+        currentMessages.push({ role: 'user', content: TASK_PLAN_NUDGE_MESSAGE });
+
+        lastTurnOnlyTaskPlan = false;
+        continue;
+      }
+
       // end_turn with no tools → inject noToolsUsed nudge (Cline pattern)
       consecutiveNoToolUse++;
 
@@ -477,11 +541,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // Reset nudge counter on any non-todo-only turn so legitimate work
     // between todo calls doesn't trip the stuck_after_todo safety.
     const wasOnlyTodo = onlyTodoCalled(toolCalls);
+    const wasOnlyTaskPlan = onlyTaskPlanCalled(toolCalls);
     if (wasOnlyTodo && !isTodoComplete(options.sessionId)) {
       lastTurnOnlyTodo = true;
     } else {
       lastTurnOnlyTodo = false;
       consecutiveTodoNudges = 0;
+    }
+    if (wasOnlyTaskPlan && toolResults.some(tr => tr.toolName === 'task_plan' && !tr.isError && taskPlanResultHasIncompleteTasks(tr.content))) {
+      lastTurnOnlyTaskPlan = true;
+    } else {
+      lastTurnOnlyTaskPlan = false;
+      consecutiveTaskPlanNudges = 0;
     }
 
     // ─── Case 3: Terminal tool used → exit ───

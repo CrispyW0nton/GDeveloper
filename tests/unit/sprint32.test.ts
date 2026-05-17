@@ -69,6 +69,12 @@ describe('Sprint 32 — ChatWorkspace ignores empty plan updates', () => {
     // Verify it does NOT use the old task_plan_update handler
     expect(chatSrc).not.toContain("data.type === 'task_plan_update'");
   });
+
+  it('filters internal tool-result messages out of the visible transcript', () => {
+    expect(chatSrc).toContain('isInternalToolResultMessage');
+    expect(chatSrc).toContain("filter((m: any) => !isInternalToolResultMessage(m.content))");
+    expect(chatSrc).toContain('const visibleMessages = messages.filter');
+  });
 });
 
 // ═══════════════════════════════════════════════════════

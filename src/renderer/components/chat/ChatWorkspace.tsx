@@ -630,19 +630,21 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
     if (api && session.id) {
       api.getChatHistory(session.id).then((history: any[]) => {
         if (history && history.length > 0) {
-          const dbMessages: Message[] = history.map((m: any) => ({
-            id: m.id,
-            role: m.role,
-            content: sanitizeContent(m.content),
-            toolCalls: m.tool_calls?.map((tc: any) => ({
-              name: tc.name,
-              description: `Called ${tc.name}`,
-              status: 'success' as const,
-              input: tc.input || undefined,
-              result: tc.result || undefined,
-            })),
-            timestamp: m.timestamp,
-          }));
+          const dbMessages: Message[] = history
+            .filter((m: any) => !isInternalToolResultMessage(m.content))
+            .map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: sanitizeContent(m.content),
+              toolCalls: m.tool_calls?.map((tc: any) => ({
+                name: tc.name,
+                description: `Called ${tc.name}`,
+                status: 'success' as const,
+                input: tc.input || undefined,
+                result: tc.result || undefined,
+              })),
+              timestamp: m.timestamp,
+            }));
           setMessages(dbMessages);
           // Sprint 38 Bug 3: no setShowSuggestions — it's derived.
         }
@@ -1284,7 +1286,8 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   }, []);
 
   // Check if there are user-visible messages (not just system)
-  const hasUserMessages = messages.some(m => m.role === 'user' || m.role === 'assistant');
+  const visibleMessages = messages.filter((m) => !isInternalToolResultMessage(m.content));
+  const hasUserMessages = visibleMessages.some(m => m.role === 'user' || m.role === 'assistant');
 
   // Sprint 38 Bug 3: Single source of truth for the suggestion cards. Show
   // only when the transcript AND composer AND attachment tray are all empty.
@@ -1292,7 +1295,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
   // stages a file, and re-shows it after /clear or Fresh Chat clears the
   // transcript (provided the composer is also empty).
   const showSuggestions =
-    messages.length === 0 && input.trim() === '' && attachments.length === 0;
+    visibleMessages.length === 0 && input.trim() === '' && attachments.length === 0;
 
   // ─── Sprint 38 Feature 1: Live composer token estimate ───
   // Total estimated tokens for the NEXT outgoing request:
@@ -1499,7 +1502,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
           <SuggestionCards onSelect={handleSuggestionSelect} />
         ) : (
           <>
-            {messages.map((msg, idx) => (
+            {visibleMessages.map((msg, idx) => (
               <div key={msg.id} className={`animate-fadeIn ${msg.role === 'user' ? 'flex justify-end' : ''}`}>
                 <div className={`max-w-[85%] ${
                   msg.role === 'user'
@@ -1551,7 +1554,7 @@ export default function ChatWorkspace({ session, repo, providerKey, executionMod
                 </div>
 
                 {/* Follow-up buttons after assistant messages */}
-                {msg.role === 'assistant' && idx === messages.length - 1 && !isLoading && (
+                {msg.role === 'assistant' && idx === visibleMessages.length - 1 && !isLoading && (
                   <FollowupButtons
                     content={msg.content}
                     hasToolCalls={!!(msg.toolCalls && msg.toolCalls.length > 0)}
@@ -1904,6 +1907,10 @@ function sanitizeContent(content: string): string {
     return '';
   }
   return cleaned;
+}
+
+function isInternalToolResultMessage(content: string): boolean {
+  return /^\s*\[Tool Result:\s*[\w-]+\]/.test(content || '');
 }
 
 /**
